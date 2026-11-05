@@ -1,0 +1,92 @@
+# Extraction rules. Edit this file, then press "Re-run extraction" in the GUI.
+# No refetch from Google is needed after a rules change.
+# Keyword matching is case-insensitive and matches whole words.
+
+# --- Department handling -------------------------------------------------
+# Address that received (or sent) the email -> department.
+# A key ending in "@" matches that local part on any domain (e.g. "sales@").
+# EDIT ME: replace the examples with the company's real aliases.
+departments:
+  "sales@": Sales
+  "inquiries@": Sales
+  "info@": Sales
+  "support@": Support
+  "billing@": Finance
+  "accounts@": Finance
+
+# Gmail label name -> department. Checked when no address matched.
+label_departments: {}
+  # "Clients/Marketing": Marketing
+
+# --- Services -------------------------------------------------------------
+# Service name -> keywords found in subject or body.
+# EDIT ME: replace with the company's real service list.
+services:
+  Web Development: [website, web development, web design, wordpress, landing page]
+  Digital Marketing: [seo, social media, ads, digital marketing, google ads]
+  Consulting: [consulting, consultation, advisory]
+
+# --- Engagement (paid or not) ---------------------------------------------
+# Any of these in subject or body marks the thread as paid work.
+paid_keywords:
+  - invoice
+  - official receipt
+  - payment received
+  - payment confirmation
+  - proof of payment
+  - remittance
+  - billing statement
+  - deposit slip
+
+# --- Status thresholds ------------------------------------------------------
+# active: paid signal within active_months. past: paid, older.
+# inquiry: never paid, last contact within lost_after_days. lost: never paid, older.
+status:
+  active_months: 12
+  lost_after_days: 90
+
+# --- Noise filtering ---------------------------------------------------------
+noise:
+  # Sender address contains any of these -> not a client.
+  sender_patterns: [noreply, no-reply, donotreply, do-not-reply, mailer-daemon, postmaster, notifications@, bounce]
+  # Subject contains any of these -> skip the message.
+  subject_patterns:
+    - "invitation:"
+    - "updated invitation"
+    - "accepted:"
+    - "declined:"
+    - "undeliverable"
+    - "delivery status notification"
+    - "automatic reply"
+    - "out of office"
+  # Gmail category labels that are never client mail.
+  labels: [CATEGORY_PROMOTIONS, CATEGORY_SOCIAL, CATEGORY_FORUMS, SPAM]
+
+# --- Website / form inquiry notifications ------------------------------------
+# Emails from these senders are parsed as "Label: value" forms, even though
+# they look like noise. Forms from noise or internal senders are parsed too.
+form_senders: [wordpress@, forms-noreply@google.com, no-reply@wix, noreply@jotform, formspree]
+# Form label (lowercase) -> field.
+form_fields:
+  name: [name, full name, your name, contact name, first name]
+  email: [email, e-mail, email address, your email]
+  phone: [phone, phone number, mobile, mobile number, contact number, telephone]
+  company: [company, company name, organization, business, business name]
+  message: [message, inquiry, comments, details, your message]
+
+# --- Google Sheets column headers (lowercase) -> field ------------------------
+sheet_headers:
+  name: [name, client, client name, contact, contact name, full name]
+  email: [email, e-mail, email address]
+  phone: [phone, mobile, contact number, phone number]
+  company: [company, organization, business]
+  status: [status, client status]
+  services: [service, services, service availed]
+  department: [department, dept, handled by]
+  paid: [paid, engagement, payment status, billing status]
+# Sheet "status" cell text -> directory status.
+sheet_status_values:
+  active: [active, ongoing, current, retained]
+  past: [past, completed, closed, done, former]
+  inquiry: [inquiry, lead, prospect, pending, new]
+  lost: [lost, declined, cancelled, no response]

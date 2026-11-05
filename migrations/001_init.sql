@@ -51,7 +51,9 @@ CREATE TABLE candidates (
     fields       jsonb       NOT NULL DEFAULT '{}',
     evidence     jsonb       NOT NULL DEFAULT '[]',
     review_state text        NOT NULL DEFAULT 'pending'
-                 CHECK (review_state IN ('pending', 'approved', 'rejected')),
+                 CHECK (review_state IN ('pending', 'approved', 'rejected', 'merged')),
+    -- Set when review_state = 'merged': this record is folded into another candidate.
+    merged_into  bigint      REFERENCES candidates (id) ON DELETE SET NULL,
     client_id    bigint      REFERENCES clients (id) ON DELETE SET NULL,
     updated_at   timestamptz NOT NULL DEFAULT now()
 );

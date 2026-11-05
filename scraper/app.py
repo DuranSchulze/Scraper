@@ -1,0 +1,236 @@
+"""Local review GUI. Run: uv run python -m scraper.app  (binds 127.0.0.1 only)."""
+
+import threading
+from collections import deque
+from datetime import datetime
+from getpass import getuser
+from typing import Literal
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from psycopg.types.json import Jsonb
+from pydantic import BaseModel
+
+from . import db, pipeline
+from .config import RULES_PATH, ROOT, env
+
+app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None)
+# Blocks DNS-rebinding: only requests addressed to localhost are served.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+
+@app.exception_handler(RuntimeError)
+async def config_error(request: Request, exc: RuntimeError):
+    # Our RuntimeErrors are setup problems (missing .env values); show them in the GUI.
+    return JSONResponse({"detail": str(exc)}, status_code=500)
+
+
+@app.middleware("http")
+async def require_gui_header(request: Request, call_next):
+    # Custom header forces a CORS preflight, so other websites cannot POST here.
+    if request.method != "GET" and request.headers.get("x-local-gui") != "1":
+        return JSONResponse({"detail": "missing X-Local-GUI header"}, status_code=403)
+    return await call_next(request)
+
+
+# --- Background job (one at a time) ---
+
+JOB = {"running": False, "name": "", "error": None, "log": deque(maxlen=500)}
+JOB_LOCK = threading.Lock()
+
+
+def log(msg: str) -> None:
+    JOB["log"].append(f"{datetime.now():%H:%M:%S} {msg}")
+
+
+def start_job(name: str, fn) -> None:
+    with JOB_LOCK:
+        if JOB["running"]:
+            raise HTTPException(409, f"'{JOB['name']}' is still running")
+        JOB.update(running=True, name=name, error=None)
+        JOB["log"].clear()
+
+    def run():
+        try:
+            fn()
+            log(f"{name}: finished")
+        except Exception as e:
+            JOB["error"] = repr(e)
+            log(f"ERROR: {e!r}")
+        finally:
+            JOB["running"] = False
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+class ScrapeIn(BaseModel):
+    sources: list[Literal["gmail", "contacts", "sheets"]]
+    mailboxes: list[str] = []
+    since: str = ""
+    full: bool = False
+
+
+@app.post("/api/scrape")
+def scrape(body: ScrapeIn):
+    since = body.since or env("SCRAPE_SINCE", "2018-01-01")
+    datetime.strptime(since, "%Y-%m-%d")  # validate before starting
+    mailboxes = [m.strip().lower() for m in body.mailboxes if m.strip()]
+    start_job("scrape", lambda: pipeline.run_scrape(body.sources, mailboxes, since, body.full, log))
+    return {"started": True}
+
+
+@app.post("/api/extract")
+def extract():
+    start_job("extract", lambda: pipeline.run_extract(log))
+    return {"started": True}
+
+
+@app.get("/api/status")
+def status():
+    with db.connect() as conn:
+        counts = {r["review_state"]: r["n"] for r in conn.execute(
+            "SELECT review_state, count(*) AS n FROM candidates GROUP BY review_state")}
+        raw = {r["source"]: r["n"] for r in conn.execute(
+            "SELECT source, count(*) AS n FROM raw_items GROUP BY source")}
+    return {"running": JOB["running"], "job": JOB["name"], "error": JOB["error"],
+            "log": list(JOB["log"]), "candidates": counts, "raw_items": raw}
+
+
+# --- Review ---
+
+@app.get("/api/candidates")
+def list_candidates(state: str = "pending", q: str = "", status: str = "", department: str = ""):
+    sql = ("SELECT id, email_key, review_state, fields->'name'->>'value' AS name,"
+           " fields->'status'->>'value' AS status, fields->'department'->>'value' AS department,"
+           " fields->'engagement_paid'->>'value' AS paid, fields->'last_contact'->>'value' AS last_contact"
+           " FROM candidates WHERE review_state = %s")
+    args = [state]
+    if q:
+        sql += " AND (email_key ILIKE %s OR fields->'name'->>'value' ILIKE %s)"
+        args += [f"%{q}%"] * 2
+    if status:
+        sql += " AND fields->'status'->>'value' = %s"
+        args.append(status)
+    if department:
+        sql += " AND fields->'department'->>'value' = %s"
+        args.append(department)
+    sql += " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST LIMIT 500"
+    with db.connect() as conn:
+        return conn.execute(sql, args).fetchall()
+
+
+def _get(conn, cid: int) -> dict:
+    row = conn.execute("SELECT * FROM candidates WHERE id = %s", (cid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "candidate not found")
+    return row
+
+
+@app.get("/api/candidates/{cid}")
+def get_candidate(cid: int):
+    with db.connect() as conn:
+        return _get(conn, cid)
+
+
+class ClientIn(BaseModel):
+    name: str | None = None
+    emails: list[str] = []
+    phones: list[str] = []
+    company: str | None = None
+    status: Literal["inquiry", "active", "past", "lost"]
+    services: list[str] = []
+    department: str | None = None
+    engagement_paid: bool = False
+    first_contact: datetime | None = None
+    last_contact: datetime | None = None
+    notes: str | None = None
+
+
+@app.post("/api/candidates/{cid}/approve")
+def approve(cid: int, c: ClientIn):
+    vals = (c.name, c.emails, c.phones, c.company, c.status, c.services, c.department,
+            c.engagement_paid, c.first_contact, c.last_contact, c.notes, getuser())
+    with db.connect() as conn:
+        cand = _get(conn, cid)
+        if cand["client_id"]:
+            conn.execute(
+                "UPDATE clients SET name=%s, emails=%s, phones=%s, company=%s, status=%s, services=%s,"
+                " department=%s, engagement_paid=%s, first_contact=%s, last_contact=%s, notes=%s,"
+                " approved_by=%s, approved_at=now(), updated_at=now() WHERE id=%s", (*vals, cand["client_id"]))
+            client_id = cand["client_id"]
+        else:
+            client_id = conn.execute(
+                "INSERT INTO clients (name, emails, phones, company, status, services, department,"
+                " engagement_paid, first_contact, last_contact, notes, approved_by, approved_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now()) RETURNING id", vals).fetchone()["id"]
+        conn.execute("UPDATE candidates SET review_state='approved', client_id=%s, updated_at=now()"
+                     " WHERE id=%s", (client_id, cid))
+    return {"client_id": client_id}
+
+
+@app.post("/api/candidates/{cid}/reject")
+def reject(cid: int):
+    with db.connect() as conn:
+        _get(conn, cid)
+        conn.execute("UPDATE candidates SET review_state='rejected', updated_at=now() WHERE id=%s", (cid,))
+    return {"ok": True}
+
+
+@app.post("/api/candidates/{cid}/reopen")
+def reopen(cid: int):
+    with db.connect() as conn:
+        _get(conn, cid)
+        conn.execute("UPDATE candidates SET review_state='pending', merged_into=NULL, updated_at=now()"
+                     " WHERE id=%s", (cid,))
+    return {"ok": True}
+
+
+class MergeIn(BaseModel):
+    into_id: int
+
+
+@app.post("/api/candidates/{cid}/merge")
+def merge(cid: int, m: MergeIn):
+    """Fold candidate cid into into_id. The next extraction recomputes the target from both."""
+    if cid == m.into_id:
+        raise HTTPException(400, "cannot merge a record into itself")
+    with db.connect() as conn:
+        src, dst = _get(conn, cid), _get(conn, m.into_id)
+        if dst["review_state"] == "merged":
+            raise HTTPException(400, "target is itself merged; pick the record it was merged into")
+        fields = dst["fields"]
+        for k in ("emails", "phones", "services"):  # immediate union so the GUI shows it now
+            vals = set((fields.get(k) or {}).get("value", [])) | set((src["fields"].get(k) or {}).get("value", []))
+            fields[k] = {"value": sorted(vals), "source": "merged", "confidence": 1.0}
+        conn.execute("UPDATE candidates SET fields=%s, evidence=%s, updated_at=now() WHERE id=%s",
+                     (Jsonb(fields), Jsonb(dst["evidence"] + src["evidence"]), m.into_id))
+        conn.execute("UPDATE candidates SET review_state='merged', merged_into=%s, updated_at=now()"
+                     " WHERE id=%s", (m.into_id, cid))
+    return {"ok": True}
+
+
+@app.get("/api/raw/{item_id}")
+def raw_item(item_id: int):
+    """Full source item, for checking evidence."""
+    with db.connect() as conn:
+        row = conn.execute("SELECT id, source, mailbox, source_id, payload FROM raw_items WHERE id=%s",
+                           (item_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "raw item not found")
+    return row
+
+
+@app.get("/api/rules")
+def rules():
+    return {"path": str(RULES_PATH), "text": RULES_PATH.read_text()}
+
+
+@app.get("/")
+def index():
+    return FileResponse(ROOT / "scraper" / "static" / "index.html")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=int(env("GUI_PORT", "8765")))
