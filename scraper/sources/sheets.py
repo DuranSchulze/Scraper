@@ -21,12 +21,17 @@ def rows_to_records(rows: list[list[str]]) -> list[tuple[int, dict]]:
 
 
 def fetch_sheets(conn, sheet_ids: list[str], log) -> int:
+    from .. import pipeline
+
     sh = service("sheets", env("GOOGLE_ADMIN_EMAIL"))
     n = 0
     for sid in sheet_ids:
         meta = execute(sh.spreadsheets().get(
             spreadsheetId=sid, fields="properties.title,sheets.properties.title"))
         # Row numbers shift when rows are inserted, so replace the whole sheet each run.
+        keys = {r["key"] for r in conn.execute(
+            "SELECT s.key FROM signals s JOIN raw_items r ON r.id=s.raw_item_id"
+            " WHERE r.source='sheets' AND starts_with(r.source_id, %s)", (f"{sid}:",))}
         conn.execute("DELETE FROM raw_items WHERE source = 'sheets' AND starts_with(source_id, %s)", (f"{sid}:",))
         for tab in (s["properties"]["title"] for s in meta["sheets"]):
             rng = "'" + tab.replace("'", "''") + "'"
@@ -36,6 +41,7 @@ def fetch_sheets(conn, sheet_ids: list[str], log) -> int:
                     "sheet": meta["properties"]["title"], "tab": tab, "row": row_no, "record": record})
                 n += 1
         conn.commit()
+        pipeline.run_extract(log, keys=keys)
         log(f"sheet {meta['properties']['title']}: done")
     log(f"sheets: {n} rows")
     return n
