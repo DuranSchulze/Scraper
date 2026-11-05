@@ -4,39 +4,56 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Workspace Scraper</title>
+<link rel="icon" href="data:,">
 <style>
-  :root { --bg:#f7f7f5; --panel:#fff; --line:#ddd; --text:#1d1d1b; --muted:#6b6b66; --accent:#2f5d9e; --ok:#2e7d4f; --bad:#b3261e; }
+  :root { --bg:#f7f7f5; --panel:#fff; --line:#ddd; --text:#1d1d1b; --muted:#6b6b66; --accent:#2f5d9e; --ok:#2e7d4f; --bad:#b3261e; --warn-bg:#fff4e0; --warn-line:#e0a640; }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
   header { padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }
+  header > * { min-width:0; max-width:100%; }
   h1 { font-size:16px; margin:0 0 6px; }
   h2 { font-size:14px; margin:0 0 8px; }
-  fieldset { border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin:0; }
+  h3 { font-size:13px; margin:14px 0 6px; }
+  fieldset { border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin:0; min-width:0; }
   label { display:block; font-size:12px; color:var(--muted); margin-top:6px; }
   label.inline { display:inline-flex; gap:4px; align-items:center; color:var(--text); font-size:13px; margin-right:10px; }
-  input[type=text], input[type=date], input:not([type]), select, textarea { width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:4px; font:inherit; background:#fff; color:inherit; }
-  button { padding:6px 12px; border:1px solid var(--line); border-radius:4px; background:#fff; cursor:pointer; font:inherit; }
+  input[type=text], input[type=date], input[type=number], input:not([type]), select, textarea { width:100%; padding:5px 7px; border:1px solid var(--line); border-radius:4px; font:inherit; background:#fff; color:inherit; }
+  button { padding:6px 12px; border:1px solid var(--line); border-radius:4px; background:#fff; cursor:pointer; font:inherit; color:inherit; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.ok { background:var(--ok); border-color:var(--ok); color:#fff; }
   button.bad { color:var(--bad); }
   button:disabled { opacity:.5; cursor:default; }
+  button:focus-visible, input:focus-visible, select:focus-visible, tr:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
   #log { width:420px; max-width:100%; height:110px; overflow:auto; background:#1d1d1b; color:#e8e8e3; font:12px/1.4 ui-monospace, monospace; padding:6px 8px; border-radius:4px; white-space:pre-wrap; margin:0; }
+  .publish { display:flex; flex-direction:column; gap:6px; }
+  .publish p { margin:0; font-size:12px; }
   main { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; padding:12px 16px; }
   @media (max-width: 900px) { main { grid-template-columns:1fr; } }
   section { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px; min-width:0; }
   .filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
   .filters > * { flex:1 1 120px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; }
   tbody tr { cursor:pointer; }
   tbody tr:hover, tbody tr.sel { background:#eef3fa; }
   .muted { color:var(--muted); }
   .conf { font-size:11px; color:var(--muted); }
+  .badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; border:1px solid var(--line); white-space:nowrap; }
+  .st-inquiry { background:#f1f1ee; }
+  .st-quoted { background:#e8f0fb; border-color:#9db8e0; }
+  .st-invoiced { background:#fdf3dc; border-color:#e0bf6e; }
+  .st-paid { background:#e3f3e8; border-color:#83c19a; }
+  .warn { background:var(--warn-bg); border:1px solid var(--warn-line); border-radius:6px; padding:8px 10px; margin:10px 0; font-size:13px; }
+  .warn ul { margin:4px 0 0; padding-left:18px; }
+  .checks { color:#8a5a00; font-weight:600; }
   .ev { border-top:1px solid var(--line); padding:6px 0; font-size:12px; }
-  .ev pre { white-space:pre-wrap; margin:4px 0 0; font:inherit; }
+  .ev pre { white-space:pre-wrap; margin:4px 0 0; font:inherit; overflow-wrap:anywhere; }
   .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  @media (max-width: 480px) { .row2 { grid-template-columns:1fr; } }
   .actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:center; }
   #tablewrap { max-height:70vh; overflow:auto; }
+  /* Narrow screens: the table scrolls sideways inside its box instead of breaking words. */
+  @media (max-width: 600px) { #tablewrap table { min-width:600px; } #tablewrap th, #tablewrap td { overflow-wrap:normal; } }
   dialog { max-width:800px; width:90vw; }
   dialog pre { white-space:pre-wrap; max-height:60vh; overflow:auto; font-size:12px; }
 </style>
@@ -46,6 +63,7 @@
   <div>
     <h1>Workspace Scraper</h1>
     <div id="counts" class="muted">loading…</div>
+    <div id="failed" class="checks" hidden></div>
   </div>
   <fieldset>
     <legend>Scrape</legend>
@@ -60,13 +78,18 @@
     </div>
     <div class="actions">
       <button class="primary" id="runScrape">Run scrape</button>
-      <button id="runExtract">Re-run extraction</button>
+      <button id="runExtract" title="Re-reads every stored item with the current rules.yaml">Re-run extraction</button>
       <button id="showRules">View rules</button>
     </div>
   </fieldset>
   <div>
     <h2 id="jobTitle">Log</h2>
     <pre id="log" aria-live="polite"></pre>
+  </div>
+  <div class="publish">
+    <h2>Official table</h2>
+    <p class="muted">Approved records stay in staging until published.</p>
+    <button class="ok" id="publish" disabled>Publish 0 approved</button>
   </div>
 </header>
 
@@ -75,9 +98,12 @@
     <div class="filters">
       <select id="fState" aria-label="Review state">
         <option value="pending">Pending review</option>
-        <option value="approved">Approved</option>
+        <option value="approved">Approved (staging)</option>
         <option value="rejected">Rejected</option>
         <option value="merged">Merged</option>
+      </select>
+      <select id="fStage" aria-label="Stage">
+        <option value="">Any stage</option><option>inquiry</option><option>quoted</option><option>invoiced</option><option>paid</option>
       </select>
       <select id="fStatus" aria-label="Status">
         <option value="">Any status</option><option>inquiry</option><option>active</option><option>past</option><option>lost</option>
@@ -87,7 +113,7 @@
     </div>
     <div id="tablewrap">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Email / key</th><th>Status</th><th>Dept</th><th>Paid</th><th>Last contact</th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Email / key</th><th>Stage</th><th>Status</th><th>Paid</th><th>Checks</th><th>Last contact</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -102,6 +128,8 @@
 
 <template id="detailTpl">
   <h2></h2>
+  <p class="muted" id="d_pub"></p>
+  <div class="warn" id="d_warn" role="alert" hidden><strong>Check before approving</strong><ul></ul></div>
   <form id="clientForm">
     <label for="d_name">Name</label><input id="d_name" name="name">
     <div class="row2">
@@ -113,22 +141,27 @@
       <div><label for="d_department">Department handling</label><input id="d_department" name="department"></div>
     </div>
     <div class="row2">
+      <div><label for="d_stage">Stage</label>
+        <select id="d_stage" name="stage"><option>inquiry</option><option>quoted</option><option>invoiced</option><option>paid</option></select></div>
       <div><label for="d_status">Status</label>
         <select id="d_status" name="status"><option>inquiry</option><option>active</option><option>past</option><option>lost</option></select></div>
-      <div><label class="inline" style="margin-top:24px"><input id="d_paid" type="checkbox" name="engagement_paid"> Engagement paid</label></div>
     </div>
+    <label class="inline" style="margin-top:8px"><input id="d_paid" type="checkbox" name="engagement_paid"> Engagement paid</label>
     <label for="d_services">Services (comma list)</label><input id="d_services" name="services">
     <label for="d_notes">Notes</label><textarea id="d_notes" name="notes" rows="2"></textarea>
+    <h3>Amounts and stage dates</h3>
+    <div id="d_amounts"></div>
+    <p class="conf" id="d_dates"></p>
     <p class="conf" id="d_conf"></p>
     <div class="actions">
-      <button type="submit" class="ok">Approve</button>
+      <button type="submit" class="ok">Approve (staging)</button>
       <button type="button" class="bad" id="d_reject">Reject</button>
       <button type="button" id="d_reopen">Back to pending</button>
       <input id="d_mergeId" type="number" min="1" placeholder="Merge into ID" aria-label="Merge into candidate ID" style="width:130px">
       <button type="button" id="d_merge">Merge</button>
     </div>
   </form>
-  <h2 style="margin-top:16px">Evidence</h2>
+  <h3>Evidence</h3>
   <div id="d_evidence"></div>
 </template>
 
@@ -136,6 +169,12 @@
 const $ = (s) => document.querySelector(s);
 const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
 const list = (s) => s.split(',').map(x => x.trim()).filter(Boolean);
+const STAGES = { inquiry: 'Inquiry', quoted: 'Quoted', invoiced: 'Invoiced', paid: 'Paid' };
+const EVIDENCE = { inquiry: 'Inquiry', quoted: 'Quote / pricing sent', invoiced: 'Invoice sent', payment_claim: 'Client payment message',
+  payment_screenshot: 'Client image', payment_confirmed: 'Payment confirmed' };
+const EV_CLASS = { inquiry: 'inquiry', quoted: 'quoted', invoiced: 'invoiced', payment_claim: 'paid', payment_screenshot: 'paid', payment_confirmed: 'paid' };
+const badge = (stage, labels = STAGES) => el('span', labels[stage] || stage, 'badge st-' + (EV_CLASS[stage] || stage));
+const money = (a) => `${a.currency} ${Number(a.amount).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Local-GUI': '1' } });
@@ -154,48 +193,82 @@ async function refresh() {
     $('#counts').textContent =
       `Raw: gmail ${raw.gmail || 0}, contacts ${raw.contacts || 0}, sheets ${raw.sheets || 0} · ` +
       `Pending ${c.pending || 0} · Approved ${c.approved || 0} · Rejected ${c.rejected || 0} · Merged ${c.merged || 0}`;
-    $('#jobTitle').textContent = s.running ? `Running: ${s.job}…` : (s.error ? `Last job failed` : 'Log');
+    $('#failed').hidden = !s.extract_failed;
+    $('#failed').textContent = `${s.extract_failed} item(s) failed extraction and will be retried on the next run.`;
+    $('#publish').textContent = `Publish ${s.ready_to_publish} approved`;
+    $('#publish').disabled = !s.ready_to_publish;
+    $('#jobTitle').textContent = s.running ? `Running: ${s.job}…` : (s.error ? 'Last job failed' : 'Log');
     $('#log').textContent = s.log.join('\n');
     $('#log').scrollTop = $('#log').scrollHeight;
     $('#runScrape').disabled = $('#runExtract').disabled = s.running;
-    if (wasRunning && !s.running) loadRows();
+    // Records appear while a scrape runs, so reload the list on every poll during a job.
+    if (s.running || wasRunning) loadRows();
     wasRunning = s.running;
   } catch (e) { $('#counts').textContent = 'Error: ' + e.message; }
 }
-async function loop() { await refresh(); setTimeout(loop, wasRunning ? 1500 : 5000); }
+async function loop() { await refresh(); setTimeout(loop, wasRunning ? 2000 : 5000); }
 
 async function loadRows() {
-  const p = new URLSearchParams({ state: $('#fState').value, status: $('#fStatus').value, department: $('#fDept').value.trim(), q: $('#fQ').value.trim() });
+  const p = new URLSearchParams({ state: $('#fState').value, stage: $('#fStage').value, status: $('#fStatus').value,
+    department: $('#fDept').value.trim(), q: $('#fQ').value.trim() });
   const rows = await api('/api/candidates?' + p);
   const tb = $('#rows'); tb.replaceChildren();
   for (const r of rows) {
     const tr = el('tr'); tr.tabIndex = 0;
     if (r.id === selectedId) tr.classList.add('sel');
-    for (const v of [r.id, r.name || '—', r.email_key, r.status, r.department || '—', r.paid === 'true' ? 'yes' : 'no', (r.last_contact || '').slice(0, 10)]) tr.append(el('td', v));
+    tr.append(el('td', r.id), el('td', r.name || '—'), el('td', r.email_key));
+    const st = el('td'); st.append(badge(r.stage)); tr.append(st);
+    tr.append(el('td', r.status || '—'), el('td', r.paid ? 'yes' : 'no'),
+      el('td', r.needs_check ? `⚠ ${r.needs_check}` : '', r.needs_check ? 'checks' : ''),
+      el('td', (r.last_contact || '').slice(0, 10)));
     const open = () => { document.querySelectorAll('tr.sel').forEach(x => x.classList.remove('sel')); tr.classList.add('sel'); showDetail(r.id); };
     tr.onclick = open; tr.onkeydown = (e) => { if (e.key === 'Enter') open(); };
     tb.append(tr);
   }
-  if (!rows.length) { const tr = el('tr'); const td = el('td', 'No records.', 'muted'); td.colSpan = 7; tr.append(td); tb.append(tr); }
+  if (!rows.length) { const tr = el('tr'); const td = el('td', 'No records.', 'muted'); td.colSpan = 8; tr.append(td); tb.append(tr); }
 }
 
 async function showDetail(id) {
   selectedId = id;
   const c = await api('/api/candidates/' + id);
-  const f = c.fields, v = (k) => (f[k] && f[k].value);
+  const f = c.fields, fv = (k) => (f[k] && f[k].value);
+  // The reviewer's saved edits win over freshly extracted values.
+  const r = c.reviewed, v = (k) => (r && r[k] !== undefined ? r[k] : fv(k));
   const d = $('#detail'); d.replaceChildren($('#detailTpl').content.cloneNode(true));
-  d.querySelector('h2').textContent = `#${c.id} · ${c.review_state}` + (c.client_id ? ` · client ${c.client_id}` : '') + (c.merged_into ? ` · merged into ${c.merged_into}` : '');
+  d.querySelector('h2').textContent = `#${c.id} · ${c.review_state}` + (c.merged_into ? ` · merged into ${c.merged_into}` : '');
+  $('#d_pub').textContent = c.published_at ? `In official table (client ${c.client_id}), published ${c.published_at.slice(0, 16).replace('T', ' ')}`
+    : (c.reviewed_at ? `Approved in staging ${c.reviewed_at.slice(0, 16).replace('T', ' ')}, not yet published` : 'Not in official table');
+
+  const checks = fv('needs_check') || [];
+  if (checks.length) { $('#d_warn').hidden = false; for (const t of checks) $('#d_warn ul').append(el('li', t)); }
+
   $('#d_name').value = v('name') || '';
   $('#d_emails').value = (v('emails') || []).join(', ');
   $('#d_phones').value = (v('phones') || []).join(', ');
   $('#d_company').value = v('company') || '';
   $('#d_department').value = v('department') || '';
+  $('#d_stage').value = v('stage') || 'inquiry';
   $('#d_status').value = v('status') || 'inquiry';
   $('#d_paid').checked = !!v('engagement_paid');
   $('#d_services').value = (v('services') || []).join(', ');
-  $('#d_conf').textContent = 'Found from: ' + ['name', 'company', 'status', 'department']
+  $('#d_notes').value = (r && r.notes) || '';
+
+  const amounts = v('amounts') || [];
+  const box = $('#d_amounts');
+  if (amounts.length) {
+    const t = el('table'); const head = el('tr'); ['Stage', 'Amount', 'Date'].forEach(h => head.append(el('th', h)));
+    t.append(head);
+    for (const a of amounts) {
+      const tr = el('tr'); const s = el('td'); s.append(badge(a.stage));
+      tr.append(s, el('td', money(a)), el('td', (a.date || '').slice(0, 10) || 'undated')); t.append(tr);
+    }
+    box.append(t);
+  } else box.append(el('p', 'No quoted or invoiced amount found.', 'muted'));
+  const dates = fv('stage_dates') || {};
+  $('#d_dates').textContent = Object.keys(STAGES).filter(k => dates[k]).map(k => `${STAGES[k]}: ${dates[k].slice(0, 10)}`).join(' · ');
+  $('#d_conf').textContent = 'Found from: ' + ['name', 'company', 'stage', 'status', 'department']
     .filter(k => f[k]).map(k => `${k} (${f[k].source}, ${Math.round(f[k].confidence * 100)}%)`).join(' · ') +
-    (v('sources') ? ' · sources: ' + v('sources').join(', ') : '');
+    (fv('sources') ? ' · sources: ' + fv('sources').join(', ') : '');
 
   $('#clientForm').onsubmit = async (e) => {
     e.preventDefault();
@@ -203,43 +276,51 @@ async function showDetail(id) {
       await post(`/api/candidates/${id}/approve`, {
         name: $('#d_name').value.trim() || null, emails: list($('#d_emails').value), phones: list($('#d_phones').value),
         company: $('#d_company').value.trim() || null, department: $('#d_department').value.trim() || null,
-        status: $('#d_status').value, engagement_paid: $('#d_paid').checked, services: list($('#d_services').value),
-        notes: $('#d_notes').value.trim() || null,
+        stage: $('#d_stage').value, status: $('#d_status').value, engagement_paid: $('#d_paid').checked,
+        services: list($('#d_services').value), notes: $('#d_notes').value.trim() || null, amounts,
         first_contact: v('first_contact') || null, last_contact: v('last_contact') || null,
       });
-      done();
+      done('Approved. It stays in staging until you publish.');
     } catch (err) { alert('Approve failed: ' + err.message); }
   };
-  $('#d_reject').onclick = () => post(`/api/candidates/${id}/reject`).then(done).catch(err => alert(err.message));
-  $('#d_reopen').onclick = () => post(`/api/candidates/${id}/reopen`).then(done).catch(err => alert(err.message));
+  $('#d_reject').onclick = () => post(`/api/candidates/${id}/reject`).then(() => done('Rejected.')).catch(err => alert(err.message));
+  $('#d_reopen').onclick = () => post(`/api/candidates/${id}/reopen`).then(() => done('Moved back to pending.')).catch(err => alert(err.message));
   $('#d_merge').onclick = () => {
     const into = parseInt($('#d_mergeId').value, 10);
     if (!into) return alert('Enter the ID of the record to merge into.');
-    post(`/api/candidates/${id}/merge`, { into_id: into }).then(done).catch(err => alert(err.message));
+    post(`/api/candidates/${id}/merge`, { into_id: into }).then(() => done('Merged.')).catch(err => alert(err.message));
   };
 
   const ev = $('#d_evidence');
   for (const e of c.evidence) {
-    const box = el('div', null, 'ev');
-    const head = el('div', `${(e.date || '').slice(0, 10) || 'undated'} · ${e.source} · ${e.direction}` +
-      (e.paid ? ' · PAID signal' : '') + (e.services && e.services.length ? ' · ' + e.services.join(', ') : ''), 'muted');
+    const item = el('div', null, 'ev');
+    const head = el('div', null, 'muted');
+    if (e.stage) { head.append(badge(e.stage, EVIDENCE), ' '); }
+    head.append(`${(e.date || '').slice(0, 10) || 'undated'} · ${e.source} · ${e.direction === 'out' ? 'sent by staff' : 'received'}` +
+      ((e.amounts || []).length ? ' · ' + e.amounts.map(money).join(', ') : '') +
+      ((e.services || []).length ? ' · ' + e.services.join(', ') : ''));
     const btn = el('button', 'Open source'); btn.type = 'button'; btn.style.marginLeft = '8px';
     btn.onclick = async () => {
-      const r = await api('/api/raw/' + e.raw_item_id);
-      $('#dlgTitle').textContent = `${r.source} · ${r.mailbox || ''} · ${r.source_id}`;
-      $('#dlgBody').textContent = r.source === 'gmail'
-        ? Object.entries(r.payload.headers).map(([k, v]) => `${k}: ${v}`).join('\n') + '\n\n' + r.payload.body
-        : JSON.stringify(r.payload, null, 2);
+      const raw = await api('/api/raw/' + e.raw_item_id);
+      $('#dlgTitle').textContent = `${raw.source} · ${raw.mailbox || ''} · ${raw.source_id}`;
+      const p = raw.payload;
+      $('#dlgBody').textContent = raw.source === 'gmail'
+        ? Object.entries(p.headers).map(([k, val]) => `${k}: ${val}`).join('\n') +
+          ((p.attachments || []).length ? '\nattachments: ' + p.attachments.map(a => a.filename).join(', ') : '') +
+          '\n\n' + p.body + Object.entries(p.attachment_text || {}).map(([n, t]) => `\n\n--- ${n} ---\n${t}`).join('')
+        : JSON.stringify(p, null, 2);
       $('#dlg').showModal();
     };
     head.append(btn);
-    box.append(head, el('pre', e.snippet));
-    ev.append(box);
+    item.append(head);
+    if ((e.reasons || []).length) item.append(el('div', 'Why: ' + e.reasons.join('; '), 'conf'));
+    item.append(el('pre', e.snippet));
+    ev.append(item);
   }
   if (!c.evidence.length) ev.append(el('p', 'No evidence stored.', 'muted'));
 }
 
-function done() { $('#detail').replaceChildren(el('p', 'Saved. Select the next record.', 'muted')); selectedId = null; loadRows(); refresh(); }
+function done(msg) { $('#detail').replaceChildren(el('p', msg + ' Select the next record.', 'muted')); selectedId = null; loadRows(); refresh(); }
 
 $('#runScrape').onclick = () => {
   const sources = [...document.querySelectorAll('input[name=src]:checked')].map(x => x.value);
@@ -247,7 +328,19 @@ $('#runScrape').onclick = () => {
   post('/api/scrape', { sources, mailboxes: list($('#mailboxes').value), since: $('#since').value, full: $('#full').checked })
     .then(() => { wasRunning = true; refresh(); }).catch(err => alert(err.message));
 };
-$('#runExtract').onclick = () => post('/api/extract').then(() => { wasRunning = true; refresh(); }).catch(err => alert(err.message));
+$('#runExtract').onclick = () => {
+  if (!confirm('Re-read every stored item with the current rules? Pending records are rebuilt; approved and rejected ones are kept.')) return;
+  post('/api/extract', { full: true }).then(() => { wasRunning = true; refresh(); }).catch(err => alert(err.message));
+};
+$('#publish').onclick = async () => {
+  const n = $('#publish').textContent.match(/\d+/)[0];
+  if (!confirm(`Copy ${n} approved record(s) from staging to the official clients table?`)) return;
+  try {
+    const r = await post('/api/publish');
+    alert(`Published ${r.published}: ${r.inserted} new, ${r.updated} updated.`);
+    refresh(); loadRows();
+  } catch (err) { alert('Publish failed: ' + err.message); }
+};
 $('#showRules').onclick = async () => {
   const r = await api('/api/rules');
   $('#dlgTitle').textContent = r.path + ' (edit the file, then Re-run extraction)';
@@ -255,7 +348,7 @@ $('#showRules').onclick = async () => {
 };
 $('#dlgClose').onclick = () => $('#dlg').close();
 let qTimer;
-for (const id of ['#fState', '#fStatus']) $(id).onchange = loadRows;
+for (const id of ['#fState', '#fStage', '#fStatus']) $(id).onchange = loadRows;
 for (const id of ['#fDept', '#fQ']) $(id).oninput = () => { clearTimeout(qTimer); qTimer = setTimeout(loadRows, 300); };
 
 loop(); loadRows().catch(e => $('#counts').textContent = 'Error: ' + e.message);

@@ -35,15 +35,27 @@ uv run python -m scraper.app
 
 Open http://127.0.0.1:8765.
 
-1. Pick sources and mailboxes (blank = every user), then **Run scrape**. Extraction runs after it.
-2. Review each pending record: fix fields, check evidence (**Open source** shows the original email or row),
-   then **Approve**, **Reject**, or **Merge** into another record's ID.
-3. After editing `rules.yaml`, press **Re-run extraction**. No refetch from Google is needed.
+1. Pick sources and mailboxes (blank = every user), then **Run scrape**. Records appear while it runs:
+   extraction runs after each mailbox.
+2. Review each pending record. Its **Stage** follows the sales trigger: inquiry, quoted (staff sent
+   pricing or a quote), invoiced (staff sent an invoice, amount shown), paid (client sent payment
+   proof, or staff confirmed payment). Read any **Check before approving** warnings, check the
+   evidence (**Open source** shows the original email, attachments and invoice PDF text), then
+   **Approve (staging)**, **Reject**, or **Merge** into another record's ID.
+3. **Publish** copies approved records from staging (`candidates`) to the official `clients` table.
+   Publishing again only sends records approved or edited since the last publish.
+4. After editing `rules.yaml`, press **Re-run extraction**. No refetch from Google is needed.
 
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
 Approved, rejected and merged records are never overwritten by a rerun.
 
 ## Tests
+
+Database tests run against a throwaway local Postgres (never Neon). Install it once:
+
+```bash
+brew install postgresql@17
+```
 
 ```bash
 uv run pytest
@@ -54,7 +66,8 @@ uv run pytest
 | Table | Purpose |
 |---|---|
 | `raw_items` | What was fetched from Google, unchanged. |
-| `candidates` | Extracted records waiting for review. |
-| `clients` | Approved directory. The directory app reads only this. |
+| `signals` | One row per person per email or row; rebuilt into candidates. |
+| `candidates` | Staging: extracted records and the reviewer's approved edits. |
+| `clients` | Official directory, filled only by Publish. The directory app reads only this. |
 | `sync_state` | Where each mailbox's last scrape stopped. |
 # Scraper
