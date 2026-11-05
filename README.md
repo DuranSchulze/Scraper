@@ -57,3 +57,4 @@ uv run pytest
 | `candidates` | Extracted records waiting for review. |
 | `clients` | Approved directory. The directory app reads only this. |
 | `sync_state` | Where each mailbox's last scrape stopped. |
+# Scraper
