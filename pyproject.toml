@@ -1,0 +1,15 @@
+[project]
+name = "workspace-scraper"
+version = "0.1.0"
+description = "Local read-only Google Workspace client scraper with review GUI"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.2",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
