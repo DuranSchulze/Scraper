@@ -57,25 +57,42 @@ def set_cursor(conn, source: str, mailbox: str, cursor: str) -> None:
     )
 
 
-def missing_ids(conn, source: str, mailbox: str, ids: list[str]) -> list[str]:
-    """Ids not yet stored, in input order."""
+def missing_ids(conn, source: str, mailbox: str, ids: list[str], min_version: int = 1) -> list[str]:
+    """Ids not yet stored (or stored with an older payload version), in input order."""
     have = {
         r["source_id"]
         for r in conn.execute(
-            "SELECT source_id FROM raw_items WHERE source = %s AND mailbox = %s AND source_id = ANY(%s)",
-            (source, mailbox, ids),
+            "SELECT source_id FROM raw_items WHERE source = %s AND mailbox = %s AND source_id = ANY(%s)"
+            " AND coalesce((payload->>'v')::int, 1) >= %s",
+            (source, mailbox, ids, min_version),
         )
     }
     return [i for i in ids if i not in have]
 
 
+def outdated_gmail_ids(conn, mailbox: str, min_version: int) -> list[str]:
+    return [r["source_id"] for r in conn.execute(
+        "SELECT source_id FROM raw_items WHERE source = 'gmail' AND mailbox = %s"
+        " AND coalesce((payload->>'v')::int, 1) < %s ORDER BY id",
+        (mailbox, min_version),
+    )]
+
+
+UPSERT_RAW = (
+    "INSERT INTO raw_items (source, mailbox, source_id, payload) VALUES (%s, %s, %s, %s)"
+    " ON CONFLICT (source, mailbox, source_id)"
+    # A changed payload must be extracted again.
+    " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now(), extracted_at = NULL"
+)
+
+
 def upsert_raw(conn, source: str, mailbox: str, source_id: str, payload: dict) -> None:
-    conn.execute(
-        "INSERT INTO raw_items (source, mailbox, source_id, payload) VALUES (%s, %s, %s, %s)"
-        " ON CONFLICT (source, mailbox, source_id)"
-        " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now()",
-        (source, mailbox, source_id, Jsonb(payload)),
-    )
+    conn.execute(UPSERT_RAW, (source, mailbox, source_id, Jsonb(payload)))
+
+
+def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict]]) -> None:
+    with conn.cursor() as cur:
+        cur.executemany(UPSERT_RAW, [(source, mailbox, sid, Jsonb(p)) for sid, p in items])
 
 
 if __name__ == "__main__":

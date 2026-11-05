@@ -26,20 +26,122 @@ services:
   Digital Marketing: [seo, social media, ads, digital marketing, google ads]
   Consulting: [consulting, consultation, advisory]
 
-# --- Engagement (paid or not) ---------------------------------------------
-# Any of these in subject or body marks the thread as paid work.
-paid_keywords:
-  - invoice
-  - official receipt
-  - payment received
-  - payment confirmation
-  - proof of payment
-  - remittance
-  - billing statement
-  - deposit slip
+# --- Engagement stages (sales trigger) ------------------------------------------
+# inquiry -> quoted (staff send pricing / quote) -> invoiced (staff send invoice)
+# -> paid (client sends wire transfer / PayPal proof, or staff confirm payment).
+# Only the sender's own words count: quoted earlier messages in a reply are ignored.
+stages:
+  # Client (inbound) asking about services. Keep these specific: vendors also send "quotations".
+  inquiry_keywords:
+    - inquiry
+    - inquire
+    - inquiring
+    - interested in
+    - request for quotation
+    - request for a quote
+    - requesting a quote
+    - requesting a quotation
+    - how much
+    - pricing for
+    - rates for
+    - would like to avail
+    - would like to know more
+    - your services
+    - what is the price
+    - what is the cost
+    - what are your rates
+    - what are your prices
+    - can i know the price
+    - may i know the price
+    - price of a
+    - cost of a
+    - quotation request
+    - quote request
+    - request a quote
+    - request a quotation
+  # A quote/quotation word together with one of these is a client asking for a quote.
+  # Topic words that make a request phrase above a quote request.
+  quote_request_topics: [quote, quotation, pricing, rates]
+  quote_request_phrases: [we need, i need, looking for, can you send, could you send, please send, kindly send, may we have, may i have, can we get, could we get, can i get]
+  inquiry_courtesy_phrases: [thank you for your inquiry, thanks for your inquiry, in response to your inquiry]
+  # Staff (outbound) pricing reply. Counts only together with an amount (e.g. PHP 25,000)
+  # or an attachment whose name matches quote_attachment_patterns.
+  pricing_keywords: [quote, quotation, pricing, price, prices, rate, rates, fee, fees, package, proposal, cost, estimate]
+  quote_attachment_patterns: [quote, quotation, proposal, pricing, rate card, ratecard, estimate]
+  # Staff (outbound) invoice. Subject wording, an attachment name, or body wording plus an amount.
+  invoice_keywords: [invoice, billing statement, statement of account, soa]
+  invoice_attachment_patterns: [invoice, inv-, inv_, billing statement, statement of account, soa]
+  # Lines with these words hold the invoice total.
+  amount_context: [total, amount due, balance due, grand total, total due, total amount, amount payable]
+  # Client (inbound) saying they paid. Counts as paid only with a screenshot/PDF attached.
+  # Generic payment words ("bank transfer", "paypal") also appear in supplier payment
+  # instructions, so they only count outside supplier documents and need proof to mean paid.
+  # Bare verbs (paid, transferred, deposited) are never used: "I transferred the files".
+  payment_claim_keywords:
+    - wire transfer
+    - bank transfer
+    - telegraphic transfer
+    - paypal
+    - proof of payment
+    - payment sent
+    - payment has been sent
+    - payment has been made
+    - we have paid
+    - i have paid
+    - already paid
+    - deposit slip
+    - remittance
+    - transferred the payment
+    - transferred the amount
+    - payment transferred
+    - deposited the payment
+    - deposited the amount
+    - payment deposited
+    - transaction receipt
+    - transfer receipt
+  # Completed payments can arrive under an Invoice subject or with invoice-named proof.
+  # Payment already done, phrased so supplier instructions ("amount to be paid", "send proof of
+  # payment", "deposit to our account") never match.
+  payment_completed_keywords: [paid via, paid through, paid by, fully paid, already paid, we have paid, i have paid, payment sent, payment has been sent, payment has been made, transferred the payment, transferred the amount, payment transferred, deposited the payment, deposited the amount, payment deposited, attached is the proof of payment, attached proof of payment, here is the proof of payment, deposit slip, transaction receipt, transfer receipt]
+  # Staff (outbound) confirming payment. Counts as paid.
+  payment_confirm_keywords:
+    - payment received
+    - received your payment
+    - received the payment
+    - thank you for your payment
+    - thank you for the payment
+    - payment confirmed
+    - payment has been received
+    - official receipt
+    - acknowledgement receipt
+  payment_confirm_attachment_patterns: [official receipt, official_receipt, official-receipt, acknowledgement receipt]
+  # Staff describing their own payment are paying a supplier, not invoicing a client.
+  outbound_payment_keywords: [we paid, i paid, we have paid, i have paid, we sent payment, we transferred, we have transferred, payment has been made, payment has been sent, payment sent, we have settled, settled your invoice]
+  # Any of these cancels a payment claim/confirmation in the same message.
+  payment_negative_keywords:
+    - unpaid
+    - not yet paid
+    - awaiting payment
+    - awaiting your payment
+    - payment reminder
+    - overdue
+    - past due
+    - kindly settle
+    - please settle
+    - outstanding balance
+    - not been received
+    - not received
+    - not yet received
+  # Supplier/invoice payment instructions. A message with any of these is telling someone how to
+  # pay, so its payment words are not a completed payment (and staff invoices stay invoices).
+  payment_instruction_keywords: [to be paid, please pay, kindly pay, pay via, pay through, payable to, payment instructions, bank details, account name, account number, due date, once payment, after payment, upon payment, when payment, before payment]
+  # An invoice/quote-named PDF counts as payment proof only if its name also has one of these.
+  proof_attachment_patterns: [proof, receipt, payment, transfer, deposit, screenshot, paypal, remittance]
+  # Images smaller than this are treated as signature logos, not payment screenshots.
+  min_screenshot_bytes: 20000
 
 # --- Status thresholds ------------------------------------------------------
-# active: paid signal within active_months. past: paid, older.
+# active: verified payment within active_months. past: paid, older.
 # inquiry: never paid, last contact within lost_after_days. lost: never paid, older.
 status:
   active_months: 12
