@@ -54,6 +54,19 @@
   #tablewrap { max-height:70vh; overflow:auto; }
   /* Narrow screens: the table scrolls sideways inside its box instead of breaking words. */
   @media (max-width: 600px) { #tablewrap table { min-width:600px; } #tablewrap th, #tablewrap td { overflow-wrap:normal; } }
+  .summary { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:8px; margin:6px 0 10px; }
+  .stat { border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  .stat b { display:block; font-size:15px; overflow-wrap:anywhere; }
+  .stat span { font-size:11px; color:var(--muted); }
+  .pay { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); }
+  .pay input[type=date] { width:140px; } .pay input[type=number] { width:120px; } .pay input.cur { width:64px; text-transform:uppercase; }
+  .pay.flag { background:var(--warn-bg); }
+  .b-invoice, .b-unknown { background:var(--warn-bg); border-color:var(--warn-line); }
+  .b-stated { background:#e3f3e8; border-color:#83c19a; }
+  .scroll { overflow-x:auto; }
+  .scroll table { min-width:460px; } .scroll th, .scroll td { overflow-wrap:normal; white-space:nowrap; }
+  .tl { display:grid; grid-template-columns:90px minmax(0,1fr); gap:2px 8px; border-top:1px solid var(--line); padding:6px 0; font-size:12px; }
+  .tl .snip { grid-column:2; overflow-wrap:anywhere; }
   dialog { max-width:800px; width:90vw; }
   dialog pre { white-space:pre-wrap; max-height:60vh; overflow:auto; font-size:12px; }
 </style>
@@ -124,6 +137,7 @@
   </section>
 </main>
 
+<datalist id="currencies"><option value="PHP"><option value="USD"></datalist>
 <dialog id="dlg"><h2 id="dlgTitle"></h2><pre id="dlgBody"></pre><button id="dlgClose">Close</button></dialog>
 
 <template id="detailTpl">
@@ -149,6 +163,15 @@
     <label class="inline" style="margin-top:8px"><input id="d_paid" type="checkbox" name="engagement_paid"> Engagement paid</label>
     <label for="d_services">Services (comma list)</label><input id="d_services" name="services">
     <label for="d_notes">Notes</label><textarea id="d_notes" name="notes" rows="2"></textarea>
+    <h3>Client details</h3>
+    <div class="summary" id="d_summary" aria-live="polite"></div>
+    <h3 id="payHead">Payments</h3>
+    <div id="d_payments" role="group" aria-labelledby="payHead"></div>
+    <div class="actions"><button type="button" id="d_addPay">Add payment</button></div>
+    <label for="d_availed">Services availed (comma list)</label><input id="d_availed" name="services_availed">
+    <p class="conf" id="d_mentioned"></p>
+    <h3>Department history</h3>
+    <div class="scroll" id="d_handlers"></div>
     <h3>Amounts and stage dates</h3>
     <div id="d_amounts"></div>
     <p class="conf" id="d_dates"></p>
@@ -161,6 +184,9 @@
       <button type="button" id="d_merge">Merge</button>
     </div>
   </form>
+  <h3>Timeline</h3>
+  <p class="conf" id="d_tlnote" hidden></p>
+  <div id="d_timeline"></div>
   <h3>Evidence</h3>
   <div id="d_evidence"></div>
 </template>
@@ -175,6 +201,61 @@ const EVIDENCE = { inquiry: 'Inquiry', quoted: 'Quote / pricing sent', invoiced:
 const EV_CLASS = { inquiry: 'inquiry', quoted: 'quoted', invoiced: 'invoiced', payment_claim: 'paid', payment_screenshot: 'paid', payment_confirmed: 'paid' };
 const badge = (stage, labels = STAGES) => el('span', labels[stage] || stage, 'badge st-' + (EV_CLASS[stage] || stage));
 const money = (a) => `${a.currency} ${Number(a.amount).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+const day = (iso) => (iso || '').slice(0, 10);
+const BASIS = { stated: 'Stated in payment', invoice: 'From invoice — confirm', unknown: 'Amount unknown', manual: 'Entered by reviewer' };
+const KIND = { confirmed: 'staff confirmed', claim: 'client message', screenshot: 'client image' };
+
+function tenure(fromIso, toIso) {
+  const from = new Date(fromIso), to = toIso ? new Date(toIso) : new Date();
+  const months = (to.getFullYear() - from.getFullYear()) * 12 + to.getMonth() - from.getMonth() - (to.getDate() < from.getDate() ? 1 : 0);
+  if (months < 1) return 'under 1 mo';
+  const y = Math.floor(months / 12), m = months % 12;
+  return [y && `${y} yr`, m && `${m} mo`].filter(Boolean).join(' ');
+}
+
+async function openRaw(id) {
+  const raw = await api('/api/raw/' + id);
+  $('#dlgTitle').textContent = `${raw.source} · ${raw.mailbox || ''} · ${raw.source_id}`;
+  const p = raw.payload;
+  $('#dlgBody').textContent = raw.source === 'gmail'
+    ? Object.entries(p.headers).map(([k, val]) => `${k}: ${val}`).join('\n') +
+      ((p.attachments || []).length ? '\nattachments: ' + p.attachments.map(a => a.filename).join(', ') : '') +
+      '\n\n' + p.body + Object.entries(p.attachment_text || {}).map(([n, t]) => `\n\n--- ${n} ---\n${t}`).join('')
+    : JSON.stringify(p, null, 2);
+  $('#dlg').showModal();
+}
+const sourceBtn = (id) => { const b = el('button', 'Open source'); b.type = 'button'; b.onclick = () => openRaw(id).catch(err => alert(err.message)); return b; };
+
+// One editable payment row. Editing an extracted amount makes it the reviewer's ("manual").
+function payRow(p, onChange) {
+  const row = el('div', null, 'pay'); row.payment = p;
+  const n = document.querySelectorAll('#d_payments .pay').length + 1;
+  const date = el('input'); date.type = 'date'; date.value = day(p.date); date.setAttribute('aria-label', `Payment ${n} date`);
+  const amt = el('input'); amt.type = 'number'; amt.min = '0.01'; amt.step = '0.01'; amt.value = p.amount ?? ''; amt.setAttribute('aria-label', `Payment ${n} amount`);
+  const cur = el('input', null, 'cur'); cur.value = p.currency || ''; cur.maxLength = 3; cur.setAttribute('list', 'currencies'); cur.setAttribute('aria-label', `Payment ${n} currency`);
+  const b = el('span', BASIS[p.basis], 'badge b-' + p.basis);
+  const rm = el('button', 'Remove', 'bad'); rm.type = 'button'; rm.setAttribute('aria-label', `Remove payment ${n}`);
+  const sync = () => {
+    row.classList.toggle('flag', p.basis === 'invoice' || p.basis === 'unknown');
+    b.textContent = BASIS[p.basis]; b.className = 'badge b-' + p.basis;
+  };
+  const edited = () => { p.basis = amt.value === '' ? 'unknown' : 'manual'; sync(); onChange(); };
+  amt.oninput = cur.oninput = edited;
+  date.oninput = () => onChange();
+  rm.onclick = () => { row.remove(); onChange(); };
+  row.read = () => {
+    const amount = amt.value === '' ? null : Number(amt.value), currency = cur.value.trim().toUpperCase() || null;
+    // Keep the original timestamp when the reviewer did not change the day.
+    return { date: date.value ? (date.value === day(p.date) ? p.date : date.value) : null, amount, currency,
+      basis: amount === null ? 'unknown' : p.basis === 'unknown' ? 'manual' : p.basis, raw_item_id: p.raw_item_id ?? null };
+  };
+  row.append(date, amt, cur, b);
+  if (p.kind) row.append(el('span', KIND[p.kind] || p.kind, 'conf'));
+  if (p.raw_item_id) row.append(sourceBtn(p.raw_item_id));
+  row.append(rm); sync();
+  return row;
+}
+const readPayments = () => [...document.querySelectorAll('#d_payments .pay')].map(r => r.read());
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Local-GUI': '1' } });
@@ -252,6 +333,44 @@ async function showDetail(id) {
   $('#d_paid').checked = !!v('engagement_paid');
   $('#d_services').value = (v('services') || []).join(', ');
   $('#d_notes').value = (r && r.notes) || '';
+  $('#d_availed').value = (v('services_availed') || []).join(', ');
+  $('#d_mentioned').textContent = (fv('services') || []).length ? 'Mentioned in emails: ' + fv('services').join(', ') : 'No services mentioned in emails.';
+
+  const lastContact = v('last_contact');
+  const summary = () => {
+    const pays = readPayments(), box = $('#d_summary'); box.replaceChildren();
+    const stat = (label, value) => { const s = el('div', null, 'stat'); s.append(el('span', label), el('b', value)); box.append(s); };
+    const totals = {};
+    for (const p of pays) if (p.amount !== null && p.currency) totals[p.currency] = (totals[p.currency] || 0) + p.amount;
+    const unknown = pays.filter(p => p.amount === null).length;
+    if (!pays.length && !$('#d_paid').checked) stat('Total paid', 'Not a paying client yet');
+    else {
+      const known = Object.entries(totals).map(([currency, amount]) => money({ currency, amount })).join(' + ');
+      stat('Total paid', !known ? 'Amount unknown' : known + (unknown ? ` (+${unknown} unknown)` : ''));
+    }
+    const dates = pays.map(p => p.date).filter(Boolean).sort();
+    const since = dates[0];
+    const end = [lastContact, dates[dates.length - 1]].filter(Boolean).sort().pop();
+    stat('Client since', since ? `${day(since)} · ${tenure(since, end)}` : '—');
+    stat('Department now', $('#d_department').value.trim() || '—');
+  };
+  const pbox = $('#d_payments');
+  for (const p of v('payments') || []) pbox.append(payRow({ ...p }, summary));
+  $('#d_addPay').onclick = () => { pbox.append(payRow({ date: null, amount: null, currency: null, basis: 'manual', raw_item_id: null }, summary)); summary(); };
+  $('#d_paid').onchange = $('#d_department').oninput = summary;
+  summary();
+
+  const handlers = v('handlers') || [], hbox = $('#d_handlers');
+  if (handlers.length) {
+    const t = el('table'); const head = el('tr'); ['Department', 'Staff mailbox', 'First', 'Last', 'Emails'].forEach(h => head.append(el('th', h)));
+    t.append(head);
+    for (const h of handlers) {
+      const tr = el('tr');
+      tr.append(el('td', h.department || 'Not mapped'), el('td', h.mailbox || '—'), el('td', day(h.first) || '—'), el('td', day(h.last) || '—'), el('td', h.messages));
+      t.append(tr);
+    }
+    hbox.append(t);
+  } else hbox.append(el('p', 'No staff mailbox handled this client.', 'muted'));
 
   const amounts = v('amounts') || [];
   const box = $('#d_amounts');
@@ -272,8 +391,13 @@ async function showDetail(id) {
 
   $('#clientForm').onsubmit = async (e) => {
     e.preventDefault();
+    const payments = readPayments();
+    const bad = payments.findIndex(p => (p.amount === null) !== (p.currency === null) || (p.currency && !/^[A-Z]{3}$/.test(p.currency)) || (p.amount !== null && !(p.amount > 0)));
+    if (bad >= 0) return alert(`Payment ${bad + 1}: enter both an amount above 0 and a 3-letter currency, or leave both empty.`);
+    if (payments.length && !$('#d_paid').checked) return alert('Tick "Engagement paid", or remove the payment rows.');
     try {
       await post(`/api/candidates/${id}/approve`, {
+        payments, services_availed: list($('#d_availed').value), handlers,
         name: $('#d_name').value.trim() || null, emails: list($('#d_emails').value), phones: list($('#d_phones').value),
         company: $('#d_company').value.trim() || null, department: $('#d_department').value.trim() || null,
         stage: $('#d_stage').value, status: $('#d_status').value, engagement_paid: $('#d_paid').checked,
@@ -291,6 +415,18 @@ async function showDetail(id) {
     post(`/api/candidates/${id}/merge`, { into_id: into }).then(() => done('Merged.')).catch(err => alert(err.message));
   };
 
+  const tl = fv('timeline') || { items: [], truncated: false }, tbox = $('#d_timeline');
+  if (tl.truncated) { $('#d_tlnote').hidden = false; $('#d_tlnote').textContent = `Showing the latest ${tl.items.length} deal emails; older ones are not listed.`; }
+  for (const t of tl.items) {
+    const item = el('div', null, 'tl');
+    const when = el('div'); when.append(el('div', day(t.date) || 'undated'), badge(t.stage, EVIDENCE));
+    const meta = el('div', `${t.department || 'No department'} · ${t.mailbox || '—'}` + ((t.amounts || []).length ? ' · ' + t.amounts.map(money).join(', ') : ''), 'muted');
+    meta.append(' ', sourceBtn(t.raw_item_id));
+    item.append(when, meta, el('div', t.snippet, 'snip'));
+    tbox.append(item);
+  }
+  if (!tl.items.length) tbox.append(el('p', 'No deal emails yet.', 'muted'));
+
   const ev = $('#d_evidence');
   for (const e of c.evidence) {
     const item = el('div', null, 'ev');
@@ -299,18 +435,7 @@ async function showDetail(id) {
     head.append(`${(e.date || '').slice(0, 10) || 'undated'} · ${e.source} · ${e.direction === 'out' ? 'sent by staff' : 'received'}` +
       ((e.amounts || []).length ? ' · ' + e.amounts.map(money).join(', ') : '') +
       ((e.services || []).length ? ' · ' + e.services.join(', ') : ''));
-    const btn = el('button', 'Open source'); btn.type = 'button'; btn.style.marginLeft = '8px';
-    btn.onclick = async () => {
-      const raw = await api('/api/raw/' + e.raw_item_id);
-      $('#dlgTitle').textContent = `${raw.source} · ${raw.mailbox || ''} · ${raw.source_id}`;
-      const p = raw.payload;
-      $('#dlgBody').textContent = raw.source === 'gmail'
-        ? Object.entries(p.headers).map(([k, val]) => `${k}: ${val}`).join('\n') +
-          ((p.attachments || []).length ? '\nattachments: ' + p.attachments.map(a => a.filename).join(', ') : '') +
-          '\n\n' + p.body + Object.entries(p.attachment_text || {}).map(([n, t]) => `\n\n--- ${n} ---\n${t}`).join('')
-        : JSON.stringify(p, null, 2);
-      $('#dlg').showModal();
-    };
+    const btn = sourceBtn(e.raw_item_id); btn.style.marginLeft = '8px';
     head.append(btn);
     item.append(head);
     if ((e.reasons || []).length) item.append(el('div', 'Why: ' + e.reasons.join('; '), 'conf'));

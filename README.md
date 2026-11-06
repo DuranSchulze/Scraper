@@ -45,6 +45,14 @@ Open http://127.0.0.1:8765.
 3. **Publish** copies approved records from staging (`candidates`) to the official `clients` table.
    Publishing again only sends records approved or edited since the last publish.
 4. After editing `rules.yaml`, press **Re-run extraction**. No refetch from Google is needed.
+5. **Client details** (in each record) shows what the client paid, when they became a client and for how
+   long, the services they bought, which department and staff mailbox handled them, and a timeline of
+   deal emails. Payment rows marked **From invoice — confirm** or **Amount unknown** need a check:
+   edit the amount, remove a duplicate row, or add a missing payment before approving.
+   Everything except the timeline is copied to `clients` on Publish.
+
+After upgrading: run `uv run python -m scraper.db migrate`, then **Re-run extraction**. Records already
+approved keep their old details until you move them **Back to pending** and approve them again.
 
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
 Approved, rejected and merged records are never overwritten by a rerun.
@@ -68,6 +76,5 @@ uv run pytest
 | `raw_items` | What was fetched from Google, unchanged. |
 | `signals` | One row per person per email or row; rebuilt into candidates. |
 | `candidates` | Staging: extracted records and the reviewer's approved edits. |
-| `clients` | Official directory, filled only by Publish. The directory app reads only this. |
+| `clients` | Official directory, filled only by Publish. The directory app reads only this. Includes `payments`, `client_since`, `services_availed` and `departments`. |
 | `sync_state` | Where each mailbox's last scrape stopped. |
-# Scraper
