@@ -69,7 +69,7 @@ export function StatusBar() {
     : s?.job_status === "paused" && !s.job_control ? "Continuing…"
     : s?.job_status === "interrupted" ? "The server stopped while this job ran. Resume continues it; fetched mail is skipped."
     : s?.job_status === "stopped" ? "Stopped. Everything saved so far is kept; Resume continues from here."
-    : s?.job_status === "failed" && s.error ? s.error : null;
+    : s?.job_status === "failed" ? `${s.error ?? "The job failed."} Resume continues from where it stopped; finished work is kept.` : null;
 
   return (
     <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
@@ -145,7 +145,7 @@ function JobControls({ status, control, busy, resuming, onPause, onContinue, onS
       </div>
     );
   }
-  if (status === "interrupted" || status === "stopped") {
+  if (status === "interrupted" || status === "stopped" || status === "failed") {
     return (
       <Button size="sm" disabled={busy} onClick={onResume}>
         <Play className="h-4 w-4 shrink-0" /> {resuming ? "Resuming…" : "Resume"}

@@ -802,3 +802,33 @@ def test_mailbox_outcomes_follow_sources_not_extraction(conn, monkeypatch, outco
     assert row['fetched'] == row['total'] == row['rate_limited'] == 0
     if outcome == 'failed':
         assert row['error'] == "ValueError('contacts failed')"
+
+
+def test_extract_reconnects_and_retries_batch_after_connection_drop(conn, monkeypatch):
+    import psycopg
+    seed(conn)
+    seed(conn, sid="s:Clients:3", email="ana@client.test", name="Ana")
+    original, calls, lines = pipeline.rebuild, [], []
+    def flaky(c, *args):
+        calls.append(True)
+        if len(calls) == 1:
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        return original(c, *args)
+    monkeypatch.setattr(pipeline, "rebuild", flaky)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
+    pipeline.run_extract(lines.append)
+    assert any("reconnecting" in line for line in lines)
+    assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"] == 0
+    assert set(candidates(conn)) == {"bob@client.test", "ana@client.test"}
+    assert lines[-1] == "extract: done (2 items, 0 failed)"
+
+
+def test_extract_gives_up_after_repeated_connection_drops(conn, monkeypatch):
+    import psycopg
+    seed(conn)
+    def down(*_):
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+    monkeypatch.setattr(pipeline, "rebuild", down)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
+    with pytest.raises(psycopg.OperationalError):
+        pipeline.run_extract(lambda _: None)

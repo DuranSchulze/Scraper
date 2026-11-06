@@ -39,3 +39,19 @@ def test_exhausted_and_nonretryable_errors_do_not_count_a_retry_that_never_happe
     with pytest.raises(HttpError):
         google_client.execute(SimpleNamespace(execute=forbidden), on_rate_limit=lambda: retries.append(True))
     assert retries == []
+
+
+def test_network_drops_are_retried_without_counting_rate_limits(monkeypatch):
+    attempts, retries = [], []
+    def flaky():
+        attempts.append(True)
+        if len(attempts) < 3:
+            raise ConnectionResetError(54, "Connection reset by peer")
+        return {"ok": True}
+    monkeypatch.setattr(google_client.time, "sleep", lambda _: None)
+    assert google_client.execute(SimpleNamespace(execute=flaky), on_rate_limit=lambda: retries.append(True)) == {"ok": True}
+    assert len(attempts) == 3 and retries == []
+    def down():
+        raise TimeoutError("timed out")
+    with pytest.raises(TimeoutError):
+        google_client.execute(SimpleNamespace(execute=down), tries=2)

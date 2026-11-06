@@ -51,6 +51,10 @@ def execute(request, tries: int = 6, *, on_rate_limit=None):
             if on_rate_limit and (e.resp.status == 429 or rate_limited):
                 on_rate_limit()
             time.sleep(min(60, 2**attempt + random.random()))
+        except OSError:  # ConnectionResetError, TimeoutError, ssl.SSLError: transient network drops
+            if attempt == tries - 1:
+                raise
+            time.sleep(min(60, 2**attempt + random.random()))
 
 
 def pages(make_request, items_key: str, *, on_rate_limit=None):

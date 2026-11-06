@@ -456,6 +456,15 @@ def test_resume_full_extract_claims_once_and_chooses_correct_reset_mode(conn, mo
     assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 400
 
 
+def test_failed_job_can_be_resumed(conn, monkeypatch):
+    params = {"sources": ["gmail"], "mailboxes": [], "since": "", "full": False, "done_mailboxes": ["a@acme.test"]}
+    jid = job_row(conn, status="failed", name="scrape", params=params)
+    monkeypatch.setattr(app_module, "_launch_job", lambda *_: None, raising=False)
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 200
+    rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    assert rows[0]["status"] == "done" and rows[1]["params"] == params
+
+
 def test_resume_while_running_keeps_interrupted_row_and_scrape_params(conn, monkeypatch):
     params = {"sources": ["gmail"], "mailboxes": ["sales@acme.test"], "since": "2020-01-01", "full": False}
     jid = job_row(conn, status="interrupted", name="scrape", params=params)
@@ -540,7 +549,7 @@ def test_concurrent_resume_claims_only_one_successor(conn, monkeypatch):
     assert conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"] == 2
 
 
-@pytest.mark.parametrize("status,stale", [("done", False), ("failed", False), ("running", True)])
+@pytest.mark.parametrize("status,stale", [("done", False), ("done_with_errors", False), ("running", True)])
 def test_resume_requires_interrupted_state_without_changing_other_states(conn, monkeypatch, status, stale):
     jid = job_row(conn, status=status, stale=stale)
     monkeypatch.setattr(app_module, "_launch_job", lambda *_: None)

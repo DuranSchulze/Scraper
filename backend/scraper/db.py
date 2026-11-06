@@ -19,7 +19,9 @@ def connect() -> psycopg.Connection:
     url = env("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is not set. Copy .env.example to .env and fill it in.")
-    return psycopg.connect(url, row_factory=dict_row)
+    # Keepalives stop NAT/proxies from silently dropping a connection that is busy in Python for minutes.
+    return psycopg.connect(url, row_factory=dict_row, keepalives=1, keepalives_idle=30,
+                           keepalives_interval=10, keepalives_count=5)
 
 
 def pending_migrations(applied: set[str]) -> list:

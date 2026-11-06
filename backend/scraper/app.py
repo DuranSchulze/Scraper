@@ -232,15 +232,15 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None) -> int:
         with db.connect() as conn:
             if resume_id is not None:
                 previous = conn.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (resume_id,)).fetchone()
-                if not previous or previous["status"] not in ("interrupted", "stopped"):
-                    raise HTTPException(400, "job is not interrupted or stopped")
+                if not previous or previous["status"] not in ("interrupted", "stopped", "failed"):
+                    raise HTTPException(400, "job is not interrupted, stopped or failed")
                 name, params = previous["name"], dict(previous["params"])
                 if name == "extract" and params.get("full_reset_done"):
                     params["full"] = False
             job_id = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,'running') RETURNING id",
                                   (name, Jsonb(params))).fetchone()["id"]
             if resume_id is not None:
-                conn.execute("UPDATE jobs SET status='done', control=NULL, error=%s WHERE id=%s AND status IN ('interrupted','stopped')",
+                conn.execute("UPDATE jobs SET status='done', control=NULL, error=%s WHERE id=%s AND status IN ('interrupted','stopped','failed')",
                              (f"resumed as job {job_id}", resume_id))
     except UniqueViolation as exc:
         raise HTTPException(409, "another job is still running") from exc

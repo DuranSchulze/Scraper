@@ -12,7 +12,8 @@ import { Switch } from "@/components/ui/switch";
 import { boardQuery, logQuery, statusQuery } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-const PROBLEM = /FAILED|ERROR|rate-limit|failed extraction/i;
+// Case-sensitive on purpose: progress lines like "extract: … 0 failed" are not problems.
+const PROBLEM = /FAILED|ERROR|rate-limit|failed extraction|connection lost|[1-9]\d* failed$/;
 // Within this many pixels of the bottom counts as "at the bottom" (keeps following).
 const BOTTOM_SLACK = 24;
 
