@@ -42,6 +42,12 @@ export type CandidateRow = {
   first_contact: string | null;
   /** Distinct scraped items (emails, contacts, sheet rows) behind this record, incl. merged ones. */
   items: number;
+  company: string | null;
+  phones: string[];
+  /** Services availed, or the services mentioned when none are confirmed yet. */
+  services: string[];
+  latest_amount: { amount: number; currency: string; stage: string; date: string | null } | null;
+  item_sources: { gmail: number; contacts: number; sheets: number };
 };
 
 export type MailboxState = "pending" | "running" | "done" | "failed" | "skipped";
