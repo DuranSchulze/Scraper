@@ -228,3 +228,46 @@ def test_rebuild_without_signals_preserves_merge_target_and_mapping(conn):
     conn.commit()
     assert candidates(conn)["a@client.test"]["merged_into"] == target
     assert candidates(conn)["bob@client.test"]["id"] == target
+
+
+def test_stored_signals_rebuild_details_and_merge_reopen_recompute_without_overwriting_reviewed(conn):
+    from datetime import datetime, timedelta, timezone
+    from fastapi.testclient import TestClient
+    from scraper.app import app
+    from scraper.config import load_rules
+    from scraper.extract import signal
+    from scraper.merge import to_json
+
+    now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    a = seed(conn, email="a@client.test", sid="a")
+    b = seed(conn, email="b@client.test", sid="b")
+    for item, key, mailbox, day in [(a, "a@client.test", "sales@acme.test", 0), (b, "b@client.test", "billing@acme.test", 2)]:
+        s = signal(key, "gmail", item, stage="payment_confirmed", thread=f"{mailbox}:t", department="Sales",
+                   date=now + timedelta(days=day), snippet=key, services=["Website"],
+                   amounts=[{"amount": 1000, "currency": "PHP", "total": True}])
+        conn.execute("INSERT INTO signals (raw_item_id, key, data) VALUES (%s,%s,%s)", (item, key, Jsonb(to_json(s))))
+    conn.execute("UPDATE raw_items SET extracted_at=now()")
+    pipeline.rebuild(conn, {"a@client.test", "b@client.test"}, load_rules(), now)
+    conn.commit()
+    before = candidates(conn)
+    a_id, b_id = before["a@client.test"]["id"], before["b@client.test"]["id"]
+    assert before["a@client.test"]["fields"]["payments"]["value"][0]["raw_item_id"] == a
+    local = TestClient(app, base_url="http://localhost")
+    gui = {"X-Local-GUI": "1"}
+    assert local.post(f"/api/candidates/{a_id}/merge", json={"into_id": b_id}, headers=gui).status_code == 200
+    merged = candidates(conn)["b@client.test"]["fields"]
+    assert len(merged["payments"]["value"]) == 2
+    assert sum(h["messages"] for h in merged["handlers"]["value"]) == 2
+    assert local.post(f"/api/candidates/{a_id}/reopen", headers=gui).status_code == 200
+    reopened = candidates(conn)
+    assert len(reopened["a@client.test"]["fields"]["payments"]["value"]) == 1
+    assert len(reopened["b@client.test"]["fields"]["payments"]["value"]) == 1
+    assert sum(h["messages"] for h in reopened["b@client.test"]["fields"]["handlers"]["value"]) == 1
+    conn.execute("UPDATE candidates SET review_state='approved', reviewed=%s WHERE id=%s", (Jsonb({"name": "Reviewer"}), b_id))
+    conn.commit()
+    saved = candidates(conn)["b@client.test"]["fields"]
+    conn.execute("UPDATE signals SET data=jsonb_set(data, '{services}', '[\"Changed\"]')")
+    pipeline.rebuild(conn, {"a@client.test", "b@client.test"}, load_rules(), now)
+    conn.commit()
+    assert candidates(conn)["b@client.test"]["fields"] == saved
+    assert candidates(conn)["b@client.test"]["reviewed"] == {"name": "Reviewer"}

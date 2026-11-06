@@ -292,3 +292,9 @@ def test_asking_about_paypal_is_not_a_payment():
 ])
 def test_price_questions_under_pricing_subject_are_inquiries(subject, body):
     assert stage(subject, body, "in")[0] == "inquiry"
+
+
+def test_payment_screenshot_keeps_stated_amounts():
+    result = stage("Hello", "Total PHP 1,000", "in", [att()])
+    assert result[0] == "payment_screenshot"
+    assert result[1] == [{"amount": 1000, "currency": "PHP", "total": True}]

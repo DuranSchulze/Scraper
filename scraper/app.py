@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from psycopg.types.json import Jsonb
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from . import db, pipeline
 from .config import RULES_PATH, ROOT, env, load_rules
@@ -157,6 +157,36 @@ class AmountIn(BaseModel):
     raw_item_id: int
 
 
+class PaymentIn(BaseModel):
+    date: datetime | None = None
+    amount: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    currency: str | None = Field(default=None, pattern=r"^[A-Za-z]{3}$")
+    basis: Literal["stated", "invoice", "unknown", "manual"]
+    raw_item_id: int | None = None
+
+    @field_validator("date")
+    @classmethod
+    def dated_payment(cls, value):
+        # Date-only editor values have no offset; store them at midnight UTC.
+        return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
+
+    @model_validator(mode="after")
+    def amount_and_basis(self):
+        if (self.amount is None) != (self.currency is None):
+            raise ValueError("payment amount and currency must both be set or both be null")
+        if (self.basis == "unknown") != (self.amount is None):
+            raise ValueError("payment basis must be unknown exactly when the amount is null")
+        return self
+
+
+class HandlerIn(BaseModel):
+    department: str
+    mailbox: str
+    first: datetime | None = None
+    last: datetime | None = None
+    messages: int = Field(ge=0)
+
+
 class ClientIn(BaseModel):
     name: str | None = None
     emails: list[str] = []
@@ -168,9 +198,18 @@ class ClientIn(BaseModel):
     engagement_paid: bool = False
     stage: Literal["inquiry", "quoted", "invoiced", "paid"] = "inquiry"
     amounts: list[AmountIn] = []
+    payments: list[PaymentIn] = []
+    services_availed: list[str] = []
+    handlers: list[HandlerIn] = []
     first_contact: datetime | None = None
     last_contact: datetime | None = None
     notes: str | None = None
+
+    @model_validator(mode="after")
+    def paid_details(self):
+        if self.payments and not self.engagement_paid:
+            raise ValueError("payment rows require engagement_paid")
+        return self
 
 
 @app.post("/api/candidates/{cid}/approve")
@@ -179,10 +218,21 @@ def approve(cid: int, c: ClientIn):
         cand = _get(conn, cid, lock=True)
         if cand["review_state"] == "merged":
             raise HTTPException(409, "reopen the merged record before approving it")
+        values = c.model_dump(mode="json")
+        for name in ("payments", "services_availed", "handlers"):
+            if name not in c.model_fields_set:
+                values[name] = (cand["fields"].get(name) or {}).get("value", [])
+        try:
+            reviewed = ClientIn.model_validate(values)
+        except ValidationError as exc:
+            raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+        values = reviewed.model_dump(mode="json")
+        since = min((p.date for p in reviewed.payments if p.date), default=None)
+        values["client_since"] = since.isoformat() if since else None
         conn.execute(
             "UPDATE candidates SET review_state='approved', reviewed=%s, reviewed_by=%s,"
             " reviewed_at=clock_timestamp(), updated_at=now() WHERE id=%s",
-            (Jsonb(c.model_dump(mode="json")), getuser(), cid))
+            (Jsonb(values), getuser(), cid))
     return {"ok": True}
 
 
@@ -199,22 +249,27 @@ def publish():
                     cand["reviewed_at"] is None or cand["reviewed_at"] <= cand["published_at"])):
                 continue
             c = ClientIn.model_validate(cand["reviewed"])
+            since = min((p.date for p in c.payments if p.date), default=None)
             vals = (c.name, c.emails, c.phones, c.company, c.status, c.services, c.department,
                     c.engagement_paid, c.first_contact, c.last_contact, c.notes, cand["reviewed_by"],
-                    cand["reviewed_at"], c.stage, Jsonb([a.model_dump(mode="json") for a in c.amounts]))
+                    cand["reviewed_at"], c.stage, Jsonb([a.model_dump(mode="json") for a in c.amounts]),
+                    Jsonb([p.model_dump(mode="json") for p in c.payments]), since, c.services_availed,
+                    Jsonb([h.model_dump(mode="json") for h in c.handlers]))
             if cand["client_id"] is not None:
                 conn.execute(
                     "UPDATE clients SET name=%s, emails=%s, phones=%s, company=%s, status=%s, services=%s,"
                     " department=%s, engagement_paid=%s, first_contact=%s, last_contact=%s, notes=%s,"
-                    " approved_by=%s, approved_at=%s, stage=%s, amounts=%s, updated_at=now() WHERE id=%s",
+                    " approved_by=%s, approved_at=%s, stage=%s, amounts=%s, payments=%s, client_since=%s,"
+                    " services_availed=%s, departments=%s, updated_at=now() WHERE id=%s",
                     (*vals, cand["client_id"]))
                 client_id = cand["client_id"]
                 updated += 1
             else:
                 client_id = conn.execute(
                     "INSERT INTO clients (name, emails, phones, company, status, services, department,"
-                    " engagement_paid, first_contact, last_contact, notes, approved_by, approved_at, stage, amounts)"
-                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id", vals).fetchone()["id"]
+                    " engagement_paid, first_contact, last_contact, notes, approved_by, approved_at, stage, amounts,"
+                    " payments, client_since, services_availed, departments)"
+                    " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id", vals).fetchone()["id"]
                 inserted += 1
             conn.execute("UPDATE candidates SET client_id=%s, published_at=clock_timestamp(), updated_at=now() WHERE id=%s",
                          (client_id, cand["id"]))

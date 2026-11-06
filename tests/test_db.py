@@ -17,7 +17,7 @@ def test_upgrade_001_backfills_legacy_and_rerun_is_noop(pg_url):
         client = conn.execute("INSERT INTO clients (name) VALUES ('Legacy') RETURNING id").fetchone()["id"]
         conn.execute("INSERT INTO candidates (email_key, review_state, client_id) VALUES ('old@x.test', 'approved', %s)", (client,))
         conn.execute("INSERT INTO candidates (email_key) VALUES ('new@x.test')")
-    assert db.migrate() == ["002_stages_publish.sql"]
+    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         old = conn.execute("SELECT * FROM candidates WHERE email_key='old@x.test'").fetchone()
@@ -45,3 +45,22 @@ def test_raw_helpers_replace_and_invalidate_extraction(pg_url):
         assert conn.execute("SELECT extracted_at FROM raw_items WHERE source_id='m'").fetchone()["extracted_at"] is None
         db.upsert_raw_many(conn, "gmail", "a", [("n", {"v": 2, "body": "changed"})])
         assert conn.execute("SELECT extracted_at FROM raw_items WHERE source_id='n'").fetchone()["extracted_at"] is None
+
+
+def test_upgrade_002_preserves_populated_clients_and_adds_details(pg_url):
+    from scraper import db
+
+    with db.connect() as conn:
+        for name in ("001_init.sql", "002_stages_publish.sql"):
+            conn.execute((db.MIGRATIONS_DIR / name).read_text())
+        conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('001_init.sql'), ('002_stages_publish.sql')")
+        conn.execute("INSERT INTO clients (name, emails, stage, amounts) VALUES ('Legacy', ARRAY['old@test.com'], 'paid', '[{\"amount\": 500}]')")
+    assert db.migrate() == ["003_client_details.sql"]
+    assert db.migrate() == []
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM clients").fetchone()
+        assert row["name"] == "Legacy" and row["emails"] == ["old@test.com"] and row["stage"] == "paid"
+        assert row["amounts"] == [{"amount": 500}]
+        assert row["payments"] == [] and row["client_since"] is None
+        assert row["services_availed"] == [] and row["departments"] == []

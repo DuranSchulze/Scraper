@@ -40,6 +40,82 @@ def best(sigs: list[dict], name: str) -> dict | None:
     return field(v, first_src[v], score / sum(scores.values()))
 
 
+def _mailbox(s: dict) -> str:
+    return s["thread"].partition(":")[0] if s["source"] == "gmail" else ""
+
+
+def _payment_amount(s: dict) -> dict | None:
+    return next((a for a in s["amounts"] if a["total"]), next(iter(s["amounts"]), None))
+
+
+def _payments(paid: list[dict], sigs: list[dict]) -> tuple[list[dict], list[str]]:
+    unique = []
+    for s in sorted(paid, key=lambda s: s["raw_item_id"]):
+        if any(s["key"] == other["key"] and s["snippet"] == other["snippet"]
+               and _mailbox(s) and _mailbox(other) and _mailbox(s) != _mailbox(other)
+               and s["date"] and other["date"] and abs(s["date"] - other["date"]) <= timedelta(minutes=5)
+               for other in unique):
+            continue
+        unique.append(s)
+    threads = defaultdict(list)
+    for s in unique:
+        threads[s["thread"] or ("item", s["raw_item_id"])].append(s)
+    payments, checks = [], []
+    for thread, thread_signals in threads.items():
+        groups = defaultdict(list)
+        for s in thread_signals:
+            amount = _payment_amount(s)
+            groups[(amount["amount"], amount["currency"]) if amount else None].append(s)
+        if None in groups and len(groups) == 2:
+            amount = next(key for key in groups if key is not None)
+            groups[amount].extend(groups.pop(None))
+        for amount, group in groups.items():
+            earliest = min(group, key=lambda s: (s["date"] is None, _sort_date(s), s["raw_item_id"]))
+            basis = "stated" if amount else "unknown"
+            if amount is None:
+                invoices = [s for s in sigs if s["stage"] == "invoiced" and s["thread"]
+                            and s["thread"] == thread and s["amounts"]]
+                if invoices:
+                    invoice = max(invoices, key=lambda s: (_sort_date(s), s["raw_item_id"]))
+                    found = _payment_amount(invoice)
+                    amount, basis = (found["amount"], found["currency"]), "invoice"
+                    checks.append(f"Payment on {_when(earliest)} uses the invoice amount from the same thread; confirm it")
+                else:
+                    checks.append(f"Payment on {_when(earliest)}: amount not found")
+            stages = {s["stage"] for s in group}
+            kind = "confirmed" if "payment_confirmed" in stages else (
+                "claim" if "payment_claim" in stages else "screenshot")
+            payment = {"date": earliest["date"].isoformat() if earliest["date"] else None,
+                       "amount": amount[0] if amount else None, "currency": amount[1] if amount else None,
+                       "basis": basis, "raw_item_id": earliest["raw_item_id"], "kind": kind}
+            payments.append((payment, thread, earliest["date"]))
+    payments.sort(key=lambda p: (p[2] is None, p[2].timestamp() if p[2] else 0, p[0]["raw_item_id"]))
+    for i, (a, thread_a, date_a) in enumerate(payments):
+        for b, thread_b, date_b in payments[i + 1:]:
+            if (thread_a != thread_b and a["amount"] is not None and a["amount"] == b["amount"]
+                    and a["currency"] == b["currency"] and date_a and date_b
+                    and abs(date_a - date_b) <= timedelta(days=7)):
+                checks.append(f"Possible duplicate payment: {a['amount']} on {date_a.date()} and {date_b.date()}; remove one if it is the same")
+    return [p[0] for p in payments], checks
+
+
+def _handlers(sigs: list[dict]) -> list[dict]:
+    groups = defaultdict(list)
+    for s in sigs:
+        if s["source"] == "gmail":
+            groups[(s["department"], _mailbox(s))].append(s)
+    newest = sorted(groups, key=lambda key: max(
+        (s["date"].timestamp() for s in groups[key] if s["date"]), default=float("-inf")), reverse=True)
+    handlers = []
+    for department, mailbox in newest:
+        group = groups[(department, mailbox)]
+        dates = [s["date"] for s in group if s["date"]]
+        handlers.append({"department": department, "mailbox": mailbox, "messages": len(group),
+                         "first": min(dates).isoformat() if dates else None,
+                         "last": max(dates).isoformat() if dates else None})
+    return handlers
+
+
 def engagement(sigs: list[dict]) -> dict:
     """Stage, verified payments, amounts and reviewer warnings for one person."""
     deal_threads = {s["thread"] for s in sigs if s["stage"] in ("quoted", "invoiced") and s["thread"]}
@@ -84,12 +160,15 @@ def engagement(sigs: list[dict]) -> dict:
                                 "date": s["date"].isoformat() if s["date"] else None,
                                 "raw_item_id": s["raw_item_id"]})
 
+    payments, payment_checks = _payments([s for s, _ in paid], sigs)
+    checks.extend(payment_checks)
     first = lambda group: min((s["date"] for s in group if s["date"]), default=None)
     stage_dates = {"inquiry": first(by_stage["inquiry"]), "quoted": first(by_stage["quoted"]),
                    "invoiced": first(by_stage["invoiced"]), "paid": first([s for s, _ in paid])}
     paid_dates = [s["date"] for s, _ in paid if s["date"]]
     return {"stage": stage, "confidence": conf, "paid": bool(paid), "paid_dates": paid_dates,
-            "undated_paid": any(not s["date"] for s, _ in paid), "amounts": amounts,
+            "undated_paid": any(not s["date"] for s, _ in paid), "amounts": amounts, "payments": payments,
+            "paid_threads": {s["thread"] for s, _ in paid if s["thread"]},
             "checks": list(dict.fromkeys(checks)),
             "stage_dates": {k: v.isoformat() for k, v in stage_dates.items() if v}}
 
@@ -125,6 +204,19 @@ def build_candidate(key: str, sigs: list[dict], rules: dict, now: datetime) -> d
     if not company and emails and domain(emails[0]) not in FREE_MAIL:
         company = field(domain(emails[0]).split(".")[0].title(), "domain", 0.3)
     eng = engagement(sigs)
+    handlers = _handlers(sigs)
+    department = next((h["department"] for h in handlers if h["department"]), None)
+    availed = sorted({service for s in sigs if s["thread"] in eng["paid_threads"] for service in s["services"]})
+    availed_confidence = 1.0
+    if eng["paid"] and not availed:
+        availed = sorted({service for s in sigs if s["stage"] in ("quoted", "invoiced") for service in s["services"]})
+        availed_confidence = 0.5
+    timeline_signals = sorted((s for s in sigs if s["stage"]), key=lambda s: (_sort_date(s), s["raw_item_id"]))
+    timeline = {"items": [{"date": s["date"].isoformat() if s["date"] else None, "stage": s["stage"],
+                           "department": s["department"], "mailbox": _mailbox(s), "amounts": s["amounts"],
+                           "raw_item_id": s["raw_item_id"], "snippet": s["snippet"][:200]}
+                          for s in timeline_signals[-200:]], "truncated": len(timeline_signals) > 200}
+    client_since = eng["payments"][0]["date"] if eng["payments"] else None
     fields = {
         "name": best(sigs, "name"),
         "emails": field(emails),
@@ -133,7 +225,12 @@ def build_candidate(key: str, sigs: list[dict], rules: dict, now: datetime) -> d
         "stage": field(eng["stage"], confidence=eng["confidence"]),
         "status": derive_status(sigs, eng, rules, now),
         "services": field(sorted({x for s in sigs for x in s["services"]})),
-        "department": best(sigs, "department"),
+        "department": field(department, "gmail") if department else best(sigs, "department"),
+        "payments": field(eng["payments"]),
+        "client_since": field(client_since) if client_since else None,
+        "services_availed": field(availed, confidence=availed_confidence),
+        "handlers": field(handlers),
+        "timeline": field(timeline),
         "engagement_paid": field(eng["paid"], confidence=eng["confidence"] if eng["paid"] else 0.6),
         "amounts": field(eng["amounts"]),
         "stage_dates": field(eng["stage_dates"]),

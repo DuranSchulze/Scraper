@@ -260,3 +260,111 @@ def test_merged_candidate_must_be_reopened_before_approval(conn):
     assert approve(a).status_code == 409
     row = local.get(f"/api/candidates/{a}").json()
     assert row["review_state"] == "merged" and row["merged_into"] == b
+
+
+def details_body():
+    body = edited()
+    body.update(payments=[
+        {"date": "2026-10-05T00:00:00Z", "amount": 1000, "currency": "PHP", "basis": "manual", "raw_item_id": None},
+        {"date": "2026-09-01T00:00:00Z", "amount": None, "currency": None, "basis": "unknown", "raw_item_id": 1}],
+        services_availed=["Website"], handlers=[{"department": "Finance", "mailbox": "billing@acme.test",
+            "first": "2026-01-01T00:00:00Z", "last": "2026-10-05T00:00:00Z", "messages": 3}],
+        client_since="1900-01-01T00:00:00Z", timeline={"items": [{"snippet": "PRIVATE EMAIL"}]})
+    return body
+
+
+def test_publish_client_details_insert_and_update_computes_since_and_excludes_timeline(conn):
+    cid = candidate(conn)
+    body = details_body()
+    assert approve(cid, body).status_code == 200
+    reviewed = local.get(f"/api/candidates/{cid}").json()["reviewed"]
+    assert datetime.fromisoformat(reviewed["client_since"]) == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert len(reviewed["payments"]) == 2 and reviewed["payments"][0]["raw_item_id"] is None
+    assert reviewed["services_availed"] == ["Website"] and reviewed["handlers"][0]["messages"] == 3
+    assert "timeline" not in reviewed
+    assert publish().json() == {"published": 1, "inserted": 1, "updated": 0}
+    row = conn.execute("SELECT * FROM clients").fetchone()
+    assert row["payments"] == reviewed["payments"]
+    assert row["client_since"] == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert row["services_availed"] == ["Website"] and row["departments"] == reviewed["handlers"]
+    assert "timeline" not in row and "PRIVATE EMAIL" not in str(row)
+    body.update(payments=[{"date": "2026-10-01T00:00:00Z", "amount": 2000, "currency": "USD", "basis": "manual", "raw_item_id": None}],
+                services_availed=["SEO"], handlers=[])
+    assert approve(cid, body).status_code == 200
+    assert publish().json() == {"published": 1, "inserted": 0, "updated": 1}
+    updated = conn.execute("SELECT * FROM clients").fetchone()
+    assert updated["id"] == row["id"] and updated["payments"][0]["amount"] == 2000
+    assert updated["client_since"] == datetime(2026, 10, 1, tzinfo=timezone.utc)
+    assert updated["services_availed"] == ["SEO"] and updated["departments"] == []
+
+
+def test_older_gui_omitted_fields_use_extracted_details_and_explicit_empty_lists_clear(conn):
+    cid = candidate(conn)
+    extracted = details_body()
+    for key in ("payments", "services_availed", "handlers"):
+        conn.execute("UPDATE candidates SET fields=jsonb_set(fields, %s, %s) WHERE id=%s",
+                     ([key], Jsonb({"value": extracted[key], "source": "derived", "confidence": 1}), cid))
+    conn.commit()
+    assert approve(cid, edited()).status_code == 200
+    reviewed = local.get(f"/api/candidates/{cid}").json()["reviewed"]
+    assert len(reviewed["payments"]) == 2
+    assert reviewed["services_availed"] == ["Website"] and reviewed["handlers"][0]["messages"] == 3
+    body = edited()
+    body.update(payments=[], services_availed=[], handlers=[])
+    assert approve(cid, body).status_code == 200
+    reviewed = local.get(f"/api/candidates/{cid}").json()["reviewed"]
+    assert reviewed["payments"] == [] and reviewed["client_since"] is None
+    assert reviewed["engagement_paid"] is True
+    assert reviewed["services_availed"] == [] and reviewed["handlers"] == []
+
+
+@pytest.mark.parametrize("changes", [
+    {"amount": 0}, {"amount": -1}, {"amount": "NaN"}, {"amount": 1000, "currency": None},
+    {"amount": None, "currency": "PHP"}, {"amount": None, "currency": None, "basis": "stated"},
+    {"basis": "unknown"}, {"basis": "guess"}, {"currency": "123"}, {"currency": "US"},
+])
+def test_payment_validation_rejects_invalid_rows_before_review_is_saved(conn, changes):
+    cid = candidate(conn)
+    body = details_body()
+    body["payments"][0].update(changes)
+    assert approve(cid, body).status_code == 422
+    assert conn.execute("SELECT reviewed FROM candidates WHERE id=%s", (cid,)).fetchone()["reviewed"] is None
+
+
+def test_payments_require_engagement_paid_even_when_filled_from_extraction(conn):
+    cid = candidate(conn)
+    body = details_body()
+    body["engagement_paid"] = False
+    assert approve(cid, body).status_code == 422
+    conn.execute("UPDATE candidates SET fields=jsonb_set(fields, '{payments}', %s) WHERE id=%s",
+                 (Jsonb({"value": details_body()["payments"]}), cid))
+    conn.commit()
+    del body["payments"]
+    assert approve(cid, body).status_code == 422
+
+
+def test_handlers_validate_nonnegative_message_counts(conn):
+    cid = candidate(conn)
+    body = details_body()
+    body["handlers"][0]["messages"] = -1
+    assert approve(cid, body).status_code == 422
+
+
+def test_legacy_reviewed_json_publishes_with_new_defaults(conn):
+    cid = candidate(conn)
+    conn.execute("UPDATE candidates SET review_state='approved', reviewed=%s, reviewed_at=now(), reviewed_by='legacy' WHERE id=%s",
+                 (Jsonb(edited()), cid))
+    conn.commit()
+    assert publish().json()["inserted"] == 1
+    row = conn.execute("SELECT payments, client_since, services_availed, departments FROM clients").fetchone()
+    assert row == {"payments": [], "client_since": None, "services_availed": [], "departments": []}
+
+
+def test_payment_dates_accept_mixed_naive_and_aware_values_and_ignore_client_since(conn):
+    cid = candidate(conn)
+    body = details_body()
+    body["payments"][0]["date"] = "2026-08-01T00:00:00"
+    body["client_since"] = "ignored input"
+    assert approve(cid, body).status_code == 200
+    reviewed = local.get(f"/api/candidates/{cid}").json()["reviewed"]
+    assert datetime.fromisoformat(reviewed["client_since"]) == datetime(2026, 8, 1, tzinfo=timezone.utc)

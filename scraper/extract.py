@@ -243,7 +243,7 @@ def classify_stage(payload: dict, rules: dict) -> tuple[str | None, list[dict], 
     if proof and not negative and any(
             a["mime"].startswith("image/") and a["filename"] in proof
             for a in payload.get("attachments", [])):
-        return "payment_screenshot", [], True, [f"client sent image {proof[0]}"]
+        return "payment_screenshot", amounts, True, [f"client sent image {proof[0]}"]
     return None, [], False, []
 
 
