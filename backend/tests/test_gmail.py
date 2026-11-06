@@ -277,3 +277,134 @@ def test_contacts_and_sheets_still_store_through_upsert(conn, monkeypatch):
     assert [r["source"] for r in rows] == ["contacts", "contacts", "sheets"]
     assert rows[0]["payload"]["emails"] == ["bob@client.test"]
     assert rows[-1]["payload"]["record"] == {"Name": "Bob", "Email": "bob@client.test"}
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_deleted_message_tombstone_prevents_refetch_and_keeps_existing_payload(conn, monkeypatch, existing):
+    if existing:
+        payload = gmail.message_to_payload(message("gone"), MAILBOX, {})
+        payload["v"] = 1
+        db.upsert_raw(conn, "gmail", MAILBOX, "gone", payload)
+        conn.execute("UPDATE raw_items SET extracted_at=now()")
+        conn.execute("INSERT INTO signals (raw_item_id,key,data) SELECT id,'kept','{}' FROM raw_items")
+        conn.commit()
+    before = conn.execute("SELECT * FROM raw_items").fetchall()
+    signals = conn.execute("SELECT * FROM signals").fetchall()
+    fake = FakeGmail([message("gone")])
+    fake.missing.add("gone")
+    monkeypatch.setattr(gmail, "service", fake.service)
+    assert fetch(conn) == 0
+    db.set_cursor(conn, "gmail", MAILBOX, "old-cursor")
+    conn.commit()
+    assert fetch(conn) == 0
+    assert fake.downloads == ["gone"]
+    assert conn.execute("SELECT * FROM raw_items").fetchall() == before
+    assert conn.execute("SELECT * FROM signals").fetchall() == signals
+    assert conn.execute("SELECT count(*) AS n FROM gone_items").fetchone()["n"] == 1
+    assert db.missing_ids(conn, "gmail", MAILBOX, ["gone"], 2) == []
+    assert db.outdated_gmail_ids(conn, MAILBOX, 2) == []
+    assert db.missing_ids(conn, "gmail", "different", ["gone"], 2) == ["gone"]
+
+
+@pytest.fixture
+def people_service(monkeypatch):
+    state = {"calls": [], "saved": [], "other": [], "fail_other": False}
+    class People:
+        def people(self): return self
+        def connections(self): return self
+        def otherContacts(self): return self
+        def list(self, **kw):
+            key = "saved" if "resourceName" in kw else "other"
+            def run():
+                state["calls"].append(key)
+                if key == "other" and state["fail_other"]:
+                    raise RuntimeError("other contacts failed")
+                return {"connections" if key == "saved" else "otherContacts": state[key]}
+            return Request(run)
+    monkeypatch.setattr(contacts, "service", lambda *_: People())
+    return state
+
+
+@pytest.mark.parametrize("hours,full,called", [(23.99, False, False), (24, False, True), (25, False, True), (1, True, True)])
+def test_contacts_freshness_24_hour_boundary_and_full_rescan(conn, monkeypatch, people_service, hours, full, called):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    monkeypatch.setattr(contacts, "datetime", Clock, raising=False)
+    db.set_cursor(conn, "contacts", MAILBOX, (now - timedelta(hours=hours)).isoformat())
+    conn.commit()
+    assert contacts.fetch_contacts(conn, MAILBOX, lambda _: None, full=full) == 0
+    assert people_service["calls"] == (["saved", "other"] if called else [])
+    assert db.get_cursor(conn, "contacts", MAILBOX) == (now.isoformat() if called else (now - timedelta(hours=hours)).isoformat())
+
+
+def test_empty_contacts_mark_fresh_and_partial_failure_does_not(conn, people_service):
+    assert contacts.fetch_contacts(conn, MAILBOX, lambda _: None) == 0
+    marker = db.get_cursor(conn, "contacts", MAILBOX)
+    assert marker
+    people_service["saved"] = [{"resourceName": "p/1", "names": [{"displayName": "Bob"}]}]
+    people_service["fail_other"] = True
+    with pytest.raises(RuntimeError, match="other contacts"):
+        contacts.fetch_contacts(conn, MAILBOX, lambda _: None, full=True)
+    conn.rollback()
+    assert db.get_cursor(conn, "contacts", MAILBOX) == marker
+    assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("action", ["pause", "stop"])
+def test_gmail_chunk_control_keeps_committed_rows_and_blocks_later_sources(conn, monkeypatch, action):
+    from scraper import app as api
+    from fastapi.testclient import TestClient
+    from psycopg.types.json import Jsonb
+
+    fake = FakeGmail([message(str(i)) for i in range(5)])
+    monkeypatch.setattr(gmail, "service", fake.service)
+    monkeypatch.setattr(gmail, "CHUNK", 2)
+    monkeypatch.setattr(api, "PAUSE_POLL_SECONDS", .01, raising=False)
+    monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    params = {"sources": ["gmail", "contacts"], "mailboxes": [MAILBOX], "since": "2025-01-01", "full": False}
+    jid = conn.execute("INSERT INTO jobs(name,status,params) VALUES ('scrape','running',%s) RETURNING id", (Jsonb(params),)).fetchone()["id"]
+    conn.commit()
+    later = []
+    monkeypatch.setattr(contacts, "fetch_contacts", lambda *args, **kwargs: later.append("contacts"))
+    original = api.JobLog.checkpoint
+    requested = threading.Event()
+    def checkpoint(logger):
+        with db.connect() as observer:
+            n = observer.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"]
+            if n == 2 and not requested.is_set():
+                observer.execute("UPDATE jobs SET control=%s WHERE id=%s", (action, jid))
+                requested.set()
+        return original(logger)
+    monkeypatch.setattr(api.JobLog, "checkpoint", checkpoint)
+    worker = threading.Thread(target=api._run_job, args=(jid, "scrape", params))
+    worker.start()
+    client = TestClient(api.app, base_url="http://localhost")
+    try:
+        assert requested.wait(timeout=5)
+        if action == "pause":
+            deadline = time.monotonic() + 5
+            while conn.execute("SELECT status FROM jobs").fetchone()["status"] != "paused":
+                assert time.monotonic() < deadline
+                time.sleep(.01)
+            assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 2
+            assert later == []
+            assert client.post(f"/api/jobs/{jid}/continue", headers={"X-Local-GUI": "1"}).status_code == 200
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    finally:
+        if worker.is_alive():
+            client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"})
+            worker.join(timeout=5)
+    row = conn.execute("SELECT status, control FROM jobs").fetchone()
+    assert row == {"status": "done" if action == "pause" else "stopped", "control": None}
+    assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == (5 if action == "pause" else 2)
+    lines = [r["line"] for r in conn.execute("SELECT line FROM job_log")]
+    if action == "stop":
+        assert later == [] and not any("finished" in line for line in lines)
+    else:
+        assert later == ["contacts"]
+        assert any(line.endswith("paused") for line in lines) and any(line.endswith("continued") for line in lines)

@@ -159,13 +159,13 @@ def test_sheet_row_removal_rebuilds_removed_person(conn, monkeypatch):
 
 def test_scrape_exposes_rows_per_mailbox_and_continues_after_failure(conn, monkeypatch):
     seen = []
-    def fetch(connection, mailbox, *_):
+    def fetch(connection, mailbox, *_, **kwargs):
         with db.connect() as observer:
             seen.append(set(candidates(observer)))
         db.upsert_raw(connection, "sheets", "", mailbox, {"sheet": "T", "tab": "A", "row": 2,
                       "record": {"Name": mailbox, "Email": mailbox}})
         connection.commit()
-    def contacts(*_):
+    def contacts(*_, **kwargs):
         raise RuntimeError("unlicensed")
     monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
     monkeypatch.setattr(pipeline.contacts, "fetch_contacts", contacts)
@@ -297,7 +297,7 @@ def test_full_reset_notifies_job_only_after_reset_commit(conn, monkeypatch):
 def test_job_counts_failed_mailbox_then_continues_and_extracts_good_one(conn, monkeypatch):
     from scraper import app as app_module
 
-    def fetch(connection, mailbox, *_):
+    def fetch(connection, mailbox, *_, **kwargs):
         if mailbox == "bad@acme.test":
             raise RuntimeError("unlicensed")
         db.upsert_raw(connection, "sheets", "", "good", {"sheet": "T", "tab": "A", "row": 2,
@@ -350,3 +350,122 @@ def test_full_reset_failure_before_commit_does_not_set_resume_marker(conn, monke
     assert conn.execute("SELECT params FROM jobs").fetchone()["params"] == {"full": True}
     assert conn.execute("SELECT count(*) AS n FROM signals").fetchone()["n"] == 1
     assert conn.execute("SELECT extracted_at FROM raw_items").fetchone()["extracted_at"]
+
+
+@pytest.mark.parametrize("action", ["pause", "stop"])
+def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, monkeypatch, action):
+    import threading
+    import time
+    from fastapi.testclient import TestClient
+    from scraper import app as api
+    from psycopg.types.json import Jsonb
+
+    db.upsert_raw_many(conn, "sheets", "", [(str(i), {"sheet": "T", "tab": "A", "row": i + 2,
+        "record": {"Name": f"P{i}", "Email": f"p{i}@client.test"}}) for i in range(3)])
+    params = {"full": True}
+    jid = conn.execute("INSERT INTO jobs(name,status,params) VALUES ('extract','running',%s) RETURNING id", (Jsonb(params),)).fetchone()["id"]
+    conn.commit()
+    monkeypatch.setattr(pipeline, "BATCH", 2)
+    monkeypatch.setattr(api, "PAUSE_POLL_SECONDS", .01)
+    original = api.JobLog.checkpoint
+    requested = threading.Event()
+    def checkpoint(logger):
+        with db.connect() as observer:
+            n = observer.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"]
+            if n == 2 and not requested.is_set():
+                observer.execute("UPDATE jobs SET control=%s WHERE id=%s", (action, jid))
+                requested.set()
+        original(logger)
+    monkeypatch.setattr(api.JobLog, "checkpoint", checkpoint)
+    worker = threading.Thread(target=api._run_job, args=(jid, "extract", params))
+    client = TestClient(api.app, base_url="http://localhost")
+    worker.start()
+    before = None
+    try:
+        assert requested.wait(timeout=5)
+        if action == "pause":
+            deadline = time.monotonic() + 5
+            while conn.execute("SELECT status FROM jobs WHERE id=%s", (jid,)).fetchone()["status"] != "paused":
+                assert time.monotonic() < deadline
+                time.sleep(.01)
+            assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 2
+            assert client.post(f"/api/jobs/{jid}/continue", headers={"X-Local-GUI": "1"}).status_code == 200
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        before = conn.execute("SELECT * FROM signals ORDER BY id").fetchall()
+    finally:
+        if worker.is_alive():
+            client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"})
+            worker.join(timeout=5)
+    if action == "stop":
+        assert len(before) == 2
+        assert conn.execute("SELECT status,params FROM jobs").fetchone() == {
+            "status": "stopped", "params": {"full": True, "full_reset_done": True}}
+        monkeypatch.setattr(api, "_launch_job", api._run_job)
+        assert client.post(f"/api/jobs/{jid}/resume", headers={"X-Local-GUI": "1"}).status_code == 200
+        assert conn.execute("SELECT * FROM signals ORDER BY id LIMIT 2").fetchall() == before
+    assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 3
+    assert conn.execute("SELECT status FROM jobs ORDER BY id DESC LIMIT 1").fetchone()["status"] == "done"
+
+
+@pytest.mark.parametrize("sources", [["gmail"], ["contacts"], ["gmail", "contacts"]])
+def test_stopped_scrape_resume_skips_done_mailboxes_but_new_run_does_not(conn, monkeypatch, sources):
+    from fastapi.testclient import TestClient
+    from scraper import app as api
+
+    seen = []
+    def gmail_fetch(connection, mailbox, *args, **kwargs):
+        seen.append(("gmail", mailbox))
+        connection.commit()
+    def contacts_fetch(connection, mailbox, *args, **kwargs):
+        seen.append(("contacts", mailbox))
+        connection.commit()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", gmail_fetch)
+    monkeypatch.setattr(pipeline.contacts, "fetch_contacts", contacts_fetch)
+    original = api.JobLog.mailbox_done
+    stopped = []
+    def done(logger, mailbox):
+        original(logger, mailbox)
+        if mailbox == "a" and not stopped:
+            stopped.append(True)
+            with db.connect() as control:
+                control.execute("UPDATE jobs SET control='stop' WHERE id=%s", (logger.job_id,))
+    monkeypatch.setattr(api.JobLog, "mailbox_done", done)
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    params = {"sources": sources, "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False}
+    jid = api.start_job("scrape", params)
+    row = conn.execute("SELECT * FROM jobs WHERE id=%s", (jid,)).fetchone()
+    assert row["status"] == "stopped" and row["params"]["done_mailboxes"] == ["a"]
+    client = TestClient(api.app, base_url="http://localhost")
+    assert client.post(f"/api/jobs/{jid}/resume", headers={"X-Local-GUI": "1"}).status_code == 200
+    assert seen == [(source, mailbox) for mailbox in ("a", "b") for source in sources]
+    latest = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+    assert latest["params"]["done_mailboxes"] == ["a", "b"]
+    api.start_job("scrape", params)
+    assert seen == [(source, mailbox) for mailbox in ("a", "b", "a", "b") for source in sources]
+
+
+def test_failed_mailbox_source_is_not_marked_done(conn, monkeypatch):
+    from scraper import app as api
+
+    def fetch(connection, mailbox, *args, **kwargs):
+        if mailbox == "bad":
+            raise RuntimeError("source failed")
+        connection.commit()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    api.start_job("scrape", {"sources": ["gmail"], "mailboxes": ["bad", "good"], "since": "2020-01-01", "full": False})
+    row = conn.execute("SELECT * FROM jobs").fetchone()
+    assert row["params"]["done_mailboxes"] == ["good"] and row["status"] == "done_with_errors"
+
+
+def test_job_stopped_from_parser_is_not_swallowed_as_an_extraction_error(conn, monkeypatch):
+    from scraper.db import JobStopped
+
+    seed(conn)
+    def stopped(*args):
+        raise JobStopped()
+    monkeypatch.setattr(pipeline, "extract_item", stopped)
+    with pytest.raises(JobStopped):
+        pipeline.run_extract(lambda _: None)
+    assert conn.execute("SELECT extracted_at,extract_error FROM raw_items").fetchone() == {"extracted_at": None, "extract_error": None}

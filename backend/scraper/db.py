@@ -11,6 +11,10 @@ from .config import ROOT, env
 MIGRATIONS_DIR = ROOT / "migrations"
 
 
+class JobStopped(Exception):
+    pass
+
+
 def connect() -> psycopg.Connection:
     url = env("DATABASE_URL")
     if not url:
@@ -63,8 +67,9 @@ def missing_ids(conn, source: str, mailbox: str, ids: list[str], min_version: in
         r["source_id"]
         for r in conn.execute(
             "SELECT source_id FROM raw_items WHERE source = %s AND mailbox = %s AND source_id = ANY(%s)"
-            " AND coalesce((payload->>'v')::int, 1) >= %s",
-            (source, mailbox, ids, min_version),
+            " AND coalesce((payload->>'v')::int, 1) >= %s"
+            " UNION SELECT source_id FROM gone_items WHERE source=%s AND mailbox=%s AND source_id=ANY(%s)",
+            (source, mailbox, ids, min_version, source, mailbox, ids),
         )
     }
     return [i for i in ids if i not in have]
@@ -72,8 +77,10 @@ def missing_ids(conn, source: str, mailbox: str, ids: list[str], min_version: in
 
 def outdated_gmail_ids(conn, mailbox: str, min_version: int) -> list[str]:
     return [r["source_id"] for r in conn.execute(
-        "SELECT source_id FROM raw_items WHERE source = 'gmail' AND mailbox = %s"
-        " AND coalesce((payload->>'v')::int, 1) < %s ORDER BY id",
+        "SELECT r.source_id FROM raw_items r WHERE r.source = 'gmail' AND r.mailbox = %s"
+        " AND coalesce((r.payload->>'v')::int, 1) < %s"
+        " AND NOT EXISTS (SELECT 1 FROM gone_items g WHERE g.source=r.source"
+        " AND g.mailbox=r.mailbox AND g.source_id=r.source_id) ORDER BY r.id",
         (mailbox, min_version),
     )]
 
@@ -83,6 +90,7 @@ UPSERT_RAW = (
     " ON CONFLICT (source, mailbox, source_id)"
     # A changed payload must be extracted again.
     " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now(), extracted_at = NULL"
+    " WHERE raw_items.payload IS DISTINCT FROM EXCLUDED.payload"
 )
 
 
@@ -107,12 +115,12 @@ def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict
 
 def interrupt_stale(conn) -> None:
     conn.execute(
-        "UPDATE jobs SET status='interrupted', finished_at=clock_timestamp()"
-        " WHERE status='running' AND heartbeat_at < clock_timestamp()-interval '2 minutes'")
+        "UPDATE jobs SET status='interrupted', control=NULL, finished_at=clock_timestamp()"
+        " WHERE status IN ('running','paused') AND heartbeat_at < clock_timestamp()-interval '2 minutes'")
 
 
 def reset(confirmed: bool = False) -> bool:
-    tables = "job_log, jobs, signals, candidates, clients, raw_items, sync_state"
+    tables = "job_log, jobs, signals, candidates, clients, raw_items, sync_state, gone_items"
     with connect() as conn:
         print(f"Host: {conn.info.host}  Database: {conn.info.dbname}")
         if not confirmed:
@@ -123,7 +131,7 @@ def reset(confirmed: bool = False) -> bool:
             return False
         conn.execute("LOCK TABLE jobs IN EXCLUSIVE MODE")
         interrupt_stale(conn)
-        if conn.execute("SELECT 1 FROM jobs WHERE status='running'").fetchone():
+        if conn.execute("SELECT 1 FROM jobs WHERE status IN ('running','paused')").fetchone():
             print("Refusing reset: a job is still running.")
             return False
         conn.execute(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")

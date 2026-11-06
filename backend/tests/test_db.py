@@ -17,7 +17,7 @@ def test_upgrade_001_backfills_legacy_and_rerun_is_noop(pg_url):
         client = conn.execute("INSERT INTO clients (name) VALUES ('Legacy') RETURNING id").fetchone()["id"]
         conn.execute("INSERT INTO candidates (email_key, review_state, client_id) VALUES ('old@x.test', 'approved', %s)", (client,))
         conn.execute("INSERT INTO candidates (email_key) VALUES ('new@x.test')")
-    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql"]
+    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql", "005_job_controls.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         old = conn.execute("SELECT * FROM candidates WHERE email_key='old@x.test'").fetchone()
@@ -56,7 +56,7 @@ def test_upgrade_002_preserves_populated_clients_and_adds_details(pg_url):
         conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
         conn.execute("INSERT INTO schema_migrations VALUES ('001_init.sql'), ('002_stages_publish.sql')")
         conn.execute("INSERT INTO clients (name, emails, stage, amounts) VALUES ('Legacy', ARRAY['old@test.com'], 'paid', '[{\"amount\": 500}]')")
-    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql"]
+    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql", "005_job_controls.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM clients").fetchone()
@@ -75,7 +75,7 @@ def test_upgrade_003_adds_job_tables_and_keeps_clients(pg_url):
             conn.execute((db.MIGRATIONS_DIR / name).read_text())
             conn.execute("INSERT INTO schema_migrations VALUES (%s)", (name,))
         conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
-    assert db.migrate() == ["004_jobs.sql"]
+    assert db.migrate() == ["004_jobs.sql", "005_job_controls.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT name FROM clients").fetchone()["name"] == "Kept"
@@ -99,7 +99,7 @@ def test_reset_dry_run_and_yes_clear_all_data_and_restart_ids(pg_url):
     from scraper import db
 
     db.migrate()
-    tables = ("job_log", "jobs", "signals", "candidates", "clients", "raw_items", "sync_state")
+    tables = ("job_log", "jobs", "signals", "candidates", "clients", "raw_items", "sync_state", "gone_items")
     with db.connect() as conn:
         jid = conn.execute("INSERT INTO jobs (name, status) VALUES ('extract', 'done') RETURNING id").fetchone()["id"]
         conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s, 'kept')", (jid,))
@@ -108,6 +108,7 @@ def test_reset_dry_run_and_yes_clear_all_data_and_restart_ids(pg_url):
         conn.execute("INSERT INTO clients (name) VALUES ('Official')")
         conn.execute("INSERT INTO candidates (email_key, client_id) SELECT 'a', id FROM clients")
         db.set_cursor(conn, "gmail", "a", "123")
+        conn.execute("INSERT INTO gone_items(source,mailbox,source_id) VALUES ('gmail','a','gone')")
     dry = reset_cli(pg_url)
     assert dry.returncode == 1
     with db.connect() as conn:
@@ -120,7 +121,7 @@ def test_reset_dry_run_and_yes_clear_all_data_and_restart_ids(pg_url):
     with db.connect() as conn:
         for table in tables:
             assert conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"] == 0
-        assert conn.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 4
+        assert conn.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 5
         assert conn.execute("INSERT INTO jobs (name, status) VALUES ('extract','done') RETURNING id").fetchone()["id"] == 1
         assert conn.execute("INSERT INTO job_log (job_id, line) VALUES (1,'new') RETURNING id").fetchone()["id"] == 1
         db.upsert_raw(conn, "gmail", "a", "new", {})
@@ -188,3 +189,62 @@ def test_raw_upserts_remove_nested_nuls_and_store_normal_neighbor(pg_url, source
     assert rows["bad"]["nested"][1]["k"][2] is True
     assert payload["body"] == "H\x00i\nCafé 😀\t終"
     assert "inv\x00oice.pdf" in payload["attachment_text"]
+
+
+def test_upgrade_004_preserves_jobs_logs_and_data_and_reserves_paused_slot(pg_url):
+    from scraper import db
+    from psycopg.errors import UniqueViolation
+
+    with db.connect() as conn:
+        conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
+        for name in ("001_init.sql", "002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql"):
+            conn.execute((db.MIGRATIONS_DIR / name).read_text())
+            conn.execute("INSERT INTO schema_migrations VALUES (%s)", (name,))
+        conn.execute("INSERT INTO jobs (name,status,params) VALUES ('scrape','running','{\"done_mailboxes\":[\"a\"]}')")
+        conn.execute("INSERT INTO job_log (job_id,line) VALUES (1,'kept')")
+        conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
+    assert db.migrate() == ["005_job_controls.sql"]
+    assert db.migrate() == []
+    with db.connect() as conn:
+        assert conn.execute("SELECT params, control FROM jobs").fetchone() == {"params": {"done_mailboxes": ["a"]}, "control": None}
+        assert conn.execute("SELECT line FROM job_log").fetchone()["line"] == "kept"
+        assert conn.execute("SELECT name FROM clients").fetchone()["name"] == "Kept"
+        conn.execute("UPDATE jobs SET status='paused', control='pause'")
+        with pytest.raises(UniqueViolation), conn.transaction():
+            conn.execute("INSERT INTO jobs (name,status) VALUES ('extract','running')")
+        conn.execute("INSERT INTO jobs (name,status) VALUES ('extract','stopped')")
+        assert conn.execute("SELECT count(*) AS n FROM gone_items").fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_unchanged_raw_payload_preserves_extraction_and_fetch_timestamps(pg_url, bulk):
+    from scraper import db
+
+    db.migrate()
+    with db.connect() as conn:
+        db.upsert_raw(conn, "gmail", "a", "m", {"body": "same"})
+        conn.execute("UPDATE raw_items SET fetched_at='2020-01-01', extracted_at='2020-01-02'")
+        before = conn.execute("SELECT * FROM raw_items").fetchone()
+        if bulk:
+            db.upsert_raw_many(conn, "gmail", "a", [("m", {"body": "same"})])
+        else:
+            db.upsert_raw(conn, "gmail", "a", "m", {"body": "same"})
+        assert conn.execute("SELECT * FROM raw_items").fetchone() == before
+        if bulk:
+            db.upsert_raw_many(conn, "gmail", "a", [("m", {"body": "changed"})])
+        else:
+            db.upsert_raw(conn, "gmail", "a", "m", {"body": "changed"})
+        after = conn.execute("SELECT * FROM raw_items").fetchone()
+        assert after["id"] == before["id"] and after["extracted_at"] is None
+        assert after["fetched_at"] > before["fetched_at"]
+
+
+def test_reset_refuses_paused_job(pg_url):
+    from scraper import db
+
+    db.migrate()
+    with db.connect() as conn:
+        conn.execute("INSERT INTO jobs (name,status,control) VALUES ('scrape','paused','pause')")
+    assert reset_cli(pg_url, "--yes").returncode == 1
+    with db.connect() as conn:
+        assert conn.execute("SELECT status, control FROM jobs").fetchone() == {"status": "paused", "control": "pause"}

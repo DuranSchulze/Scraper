@@ -2,6 +2,7 @@
 
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from getpass import getuser
@@ -17,6 +18,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from . import db, pipeline
+from .db import JobStopped
 from .config import RULES_PATH, ROOT, env, load_rules
 
 @asynccontextmanager
@@ -51,6 +53,7 @@ async def require_gui_header(request: Request, call_next):
 # --- Persistent jobs (one running row across all API processes) ---
 
 HEARTBEAT_SECONDS = 30
+PAUSE_POLL_SECONDS = 2
 
 
 def log(job_id: int, msg: str) -> None:
@@ -59,7 +62,7 @@ def log(job_id: int, msg: str) -> None:
             conn.autocommit = True
             conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s,%s)",
                          (job_id, f"{datetime.now():%H:%M:%S} {msg}"))
-            conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp() WHERE id=%s AND status='running'", (job_id,))
+            conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp() WHERE id=%s AND status IN ('running','paused')", (job_id,))
     except (PostgresError, RuntimeError) as exc:
         line = msg.replace("\r", "\\r").replace("\n", "\\n")
         print(f"job {job_id} log write failed: {exc!r}; line: {line}", file=sys.stderr)
@@ -77,7 +80,7 @@ class JobLog:
             with db.connect() as conn:
                 conn.autocommit = True
                 conn.execute("UPDATE jobs SET failures=failures+%s, heartbeat_at=clock_timestamp()"
-                             " WHERE id=%s AND status='running'", (count, self.job_id))
+                             " WHERE id=%s AND status IN ('running','paused')", (count, self.job_id))
         except (PostgresError, RuntimeError) as exc:
             print(f"job {self.job_id} log write failed: {exc!r}; line: failure({count})", file=sys.stderr)
 
@@ -86,9 +89,38 @@ class JobLog:
             with db.connect() as conn:
                 conn.autocommit = True
                 conn.execute("UPDATE jobs SET params=jsonb_set(params, '{full_reset_done}', 'true')"
-                             " WHERE id=%s AND status='running'", (self.job_id,))
+                             " WHERE id=%s AND status IN ('running','paused')", (self.job_id,))
         except (PostgresError, RuntimeError) as exc:
             print(f"job {self.job_id} log write failed: {exc!r}; line: full_reset_done", file=sys.stderr)
+
+
+    def mailbox_done(self, mailbox: str) -> None:
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET params=jsonb_set(params, '{done_mailboxes}',"
+                " coalesce(params->'done_mailboxes','[]') || to_jsonb(%s::text))"
+                " WHERE id=%s AND status IN ('running','paused')"
+                " AND NOT (coalesce(params->'done_mailboxes','[]') ? %s)", (mailbox, self.job_id, mailbox))
+
+    def checkpoint(self) -> None:
+        while True:
+            message = None
+            with db.connect() as conn:
+                job = conn.execute("SELECT status, control FROM jobs WHERE id=%s FOR UPDATE", (self.job_id,)).fetchone()
+                if not job or job["status"] not in ("running", "paused") or job["control"] == "stop":
+                    raise JobStopped()
+                if job["control"] == "pause" and job["status"] == "running":
+                    conn.execute("UPDATE jobs SET status='paused' WHERE id=%s", (self.job_id,))
+                    message = "paused"
+                elif job["control"] is None and job["status"] == "paused":
+                    conn.execute("UPDATE jobs SET status='running' WHERE id=%s", (self.job_id,))
+                    message = "continued"
+                proceed = job["control"] is None
+            if message:
+                self(message)
+            if proceed:
+                return
+            time.sleep(PAUSE_POLL_SECONDS)
 
 
 def _heartbeat(job_id: int, stopped: threading.Event) -> None:
@@ -97,41 +129,55 @@ def _heartbeat(job_id: int, stopped: threading.Event) -> None:
             with db.connect() as conn:
                 conn.autocommit = True
                 if not conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp()"
-                                    " WHERE id=%s AND status='running' RETURNING id", (job_id,)).fetchone():
+                                    " WHERE id=%s AND status IN ('running','paused') RETURNING id", (job_id,)).fetchone():
                     return
         except PostgresError:
             continue  # A temporary DB outage gets another attempt on the next heartbeat.
 
 
-def _finish_job(job_id: int, error: str | None) -> None:
+def _finish_job(job_id: int, error: str | None, stopped: bool = False) -> str | None:
     with db.connect() as conn:
-        conn.execute(
-            "UPDATE jobs SET status=CASE WHEN %s::text IS NOT NULL THEN 'failed'"
+        row = conn.execute(
+            "UPDATE jobs SET status=CASE WHEN %s OR control='stop' THEN 'stopped'"
+            " WHEN %s::text IS NOT NULL THEN 'failed'"
             " WHEN failures>0 THEN 'done_with_errors' ELSE 'done' END,"
-            " error=%s, finished_at=clock_timestamp(), heartbeat_at=clock_timestamp()"
-            " WHERE id=%s AND status='running'", (error, error, job_id))
+            " control=NULL, error=%s, finished_at=clock_timestamp(), heartbeat_at=clock_timestamp()"
+            " WHERE id=%s AND status IN ('running','paused') RETURNING status", (stopped, error, error, job_id)).fetchone()
+    return row["status"] if row else None
 
 
 def _run_job(job_id: int, name: str, params: dict) -> None:
-    stopped = threading.Event()
-    heartbeat = threading.Thread(target=_heartbeat, args=(job_id, stopped), daemon=True)
+    heartbeat_stop = threading.Event()
+    heartbeat = threading.Thread(target=_heartbeat, args=(job_id, heartbeat_stop), daemon=True)
     heartbeat.start()
-    logger, error = JobLog(job_id), None
+    logger, error, stopped = JobLog(job_id), None, False
     try:
+        logger.checkpoint()
         if name == "scrape":
-            pipeline.run_scrape(**params, log=logger)
+            pipeline.run_scrape(**{key: params[key] for key in ("sources", "mailboxes", "since", "full")},
+                                log=logger, checkpoint=logger.checkpoint,
+                                done_mailboxes=params.get("done_mailboxes", []))
         elif name == "extract":
-            pipeline.run_extract(logger, full=params.get("full", False))
+            pipeline.run_extract(logger, full=params.get("full", False) and not params.get("full_reset_done", False),
+                                 checkpoint=logger.checkpoint)
         else:
             raise RuntimeError(f"Unknown job: {name}")
-        logger(f"{name}: finished")
+        logger.checkpoint()
+    except JobStopped:
+        stopped = True
     except Exception as exc:
         error = repr(exc)
-        logger(f"ERROR: {error}")
     finally:
-        stopped.set()
+        heartbeat_stop.set()
         heartbeat.join(timeout=1)
-        _finish_job(job_id, error)
+        result = _finish_job(job_id, error, stopped)
+        # Finalize before logging, so a late Stop cannot produce a misleading 'finished'.
+        if result == "stopped":
+            logger("stopped")
+        elif result == "failed":
+            logger(f"ERROR: {error}")
+        elif result in ("done", "done_with_errors"):
+            logger(f"{name}: finished")
 
 
 def _launch_job(job_id: int, name: str, params: dict) -> None:
@@ -143,15 +189,15 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None) -> int:
         with db.connect() as conn:
             if resume_id is not None:
                 previous = conn.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (resume_id,)).fetchone()
-                if not previous or previous["status"] != "interrupted":
-                    raise HTTPException(400, "job is not interrupted")
+                if not previous or previous["status"] not in ("interrupted", "stopped"):
+                    raise HTTPException(400, "job is not interrupted or stopped")
                 name, params = previous["name"], dict(previous["params"])
                 if name == "extract" and params.get("full_reset_done"):
                     params["full"] = False
             job_id = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,'running') RETURNING id",
                                   (name, Jsonb(params))).fetchone()["id"]
             if resume_id is not None:
-                conn.execute("UPDATE jobs SET status='done', error=%s WHERE id=%s AND status='interrupted'",
+                conn.execute("UPDATE jobs SET status='done', control=NULL, error=%s WHERE id=%s AND status IN ('interrupted','stopped')",
                              (f"resumed as job {job_id}", resume_id))
     except UniqueViolation as exc:
         raise HTTPException(409, "another job is still running") from exc
@@ -167,6 +213,36 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None) -> int:
 def resume(job_id: int):
     successor = start_job("", {}, resume_id=job_id)
     return {"started": True, "job_id": successor}
+
+
+def _control(job_id: int, action: str) -> dict:
+    conditions = {
+        "pause": ("status='running' AND control IS NULL", "pause"),
+        "continue": ("control IS DISTINCT FROM 'stop' AND (status='paused' OR (status='running' AND control='pause'))", None),
+        "stop": ("status IN ('running','paused') AND control IS DISTINCT FROM 'stop'", "stop"),
+    }
+    condition, value = conditions[action]
+    with db.connect() as conn:
+        row = conn.execute("UPDATE jobs SET control=%s WHERE id=%s AND (" + condition + ") RETURNING id",
+                           (value, job_id)).fetchone()
+        if not row:
+            raise HTTPException(400, f"cannot {action} this job in its current state")
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/pause")
+def pause(job_id: int):
+    return _control(job_id, "pause")
+
+
+@app.post("/api/jobs/{job_id}/continue")
+def continue_job(job_id: int):
+    return _control(job_id, "continue")
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def stop(job_id: int):
+    return _control(job_id, "stop")
 
 
 class ScrapeIn(BaseModel):
@@ -210,9 +286,10 @@ def status():
             "SELECT count(*) AS n FROM candidates WHERE review_state='approved'"
             " AND (published_at IS NULL OR reviewed_at>published_at)").fetchone()["n"]
         failed = conn.execute("SELECT count(*) AS n FROM raw_items WHERE extract_error IS NOT NULL").fetchone()["n"]
-    return {"running": bool(job and job["status"] == "running"), "job": job["name"] if job else "",
+    return {"running": bool(job and job["status"] in ("running", "paused")), "job": job["name"] if job else "",
             "error": job["error"] if job else None, "log": [r["line"] for r in reversed(lines)],
             "candidates": counts, "raw_items": raw, "ready_to_publish": ready, "extract_failed": failed,
+            "job_control": job["control"] if job else None,
             "job_id": job["id"] if job else None, "job_status": job["status"] if job else None,
             "job_params": job["params"] if job else {}, "job_failures": job["failures"] if job else 0,
             "job_started_at": job["started_at"] if job else None, "job_finished_at": job["finished_at"] if job else None}

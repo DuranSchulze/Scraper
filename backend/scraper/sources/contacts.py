@@ -1,5 +1,7 @@
 """Fetch a user's saved contacts and "other contacts" (auto-saved people they emailed)."""
 
+from datetime import datetime, timedelta, timezone
+
 from .. import db
 from ..google_client import pages, service
 
@@ -16,7 +18,13 @@ def person_payload(p: dict, kind: str) -> dict:
     }
 
 
-def fetch_contacts(conn, mailbox: str, log) -> int:
+def fetch_contacts(conn, mailbox: str, log, full: bool = False, checkpoint=lambda: None) -> int:
+    marker = db.get_cursor(conn, "contacts", mailbox)
+    if not full and marker and datetime.now(timezone.utc) - datetime.fromisoformat(marker) < timedelta(hours=24):
+        conn.commit()
+        log(f"{mailbox}: contacts fetched within 24 h, skipped")
+        checkpoint()
+        return 0
     ppl = service("people", mailbox)
     saved = pages(lambda t: ppl.people().connections().list(
         resourceName="people/me", personFields=PERSON_FIELDS, pageSize=1000, pageToken=t), "connections")
@@ -27,6 +35,8 @@ def fetch_contacts(conn, mailbox: str, log) -> int:
         for p in people:
             db.upsert_raw(conn, "contacts", mailbox, p["resourceName"], person_payload(p, kind))
             n += 1
+    db.set_cursor(conn, "contacts", mailbox, datetime.now(timezone.utc).isoformat())
     conn.commit()
     log(f"{mailbox}: {n} contacts")
+    checkpoint()
     return n

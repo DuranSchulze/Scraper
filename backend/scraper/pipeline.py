@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from psycopg.types.json import Jsonb
 
 from . import db
+from .db import JobStopped
 from .config import env, env_list, load_rules
 from .extract import extract_item
 from .merge import build_candidates, from_json, resolve, to_json
@@ -57,24 +58,46 @@ def _failure(log, count: int = 1) -> None:
         callback(count)
 
 
-def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log) -> None:
+def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log, *,
+               checkpoint=lambda: None, done_mailboxes=()) -> None:
+    done = set(done_mailboxes)
     with db.connect() as conn:
         if {"gmail", "contacts"} & set(sources):
             mailboxes = mailboxes or gmail.list_mailboxes()
             log(f"{len(mailboxes)} mailboxes")
             for mb in mailboxes:
-                for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log)),
-                                    ("contacts", lambda: contacts.fetch_contacts(conn, mb, log))):
+                if mb in done:
+                    continue
+                succeeded = True
+                conn.commit()
+                checkpoint()
+                for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log, checkpoint=checkpoint)),
+                                    ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full, checkpoint=checkpoint))):
                     if name not in sources:
                         continue
+                    conn.commit()
+                    checkpoint()
                     try:
                         fetch()
+                    except JobStopped:
+                        raise
                     except Exception as e:  # a bad mailbox must not stop other mailboxes
+                        succeeded = False
                         conn.rollback()
                         log(f"{mb} {name}: FAILED {e!r}")
                         _failure(log)
+                if succeeded:
+                    conn.commit()
+                    mailbox_done = getattr(log, "mailbox_done", None)
+                    if mailbox_done:
+                        mailbox_done(mb)
+                    done.add(mb)
+                conn.commit()
+                checkpoint()
                 try:
-                    run_extract(log)
+                    run_extract(log, checkpoint=checkpoint)
+                except JobStopped:
+                    raise
                 except Exception as e:
                     conn.rollback()
                     log(f"{mb} extract: FAILED {e!r}")
@@ -83,13 +106,15 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
             # Sheet ids are case-sensitive, so not env_list (which lower-cases).
             ids = [x.strip() for x in env("DRIVE_SHEET_IDS").split(",") if x.strip()]
             if ids:
-                sheets.fetch_sheets(conn, ids, log)
+                conn.commit()
+                checkpoint()
+                sheets.fetch_sheets(conn, ids, log, checkpoint=checkpoint)
             else:
                 log("sheets: DRIVE_SHEET_IDS is empty, skipped")
-    run_extract(log)
+    run_extract(log, checkpoint=checkpoint)
 
 
-def run_extract(log, full: bool = False, *, keys=()) -> None:
+def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) -> None:
     rules = load_rules()
     internal = set(env_list("INTERNAL_DOMAINS"))
     if not internal:
@@ -109,6 +134,7 @@ def run_extract(log, full: bool = False, *, keys=()) -> None:
             reset_done = getattr(log, "full_reset_done", None)
             if reset_done:
                 reset_done()
+            checkpoint()
         while True:
             rows = conn.execute(
                 "SELECT id, source, payload FROM raw_items WHERE extracted_at IS NULL AND id>%s"
@@ -123,6 +149,8 @@ def run_extract(log, full: bool = False, *, keys=()) -> None:
             for row in rows:
                 try:
                     extracted = [to_json(s) for s in extract_item(row, rules, internal)]
+                except JobStopped:
+                    raise
                 except Exception as exc:
                     conn.execute("UPDATE raw_items SET extract_error=%s WHERE id=%s", (repr(exc), row["id"]))
                     failed += 1
@@ -143,7 +171,9 @@ def run_extract(log, full: bool = False, *, keys=()) -> None:
             total_signals += len(signals)
             last_id = rows[-1]["id"]
             log(f"extract: {succeeded} items, {total_signals} signals, {failed} failed")
+            checkpoint()
         if rebuild_keys:
             rebuild(conn, rebuild_keys, rules, datetime.now(timezone.utc))
         conn.commit()
+    checkpoint()
     log(f"extract: done ({succeeded} items, {failed} failed)")

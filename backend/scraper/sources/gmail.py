@@ -11,6 +11,7 @@ from email.utils import parseaddr
 from googleapiclient.errors import HttpError
 
 from .. import db
+from ..db import JobStopped
 from ..config import env, env_list, load_rules
 from ..extract import wants_pdf_text
 from ..google_client import execute, pages, service
@@ -103,6 +104,8 @@ def pdf_text(data: bytes) -> str:
     try:
         reader = PdfReader(io.BytesIO(data))
         return "\n".join((pg.extract_text() or "") for pg in reader.pages[:3])[:MAX_PDF_TEXT]
+    except JobStopped:
+        raise
     except Exception:  # encrypted or malformed PDF: leave it for the reviewer
         return ""
 
@@ -148,7 +151,7 @@ def _all_ids(gm, since: str) -> list[str]:
         userId="me", q=q, maxResults=500, pageToken=t), "messages")]
 
 
-def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log) -> int:
+def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None) -> int:
     """Store new messages of one mailbox. Returns count stored."""
     rules = load_rules()
     gm = service("gmail", mailbox)
@@ -174,13 +177,19 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log) -> int:
     with ThreadPoolExecutor(WORKERS) as pool:
         for i in range(0, len(new), CHUNK):
             chunk = new[i:i + CHUNK]
-            payloads = pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules), chunk)
+            payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules), chunk))
             items = [(p["id"], p) for p in payloads if p]
             db.upsert_raw_many(conn, "gmail", mailbox, items)
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO gone_items (source, mailbox, source_id) VALUES ('gmail',%s,%s) ON CONFLICT DO NOTHING",
+                    [(mailbox, mid) for mid, payload in zip(chunk, payloads) if payload is None])
             conn.commit()
             stored += len(items)
             log(f"{mailbox}: {stored}/{len(new)}")
+            checkpoint()
     # Cursor saved only after every message is stored, so a crash just resumes.
     db.set_cursor(conn, "gmail", mailbox, str(start_history))
     conn.commit()
+    checkpoint()
     return stored

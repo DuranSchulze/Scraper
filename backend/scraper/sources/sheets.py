@@ -20,7 +20,7 @@ def rows_to_records(rows: list[list[str]]) -> list[tuple[int, dict]]:
     return out
 
 
-def fetch_sheets(conn, sheet_ids: list[str], log) -> int:
+def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None) -> int:
     from .. import pipeline
 
     sh = service("sheets", env("GOOGLE_ADMIN_EMAIL"))
@@ -28,20 +28,26 @@ def fetch_sheets(conn, sheet_ids: list[str], log) -> int:
     for sid in sheet_ids:
         meta = execute(sh.spreadsheets().get(
             spreadsheetId=sid, fields="properties.title,sheets.properties.title"))
-        # Row numbers shift when rows are inserted, so replace the whole sheet each run.
-        keys = {r["key"] for r in conn.execute(
-            "SELECT s.key FROM signals s JOIN raw_items r ON r.id=s.raw_item_id"
-            " WHERE r.source='sheets' AND starts_with(r.source_id, %s)", (f"{sid}:",))}
-        conn.execute("DELETE FROM raw_items WHERE source = 'sheets' AND starts_with(source_id, %s)", (f"{sid}:",))
+        current_ids = []
         for tab in (s["properties"]["title"] for s in meta["sheets"]):
             rng = "'" + tab.replace("'", "''") + "'"
             rows = execute(sh.spreadsheets().values().get(spreadsheetId=sid, range=rng)).get("values", [])
             for row_no, record in rows_to_records(rows):
-                db.upsert_raw(conn, "sheets", "", f"{sid}:{tab}:{row_no}", {
+                source_id = f"{sid}:{tab}:{row_no}"
+                current_ids.append(source_id)
+                db.upsert_raw(conn, "sheets", "", source_id, {
                     "sheet": meta["properties"]["title"], "tab": tab, "row": row_no, "record": record})
                 n += 1
+        # Only remove rows absent from a completely fetched sheet.
+        keys = {r["key"] for r in conn.execute(
+            "SELECT s.key FROM signals s JOIN raw_items r ON r.id=s.raw_item_id"
+            " WHERE r.source='sheets' AND starts_with(r.source_id,%s) AND NOT (r.source_id=ANY(%s))",
+            (f"{sid}:", current_ids))}
+        conn.execute("DELETE FROM raw_items WHERE source='sheets' AND starts_with(source_id,%s)"
+                     " AND NOT (source_id=ANY(%s))", (f"{sid}:", current_ids))
         conn.commit()
-        pipeline.run_extract(log, keys=keys)
+        pipeline.run_extract(log, keys=keys, checkpoint=checkpoint)
         log(f"sheet {meta['properties']['title']}: done")
+        checkpoint()
     log(f"sheets: {n} rows")
     return n

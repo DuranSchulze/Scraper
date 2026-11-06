@@ -140,7 +140,7 @@ def test_status_list_and_detail_contract(conn):
 def test_extract_full_flag_reaches_pipeline(conn, monkeypatch):
     seen = []
     monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
-    monkeypatch.setattr(pipeline, "run_extract", lambda log, full=False: seen.append(full))
+    monkeypatch.setattr(pipeline, "run_extract", lambda log, full=False, **kwargs: seen.append(full))
     assert local.post("/api/extract", json={"full": True}, headers=GUI).json() == {"started": True}
     assert local.post("/api/extract", json={}, headers=GUI).json() == {"started": True}
     assert seen == [True, False]
@@ -473,7 +473,7 @@ def test_resume_while_running_keeps_interrupted_row_and_scrape_params(conn, monk
 
 @pytest.mark.parametrize("outcome", ["done", "failed", "done_with_errors"])
 def test_runner_persists_completion_and_error_status(conn, monkeypatch, outcome):
-    def runner(log, full=False):
+    def runner(log, full=False, *, checkpoint=lambda: None):
         log("doing work")
         if outcome == "failed":
             raise ValueError("fixture failure")
@@ -494,7 +494,7 @@ def test_heartbeat_updates_without_log_output_while_runner_is_alive(conn, monkey
 
     started, release = threading.Event(), threading.Event()
     worker = []
-    def runner(log, full=False):
+    def runner(log, full=False, *, checkpoint=lambda: None):
         started.set()
         assert release.wait(timeout=5)
     def launch(*args):
@@ -617,7 +617,7 @@ def fail_job_write(monkeypatch):
 def test_logging_outage_preserves_runner_result_including_final_message(conn, monkeypatch, capsys, fail_job_write, outcome):
     jid = job_row(conn)
     completed = []
-    def runner(logger, full=False):
+    def runner(logger, full=False, *, checkpoint=lambda: None):
         logger("before outage")
         logger("during outage")
         completed.append("continued")
@@ -664,3 +664,75 @@ def test_job_log_heartbeat_write_error_does_not_undo_committed_line(conn, capsys
     assert conn.execute("SELECT line FROM job_log").fetchone()["line"].endswith("insert survived")
     assert capsys.readouterr().err.splitlines() == [
         f"job {jid} log write failed: OperationalError('transient write failure'); line: insert survived"]
+
+
+@pytest.mark.parametrize("state,control,action,code,wanted", [
+    ("running", None, "pause", 200, "pause"), ("running", "pause", "pause", 400, "pause"),
+    ("running", "stop", "pause", 400, "stop"), ("paused", "pause", "pause", 400, "pause"),
+    ("running", None, "continue", 400, None), ("running", "pause", "continue", 200, None),
+    ("paused", "pause", "continue", 200, None), ("paused", None, "continue", 200, None),
+    ("paused", "stop", "continue", 400, "stop"), ("running", "stop", "continue", 400, "stop"),
+    ("running", None, "stop", 200, "stop"), ("running", "pause", "stop", 200, "stop"),
+    ("paused", "pause", "stop", 200, "stop"), ("running", "stop", "stop", 400, "stop"),
+    ("done", None, "pause", 400, None), ("stopped", None, "continue", 400, None),
+    ("failed", None, "stop", 400, None),
+])
+def test_job_control_transitions_are_atomic_and_stop_wins(conn, state, control, action, code, wanted):
+    jid = job_row(conn, status=state)
+    conn.execute("UPDATE jobs SET control=%s WHERE id=%s", (control, jid))
+    conn.commit()
+    response = local.post(f"/api/jobs/{jid}/{action}", headers=GUI)
+    assert response.status_code == code
+    assert response.json() == {"ok": True} if code == 200 else "detail" in response.json()
+    assert conn.execute("SELECT status, control FROM jobs WHERE id=%s", (jid,)).fetchone() == {"status": state, "control": wanted}
+    assert local.post(f"/api/jobs/{jid}/{action}").status_code == 403
+
+
+def test_paused_job_blocks_start_and_heartbeats_and_stales_like_running(conn, monkeypatch):
+    jid = job_row(conn, status="paused")
+    conn.execute("UPDATE jobs SET control='pause' WHERE id=%s", (jid,))
+    conn.commit()
+    state = local.get("/api/status").json()
+    assert state["running"] is True and state["job_status"] == "paused" and state["job_control"] == "pause"
+    assert local.post("/api/extract", json={}, headers=GUI).status_code == 409
+    before = conn.execute("SELECT heartbeat_at FROM jobs").fetchone()["heartbeat_at"]
+    class StopAfterOne:
+        calls = 0
+        def wait(self, seconds):
+            self.calls += 1
+            return self.calls > 1
+    app_module._heartbeat(jid, StopAfterOne())
+    assert conn.execute("SELECT heartbeat_at FROM jobs").fetchone()["heartbeat_at"] > before
+    conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes'")
+    conn.commit()
+    state = local.get("/api/status").json()
+    assert state["job_status"] == "interrupted" and state["job_control"] is None and not state["running"]
+
+
+@pytest.mark.parametrize("status", ["stopped", "interrupted"])
+def test_resume_maps_known_params_and_keeps_done_mailbox_lineage(conn, monkeypatch, status):
+    params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False,
+              "done_mailboxes": ["a"], "irrelevant_metadata": True, "full_reset_done": True}
+    jid = job_row(conn, status=status, name="scrape", params=params)
+    seen = []
+    def runner(sources, mailboxes, since, full, log, *, checkpoint, done_mailboxes):
+        seen.append((sources, mailboxes, since, full, done_mailboxes))
+        checkpoint()
+    monkeypatch.setattr(pipeline, "run_scrape", runner)
+    monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 200
+    assert seen == [(["gmail"], ["a", "b"], "2020-01-01", False, ["a"])]
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 400
+
+
+def test_late_stop_wins_terminal_transition_and_never_logs_finished(conn, monkeypatch):
+    jid = job_row(conn)
+    def runner(log, full=False, *, checkpoint):
+        with db.connect() as control_conn:
+            control_conn.execute("UPDATE jobs SET control='stop' WHERE id=%s", (jid,))
+    monkeypatch.setattr(pipeline, "run_extract", runner)
+    app_module._run_job(jid, "extract", {"full": False})
+    assert conn.execute("SELECT status, control FROM jobs").fetchone() == {"status": "stopped", "control": None}
+    lines = [r["line"] for r in conn.execute("SELECT line FROM job_log")]
+    assert any(line.endswith("stopped") for line in lines)
+    assert not any("finished" in line for line in lines)
