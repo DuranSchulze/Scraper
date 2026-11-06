@@ -7,7 +7,7 @@ export type ClientStatus = (typeof STATUSES)[number];
 export const REVIEW_STATES = ["pending", "approved", "rejected", "merged"] as const;
 export type ReviewState = (typeof REVIEW_STATES)[number];
 
-export type JobStatus = "running" | "done" | "done_with_errors" | "failed" | "interrupted";
+export type JobStatus = "running" | "paused" | "done" | "done_with_errors" | "failed" | "interrupted" | "stopped";
 
 export type Status = {
   running: boolean;
@@ -20,6 +20,8 @@ export type Status = {
   extract_failed: number;
   job_id: number | null;
   job_status: JobStatus | null;
+  /** A pause/stop request the job has not reacted to yet (it acts after the current batch). */
+  job_control: "pause" | "stop" | null;
   job_params: Record<string, unknown>;
   job_failures: number;
   job_started_at: string | null;

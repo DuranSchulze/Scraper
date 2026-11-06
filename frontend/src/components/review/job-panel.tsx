@@ -3,12 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { Pause, Play, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { keys, post, statusQuery } from "@/lib/api";
 import { list, stamp } from "@/lib/format";
+import type { Status } from "@/lib/types";
 import { Pill } from "./badges";
 import { ConfirmDialog } from "./confirm-dialog";
 import { RulesDialog } from "./text-dialog";
@@ -17,6 +19,8 @@ const SOURCES = [["gmail", "Gmail"], ["contacts", "Contacts"], ["sheets", "Sheet
 
 const JOB_STATE = {
   running: { label: "Running", tone: "info" },
+  paused: { label: "Paused", tone: "warning" },
+  stopped: { label: "Stopped", tone: "neutral" },
   done: { label: "Finished", tone: "success" },
   done_with_errors: { label: "Finished with errors", tone: "warning" },
   failed: { label: "Failed", tone: "danger" },
@@ -30,7 +34,7 @@ export function JobPanel() {
   const [mailboxes, setMailboxes] = useState("");
   const [since, setSince] = useState("");
   const [full, setFull] = useState(false);
-  const [confirm, setConfirm] = useState<null | "extract" | "publish">(null);
+  const [confirm, setConfirm] = useState<null | "extract" | "publish" | "stop">(null);
   const [rules, setRules] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
@@ -57,6 +61,12 @@ export function JobPanel() {
     mutationFn: (id: number) => post(`/api/jobs/${id}/resume`),
     onSuccess: () => { toast.success("Resumed"); started(); }, onError: fail,
   });
+  // Pause/continue/stop take effect at the next safe point (after the current batch is saved).
+  const control = useMutation({
+    mutationFn: ({ id, action }: { id: number; action: "pause" | "continue" | "stop" }) => post(`/api/jobs/${id}/${action}`),
+    onSuccess: (_r, v) => { if (v.action === "stop") setConfirm(null); started(); },
+    onError: (e: Error) => { fail(e); started(); },
+  });
   const publish = useMutation({
     mutationFn: () => post<{ published: number; inserted: number; updated: number }>("/api/publish"),
     onSuccess: (r) => {
@@ -70,6 +80,10 @@ export function JobPanel() {
   const c = s?.candidates ?? {}, raw = s?.raw_items ?? {};
   const state = s?.job_status ? JOB_STATE[s.job_status] : null;
   const ready = s?.ready_to_publish ?? 0;
+  const jobId = s?.job_id ?? null;
+  const pendingNote = s?.job_control === "stop" ? "Stopping after the current batch is saved…"
+    : s?.job_control === "pause" && s.job_status === "running" ? "Pausing after the current batch is saved…"
+    : s?.job_status === "paused" && !s.job_control ? "Continuing…" : null;
 
   return (
     <header className="flex flex-col gap-4 border-b bg-card p-4 lg:p-6">
@@ -127,14 +141,18 @@ export function JobPanel() {
             </h2>
             {state && <Pill tone={state.tone}>{state.label}{s?.job_failures ? ` · ${s.job_failures} failure(s)` : ""}</Pill>}
             {s?.job_started_at && <span className="text-xs text-muted-foreground">started {stamp(s.job_started_at)}</span>}
-            {s?.job_status === "interrupted" && s.job_id && (
-              <Button size="sm" disabled={resume.isPending || running} onClick={() => resume.mutate(s.job_id!)}>
-                {resume.isPending ? "Resuming…" : "Resume"}
-              </Button>
-            )}
+            {jobId && <JobControls status={s!.job_status} control={s!.job_control} busy={control.isPending || resume.isPending}
+              onPause={() => control.mutate({ id: jobId, action: "pause" })}
+              onContinue={() => control.mutate({ id: jobId, action: "continue" })}
+              onStop={() => setConfirm("stop")}
+              onResume={() => resume.mutate(jobId)} resuming={resume.isPending} />}
           </div>
+          {pendingNote && <p className="text-xs text-muted-foreground" role="status">{pendingNote}</p>}
           {s?.job_status === "interrupted" && (
             <p className="text-xs text-muted-foreground">The server stopped while this job ran. Resume continues it; already fetched mail is skipped.</p>
+          )}
+          {s?.job_status === "stopped" && (
+            <p className="text-xs text-muted-foreground">Stopped. Everything saved so far is kept; Resume continues from here.</p>
           )}
           {s?.error && s.job_status === "failed" && <p className="text-xs break-words text-destructive">{s.error}</p>}
           <pre ref={logRef} aria-live="polite" tabIndex={0} aria-label="Job log"
@@ -160,7 +178,43 @@ export function JobPanel() {
         title="Publish to the official table?" confirmLabel={`Publish ${ready}`} pending={publish.isPending}
         description={`Copies ${ready} approved record(s) from staging to the official clients table.`}
         onConfirm={() => publish.mutate()} />
+      <ConfirmDialog open={confirm === "stop"} onOpenChange={(o) => !o && setConfirm(null)}
+        title={`Stop the ${s?.job || "job"}?`} confirmLabel="Stop" pending={control.isPending}
+        description="It stops after the current batch is saved. Everything saved so far is kept, and Resume continues from where it stopped."
+        onConfirm={() => jobId && control.mutate({ id: jobId, action: "stop" })} />
       {rules && <RulesDialog onClose={() => setRules(false)} />}
     </header>
   );
+}
+
+function JobControls({ status, control, busy, resuming, onPause, onContinue, onStop, onResume }: {
+  status: Status["job_status"]; control: Status["job_control"]; busy: boolean; resuming: boolean;
+  onPause: () => void; onContinue: () => void; onStop: () => void; onResume: () => void;
+}) {
+  const stopping = control === "stop";
+  if (status === "running" || status === "paused") {
+    const paused = status === "paused" || control === "pause";
+    return (
+      <div className="flex gap-1">
+        {paused
+          ? <Button size="sm" variant="outline" disabled={busy || stopping || (status === "paused" && !control)} onClick={onContinue}>
+              <Play className="h-4 w-4 shrink-0" /> Continue
+            </Button>
+          : <Button size="sm" variant="outline" disabled={busy || stopping} onClick={onPause}>
+              <Pause className="h-4 w-4 shrink-0" /> Pause
+            </Button>}
+        <Button size="sm" variant="destructive" disabled={busy || stopping} onClick={onStop}>
+          <Square className="h-4 w-4 shrink-0" /> {stopping ? "Stopping…" : "Stop"}
+        </Button>
+      </div>
+    );
+  }
+  if (status === "interrupted" || status === "stopped") {
+    return (
+      <Button size="sm" disabled={busy} onClick={onResume}>
+        <Play className="h-4 w-4 shrink-0" /> {resuming ? "Resuming…" : "Resume"}
+      </Button>
+    );
+  }
+  return null;
 }
