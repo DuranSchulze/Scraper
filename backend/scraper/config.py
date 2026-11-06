@@ -6,10 +6,11 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent  # backend/
 RULES_PATH = ROOT / "rules.yaml"
 
-load_dotenv(ROOT / ".env")
+# One .env at the repository root, shared by backend/ and frontend/ commands.
+load_dotenv(ROOT.parent / ".env")
 
 
 def env(name: str, default: str = "") -> str:

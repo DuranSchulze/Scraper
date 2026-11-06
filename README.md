@@ -1,7 +1,7 @@
 # Workspace Scraper
 
 Local tool that reads Gmail, Google Contacts and Google Sheets (read-only), extracts client
-records with rules from `rules.yaml`, and lets a person review each record in a local web page.
+records with rules from `backend/rules.yaml`, and lets a person review each record in a local web page.
 Approved records go to the `clients` table in Neon Postgres. No AI or third-party service sees the data.
 
 ## 1. Google Workspace setup (admin, once)
@@ -19,26 +19,33 @@ Approved records go to the `clients` table in Neon Postgres. No AI or third-part
 
 ## 2. Local setup
 
+## Folders
+
+| Folder | What it is |
+|---|---|
+| `backend/` | Python: scraper, extraction rules (`rules.yaml`), API, migrations, tests |
+| `frontend/` | Next.js review GUI; talks only to the backend API |
+| `.env` (root) | Your settings and secrets, shared by both. Never committed. |
+
+Run every command below from the repository root. The `Makefile` handles the folders, so no `cd` is needed.
+
 ```bash
-cp .env.example .env        # fill in every value
-uv sync
-uv run python -m scraper.db migrate
-cd web && npm install && cd ..
+cp backend/.env.example .env        # fill in every value
+make setup                          # installs backend and frontend dependencies
+make migrate                        # creates or updates the database tables
 ```
 
-Edit `rules.yaml`: department aliases, service names and keywords.
+Use an absolute path for `GOOGLE_SERVICE_ACCOUNT_FILE` in `.env`.
+
+Edit `backend/rules.yaml`: department aliases, service names and keywords.
 
 ## 3. Run
 
-Two processes, each in its own terminal:
-
 ```bash
-uv run python -m scraper.app        # API on 127.0.0.1:8765 (scraping, extraction, database)
+make dev        # starts the API (127.0.0.1:8765) and the GUI (127.0.0.1:3000); Ctrl+C stops both
 ```
 
-```bash
-cd web && npm run dev               # review GUI on 127.0.0.1:3000
-```
+Or one per terminal: `make api` and `make web`.
 
 Open http://127.0.0.1:3000. Both bind to this computer only.
 
@@ -56,14 +63,14 @@ the browser until you approve or reject. If the API stops during a scrape, the G
    **Approve (staging)**, **Reject**, or **Merge** into another record's ID.
 3. **Publish** copies approved records from staging (`candidates`) to the official `clients` table.
    Publishing again only sends records approved or edited since the last publish.
-4. After editing `rules.yaml`, press **Re-run extraction**. No refetch from Google is needed.
+4. After editing `backend/rules.yaml`, press **Re-run extraction**. No refetch from Google is needed.
 5. **Client details** (in each record) shows what the client paid, when they became a client and for how
    long, the services they bought, which department and staff mailbox handled them, and a timeline of
    deal emails. Payment rows marked **From invoice — confirm** or **Amount unknown** need a check:
    edit the amount, remove a duplicate row, or add a missing payment before approving.
    Everything except the timeline is copied to `clients` on Publish.
 
-After upgrading: run `uv run python -m scraper.db migrate`, then **Re-run extraction**. Records already
+After upgrading: run `make migrate`, then **Re-run extraction**. Records already
 approved keep their old details until you move them **Back to pending** and approve them again.
 
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
@@ -75,11 +82,11 @@ Approved, rejected and merged records are never overwritten by a rerun.
 official `clients` table.** There is no undo. The next scrape downloads every mailbox again.
 
 ```bash
-uv run python -m scraper.db reset          # shows the database and row counts; deletes nothing
+uv run --directory backend python -m scraper.db reset          # shows the database and row counts; deletes nothing
 ```
 
 ```bash
-uv run python -m scraper.db reset --yes    # deletes everything listed above
+uv run --directory backend python -m scraper.db reset --yes    # deletes everything listed above
 ```
 
 It refuses while a job is running. Tables and migrations stay in place.
@@ -93,7 +100,7 @@ brew install postgresql@17
 ```
 
 ```bash
-uv run pytest
+make test       # backend tests, then frontend typecheck and lint
 ```
 
 ## Tables

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1 -p 3000",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
