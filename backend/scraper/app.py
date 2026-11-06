@@ -418,7 +418,7 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
             " (SELECT jsonb_build_object('amount',a->'amount','currency',a->'currency',"
             " 'stage',a->'stage','date',a->'date') FROM jsonb_array_elements("
             " coalesce(nullif(fields->'amounts'->'value','null'::jsonb),'[]'::jsonb)) AS a"
-            " ORDER BY (a->>'date')::timestamptz DESC NULLS LAST LIMIT 1) AS latest_amount,"
+            " ORDER BY a->>'date' DESC NULLS LAST LIMIT 1) AS latest_amount,"
             " jsonb_build_object('gmail',coalesce(i.gmail,0),'contacts',coalesce(i.contacts,0),"
             " 'sheets',coalesce(i.sheets,0)) AS item_sources,"
             " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
