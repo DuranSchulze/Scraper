@@ -877,3 +877,51 @@ def test_list_item_sources_deduplicate_across_merge_chain(conn):
     assert response.headers['X-Total-Count'] == '1' and row['id'] == ids[2]
     assert row['item_sources'] == {'gmail': 1, 'contacts': 1, 'sheets': 1}
     assert row['items'] == sum(row['item_sources'].values()) == 3
+
+
+@pytest.mark.parametrize('sort,order,positions', [
+    ('first_contact', 'asc', [0, 1, 2, 3, 4]),
+    ('first_contact', 'desc', [1, 2, 0, 3, 4]),
+    ('last_contact', 'asc', [1, 2, 0, 3, 4]),
+    ('last_contact', 'desc', [0, 1, 2, 3, 4]),
+])
+def test_contact_sort_directions_nulls_ties_and_default(conn, sort, order, positions):
+    ids = []
+    for i, (first, last) in enumerate([
+        ('2020-01-01', '2022-01-01'), ('2021-01-01', '2020-01-01'),
+        ('2021-01-01', '2020-01-01'), (None, None), (None, None),
+    ]):
+        fields = {'first_contact': {'value': first}, 'last_contact': {'value': last}}
+        ids.append(conn.execute('INSERT INTO candidates(email_key,fields) VALUES (%s,%s) RETURNING id',
+                                (f'sort{i}@test', Jsonb(fields))).fetchone()['id'])
+    conn.commit()
+    response = local.get('/api/candidates', params={'sort': sort, 'order': order})
+    assert response.status_code == 200 and response.headers['X-Total-Count'] == '5'
+    assert [row['id'] for row in response.json()] == [ids[i] for i in positions]
+    assert [row['id'] for row in local.get('/api/candidates').json()] == ids
+
+
+@pytest.mark.parametrize('sort', ['first_contact', 'last_contact'])
+def test_contact_sort_selects_oldest_before_cap(conn, sort):
+    from datetime import timedelta
+
+    with conn.cursor() as cur:
+        cur.executemany('INSERT INTO candidates(email_key,fields) VALUES (%s,%s)', [
+            (f'cap{i}@test', Jsonb({sort: {'value': (datetime(2020, 1, 1) + timedelta(days=501-i)).isoformat()}}))
+            for i in range(502)
+        ])
+    conn.commit()
+    ids = [row['id'] for row in conn.execute('SELECT id FROM candidates ORDER BY id DESC')]
+    response = local.get('/api/candidates', params={'sort': sort, 'order': 'asc'})
+    assert response.headers['X-Total-Count'] == '502'
+    assert [row['id'] for row in response.json()] == ids[:500]
+    assert all(row['items'] == 0 and row['item_sources'] == {'gmail': 0, 'contacts': 0, 'sheets': 0}
+               for row in response.json())
+
+
+@pytest.mark.parametrize('params', [
+    {'sort': 'name'}, {'order': 'sideways'}, {'sort': ''}, {'order': ''},
+    {'sort': "last_contact' DESC; DROP TABLE candidates; --"}, {'order': 'ASC'},
+])
+def test_contact_sort_rejects_invalid_parameters(conn, params):
+    assert local.get('/api/candidates', params=params).status_code == 400

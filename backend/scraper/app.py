@@ -377,7 +377,10 @@ def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=
 
 @app.get("/api/candidates")
 def list_candidates(response: Response, state: str = "pending", q: str = "", status: str = "",
-                    department: str = "", stage: str = ""):
+                    department: str = "", stage: str = "", sort: str = "last_contact", order: str = "desc"):
+    if sort not in {"last_contact", "first_contact"} or order not in {"asc", "desc"}:
+        raise HTTPException(400, "sort must be last_contact or first_contact; order must be asc or desc")
+    order_by = f" ORDER BY fields->'{sort}'->>'value' {order} NULLS LAST, id ASC"
     sql = " FROM candidates WHERE review_state=%s"
     args = [state]
     if q:
@@ -396,7 +399,7 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
         response.headers["X-Total-Count"] = str(conn.execute("SELECT count(*) AS n" + sql, args).fetchone()["n"])
         return conn.execute(
             "WITH RECURSIVE selected AS (SELECT *" + sql +
-            " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST LIMIT 500),"
+            order_by + " LIMIT 500),"
             " lineage AS (SELECT id AS root_id,id,email_key,ARRAY[id] AS path FROM selected"
             " UNION ALL SELECT l.root_id,c.id,c.email_key,l.path || c.id FROM lineage l"
             " JOIN candidates c ON c.merged_into=l.id AND c.review_state='merged' WHERE NOT c.id=ANY(l.path)),"
@@ -422,7 +425,7 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
             " jsonb_build_object('gmail',coalesce(i.gmail,0),'contacts',coalesce(i.contacts,0),"
             " 'sheets',coalesce(i.sheets,0)) AS item_sources,"
             " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
-            " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST", args).fetchall()
+            + order_by, args).fetchall()
 
 
 def _get(conn, cid: int, lock: bool = False) -> dict:
