@@ -1,5 +1,6 @@
 """Local review GUI. Run: uv run python -m scraper.app  (binds 127.0.0.1 only)."""
 
+import sys
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -53,11 +54,15 @@ HEARTBEAT_SECONDS = 30
 
 
 def log(job_id: int, msg: str) -> None:
-    with db.connect() as conn:
-        conn.autocommit = True
-        conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s,%s)",
-                     (job_id, f"{datetime.now():%H:%M:%S} {msg}"))
-        conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp() WHERE id=%s AND status='running'", (job_id,))
+    try:
+        with db.connect() as conn:
+            conn.autocommit = True
+            conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s,%s)",
+                         (job_id, f"{datetime.now():%H:%M:%S} {msg}"))
+            conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp() WHERE id=%s AND status='running'", (job_id,))
+    except (PostgresError, RuntimeError) as exc:
+        line = msg.replace("\r", "\\r").replace("\n", "\\n")
+        print(f"job {job_id} log write failed: {exc!r}; line: {line}", file=sys.stderr)
 
 
 class JobLog:
@@ -68,16 +73,22 @@ class JobLog:
         log(self.job_id, msg)
 
     def failure(self, count: int = 1) -> None:
-        with db.connect() as conn:
-            conn.autocommit = True
-            conn.execute("UPDATE jobs SET failures=failures+%s, heartbeat_at=clock_timestamp()"
-                         " WHERE id=%s AND status='running'", (count, self.job_id))
+        try:
+            with db.connect() as conn:
+                conn.autocommit = True
+                conn.execute("UPDATE jobs SET failures=failures+%s, heartbeat_at=clock_timestamp()"
+                             " WHERE id=%s AND status='running'", (count, self.job_id))
+        except (PostgresError, RuntimeError) as exc:
+            print(f"job {self.job_id} log write failed: {exc!r}; line: failure({count})", file=sys.stderr)
 
     def full_reset_done(self) -> None:
-        with db.connect() as conn:
-            conn.autocommit = True
-            conn.execute("UPDATE jobs SET params=jsonb_set(params, '{full_reset_done}', 'true')"
-                         " WHERE id=%s AND status='running'", (self.job_id,))
+        try:
+            with db.connect() as conn:
+                conn.autocommit = True
+                conn.execute("UPDATE jobs SET params=jsonb_set(params, '{full_reset_done}', 'true')"
+                             " WHERE id=%s AND status='running'", (self.job_id,))
+        except (PostgresError, RuntimeError) as exc:
+            print(f"job {self.job_id} log write failed: {exc!r}; line: full_reset_done", file=sys.stderr)
 
 
 def _heartbeat(job_id: int, stopped: threading.Event) -> None:

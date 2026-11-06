@@ -560,3 +560,107 @@ def test_startup_serves_gui_when_database_is_unavailable_and_status_retries(conn
         assert client.get("/api/status").status_code == 500
         monkeypatch.setattr(db, "connect", original)
         assert client.get("/api/status").json()["job_status"] == "interrupted"
+
+
+@pytest.mark.parametrize("error_type", [OperationalError, RuntimeError])
+@pytest.mark.parametrize("operation,line", [("log", "fixture line"), ("failure", "failure(3)"), ("full_reset_done", "full_reset_done")])
+def test_job_logger_connection_errors_fall_back_to_stderr(monkeypatch, capsys, error_type, operation, line):
+    def unavailable():
+        raise error_type("temporary database error")
+    monkeypatch.setattr(db, "connect", unavailable)
+    logger = app_module.JobLog(42)
+    if operation == "log":
+        result = logger("fixture line")
+    elif operation == "failure":
+        result = logger.failure(3)
+    else:
+        result = logger.full_reset_done()
+    assert result is None
+    assert capsys.readouterr().err.splitlines() == [
+        f"job 42 log write failed: {error_type('temporary database error')!r}; line: {line}"]
+
+
+def test_job_log_fallback_keeps_multiline_messages_on_one_stderr_line(monkeypatch, capsys):
+    def unavailable():
+        raise OperationalError("offline")
+    monkeypatch.setattr(db, "connect", unavailable)
+    app_module.log(42, "first\nsecond\rthird")
+    assert capsys.readouterr().err.splitlines() == [
+        "job 42 log write failed: OperationalError('offline'); line: first\\nsecond\\rthird"]
+
+
+@pytest.fixture
+def fail_job_write(monkeypatch):
+    from contextlib import contextmanager
+
+    original = db.connect
+    def install(predicate):
+        class Connection:
+            def __init__(self, real): self.real = real
+            @property
+            def autocommit(self): return self.real.autocommit
+            @autocommit.setter
+            def autocommit(self, value): self.real.autocommit = value
+            def execute(self, query, args=None):
+                if predicate(query, args):
+                    raise OperationalError("transient write failure")
+                return self.real.execute(query, args)
+        @contextmanager
+        def connect():
+            with original() as real:
+                yield Connection(real)
+        monkeypatch.setattr(db, "connect", connect)
+    return install
+
+
+@pytest.mark.parametrize("outcome", ["done", "done_with_errors", "failed"])
+def test_logging_outage_preserves_runner_result_including_final_message(conn, monkeypatch, capsys, fail_job_write, outcome):
+    jid = job_row(conn)
+    completed = []
+    def runner(logger, full=False):
+        logger("before outage")
+        logger("during outage")
+        completed.append("continued")
+        if outcome == "done_with_errors":
+            logger.failure(2)
+        if outcome == "failed":
+            raise ValueError("real runner failure")
+    fail_job_write(lambda query, args: query.startswith("INSERT INTO job_log") and (
+        args[1].endswith("during outage") or args[1].endswith("extract: finished") or "ERROR:" in args[1]))
+    monkeypatch.setattr(pipeline, "run_extract", runner)
+    app_module._run_job(jid, "extract", {"full": False})
+    assert completed == ["continued"]
+    row = conn.execute("SELECT status, error, failures FROM jobs WHERE id=%s", (jid,)).fetchone()
+    assert row == {"status": outcome, "error": "ValueError('real runner failure')" if outcome == "failed" else None,
+                   "failures": 2 if outcome == "done_with_errors" else 0}
+    persisted = conn.execute("SELECT line FROM job_log WHERE job_id=%s", (jid,)).fetchall()
+    assert len(persisted) == 1 and persisted[0]["line"].endswith("before outage")
+    stderr = capsys.readouterr().err.splitlines()
+    assert len(stderr) == 2 and all(f"job {jid} log write failed:" in line for line in stderr)
+    assert "line: during outage" in stderr[0]
+    assert ("line: ERROR: ValueError('real runner failure')" if outcome == "failed" else "line: extract: finished") in stderr[1]
+
+
+@pytest.mark.parametrize("operation,query_prefix,line", [
+    ("failure", "UPDATE jobs SET failures=", "failure(3)"),
+    ("full_reset_done", "UPDATE jobs SET params=", "full_reset_done"),
+])
+def test_job_metadata_write_errors_are_swallowed(conn, capsys, fail_job_write, operation, query_prefix, line):
+    jid = job_row(conn, params={"full": True})
+    fail_job_write(lambda query, args: query.startswith(query_prefix))
+    logger = app_module.JobLog(jid)
+    result = logger.failure(3) if operation == "failure" else logger.full_reset_done()
+    assert result is None
+    assert capsys.readouterr().err.splitlines() == [
+        f"job {jid} log write failed: OperationalError('transient write failure'); line: {line}"]
+    assert conn.execute("SELECT status, failures, params FROM jobs").fetchone() == {
+        "status": "running", "failures": 0, "params": {"full": True}}
+
+
+def test_job_log_heartbeat_write_error_does_not_undo_committed_line(conn, capsys, fail_job_write):
+    jid = job_row(conn)
+    fail_job_write(lambda query, args: query.startswith("UPDATE jobs SET heartbeat_at="))
+    app_module.log(jid, "insert survived")
+    assert conn.execute("SELECT line FROM job_log").fetchone()["line"].endswith("insert survived")
+    assert capsys.readouterr().err.splitlines() == [
+        f"job {jid} log write failed: OperationalError('transient write failure'); line: insert survived"]
