@@ -39,6 +39,18 @@ export type CandidateRow = {
   stage: Stage;
   needs_check: number;
   last_contact: string | null;
+  first_contact: string | null;
+  /** Distinct scraped items (emails, contacts, sheet rows) behind this record, incl. merged ones. */
+  items: number;
+};
+
+export type MailboxState = "pending" | "running" | "done" | "failed" | "skipped";
+export type MailboxProgress = {
+  mailbox: string; status: MailboxState; fetched: number; total: number; rate_limited: number;
+  error: string | null; started_at: string | null; finished_at: string | null;
+};
+export type MailboxBoard = {
+  job_id: number | null; items: MailboxProgress[]; counts: Record<MailboxState, number>;
 };
 
 export type Field<T> = { value: T; source: string; confidence: number };

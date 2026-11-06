@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import type { Candidate, CandidateRow, RawItem, Status } from "./types";
+import type { Candidate, CandidateRow, MailboxBoard, RawItem, Status } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -26,6 +26,14 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return data as T;
 }
 
+/** Like request(), but also returns the X-Total-Count header (number of rows before the 500 cap). */
+async function requestWithTotal<T>(path: string): Promise<{ rows: T; total: number }> {
+  const res = await fetch(path, { headers: { "X-Local-GUI": "1" } });
+  if (!res.ok) return request<{ rows: T; total: number }>(path); // reuse request()'s error message
+  const rows = (await res.json()) as T;
+  return { rows, total: Number(res.headers.get("X-Total-Count") ?? (rows as unknown[]).length) };
+}
+
 export const post = <T = { ok: boolean }>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: JSON.stringify(body ?? {}) });
 
@@ -35,6 +43,8 @@ export const keys = {
   status: ["status"] as const,
   candidates: (f: Filters) => ["candidates", f] as const,
   candidate: (id: number) => ["candidate", id] as const,
+  board: ["board"] as const,
+  log: (jobId: number | null, mailbox: string) => ["log", jobId, mailbox] as const,
   raw: (id: number) => ["raw", id] as const,
   rules: ["rules"] as const,
 };
@@ -49,7 +59,23 @@ export const statusQuery = queryOptions({
 
 export const candidatesQuery = (f: Filters) => queryOptions({
   queryKey: keys.candidates(f),
-  queryFn: () => request<CandidateRow[]>("/api/candidates?" + new URLSearchParams(f)),
+  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + new URLSearchParams(f)),
+});
+
+/** Mailbox progress of the latest scrape job; polled faster while a job runs. */
+export const boardQuery = (running: boolean) => queryOptions({
+  queryKey: keys.board,
+  queryFn: () => request<MailboxBoard>("/api/jobs/latest/mailboxes"),
+  refetchInterval: running ? 2000 : 10000,
+});
+
+export const logQuery = (jobId: number | null, mailbox: string, running: boolean) => queryOptions({
+  queryKey: keys.log(jobId, mailbox),
+  queryFn: () => request<{ lines: string[] }>(
+    `/api/jobs/${jobId}/log?` + new URLSearchParams({ limit: "2000", ...(mailbox ? { mailbox } : {}) })),
+  enabled: jobId != null,
+  refetchInterval: running ? 2000 : false,
+  placeholderData: (prev) => prev,
 });
 
 export const candidateQuery = (id: number) => queryOptions({
