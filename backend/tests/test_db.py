@@ -146,3 +146,45 @@ def test_reset_refuses_fresh_running_job_but_allows_stale_one(pg_url):
     assert reset_cli(pg_url, "--yes").returncode == 0
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM clients").fetchone()["n"] == 0
+
+
+import pytest
+
+
+@pytest.mark.parametrize("source", ["gmail", "contacts", "sheets"])
+@pytest.mark.parametrize("bulk", [False, True])
+def test_raw_upserts_remove_nested_nuls_and_store_normal_neighbor(pg_url, source, bulk):
+    from scraper import db
+
+    db.migrate()
+    payload = {
+        "attachment_text": {"inv\x00oice.pdf": "Total PHP 1,\x00000"},
+        "body": "H\x00i\nCafé 😀\t終",
+        "headers": {"sub\x00ject": "In\x00voice"},
+        "nested": ["a\x00b", {"k\x00": [None, False, True, 0, 42, 12.5, "終\x00"]}, [], {}],
+        "literal": r"\u0000 \x00",
+        "v": 2,
+    }
+    expected = {
+        "attachment_text": {"invoice.pdf": "Total PHP 1,000"},
+        "body": "Hi\nCafé 😀\t終",
+        "headers": {"subject": "Invoice"},
+        "nested": ["ab", {"k": [None, False, True, 0, 42, 12.5, "終"]}, [], {}],
+        "literal": r"\u0000 \x00",
+        "v": 2,
+    }
+    normal = {"body": "Normal ✓", "values": [7, False, None], "v": 2}
+    with db.connect() as conn:
+        if bulk:
+            db.upsert_raw_many(conn, source, "mailbox", [("bad", payload), ("normal", normal)])
+        else:
+            db.upsert_raw(conn, source, "mailbox", "bad", payload)
+            db.upsert_raw(conn, source, "mailbox", "normal", normal)
+        conn.commit()
+    with db.connect() as conn:
+        rows = {r["source_id"]: r["payload"] for r in conn.execute("SELECT source_id, payload FROM raw_items")}
+    assert rows == {"bad": expected, "normal": normal}
+    assert rows["bad"]["nested"][1]["k"][1] is False
+    assert rows["bad"]["nested"][1]["k"][2] is True
+    assert payload["body"] == "H\x00i\nCafé 😀\t終"
+    assert "inv\x00oice.pdf" in payload["attachment_text"]

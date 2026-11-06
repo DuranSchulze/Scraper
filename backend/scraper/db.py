@@ -86,13 +86,23 @@ UPSERT_RAW = (
 )
 
 
+def _strip_nuls(value):
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {_strip_nuls(key): _strip_nuls(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_strip_nuls(item) for item in value]
+    return value
+
+
 def upsert_raw(conn, source: str, mailbox: str, source_id: str, payload: dict) -> None:
-    conn.execute(UPSERT_RAW, (source, mailbox, source_id, Jsonb(payload)))
+    conn.execute(UPSERT_RAW, (source, mailbox, source_id, Jsonb(_strip_nuls(payload))))
 
 
 def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict]]) -> None:
     with conn.cursor() as cur:
-        cur.executemany(UPSERT_RAW, [(source, mailbox, sid, Jsonb(p)) for sid, p in items])
+        cur.executemany(UPSERT_RAW, [(source, mailbox, sid, Jsonb(_strip_nuls(p))) for sid, p in items])
 
 
 def interrupt_stale(conn) -> None:
