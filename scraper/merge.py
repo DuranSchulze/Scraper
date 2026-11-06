@@ -92,9 +92,16 @@ def _payments(paid: list[dict], sigs: list[dict]) -> tuple[list[dict], list[str]
     payments.sort(key=lambda p: (p[2] is None, p[2].timestamp() if p[2] else 0, p[0]["raw_item_id"]))
     for i, (a, thread_a, date_a) in enumerate(payments):
         for b, thread_b, date_b in payments[i + 1:]:
-            if (thread_a != thread_b and a["amount"] is not None and a["amount"] == b["amount"]
-                    and a["currency"] == b["currency"] and date_a and date_b
-                    and abs(date_a - date_b) <= timedelta(days=7)):
+            if thread_a == thread_b or not date_a or not date_b or abs(date_a - date_b) > timedelta(days=7):
+                continue
+            if a["amount"] is None or b["amount"] is None:
+                unknown, unknown_date, other, other_date = (
+                    (a, date_a, b, date_b) if a["amount"] is None else (b, date_b, a, date_a))
+                other_amount = "amount unknown" if other["amount"] is None else f"{other['amount']} {other['currency']}"
+                checks.append(
+                    f"Possible duplicate payment: amount unknown on {unknown_date.date()} is within 7 days of "
+                    f"{other_amount} on {other_date.date()}; remove one if it is the same")
+            elif a["amount"] == b["amount"] and a["currency"] == b["currency"]:
                 checks.append(f"Possible duplicate payment: {a['amount']} on {date_a.date()} and {date_b.date()}; remove one if it is the same")
     return [p[0] for p in payments], checks
 

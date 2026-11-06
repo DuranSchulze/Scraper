@@ -235,3 +235,51 @@ def test_duplicate_warning_keeps_the_full_amount():
     f = fields([detail_signal(rid=1, amount=1000001.25),
                 detail_signal(rid=2, day=1, amount=1000001.25, thread="sales@acme.test:other")])
     assert any("Possible duplicate payment: 1000001.25 on" in w for w in f["needs_check"]["value"])
+
+
+@pytest.mark.parametrize("screenshot_day,confirmation_day,same_thread,warn", [
+    (0, 7, False, True), (0, 8, False, False), (0, 1, True, False),
+    (None, 1, False, False), (0, None, False, False),
+])
+def test_unknown_confirmation_near_screenshot_keeps_payments_and_warns_once(
+        screenshot_day, confirmation_day, same_thread, warn):
+    deal_thread = "sales@acme.test:deal"
+    signals = [detail_signal("invoiced", rid=1, day=-1, amount=1000, thread=deal_thread),
+               detail_signal("payment_screenshot", rid=2, day=screenshot_day, thread=deal_thread),
+               detail_signal(rid=3, day=confirmation_day,
+                             thread=deal_thread if same_thread else "billing@acme.test:confirmation")]
+    f = fields(signals)
+    assert len(f["payments"]["value"]) == (1 if same_thread else 2)
+    duplicate_checks = [w for w in f["needs_check"]["value"] if w.startswith("Possible duplicate payment:")]
+    assert duplicate_checks == ([
+        "Possible duplicate payment: amount unknown on 2026-11-08 is within 7 days of 1000 PHP on 2026-11-01; remove one if it is the same"
+    ] if warn else [])
+
+
+def test_unknown_payment_before_known_payment_uses_unknown_date_in_warning():
+    f = fields([detail_signal(rid=1, day=0),
+                detail_signal(rid=2, day=1, amount=500, thread="billing@acme.test:other")])
+    assert len(f["payments"]["value"]) == 2
+    assert [w for w in f["needs_check"]["value"] if w.startswith("Possible duplicate payment:")] == [
+        "Possible duplicate payment: amount unknown on 2026-11-01 is within 7 days of 500 PHP on 2026-11-02; remove one if it is the same"]
+
+
+def test_two_unknown_payments_in_different_threads_warn_once():
+    f = fields([detail_signal(rid=1), detail_signal(rid=2, day=1, thread="billing@acme.test:other")])
+    assert len(f["payments"]["value"]) == 2
+    assert [w for w in f["needs_check"]["value"] if w.startswith("Possible duplicate payment:")] == [
+        "Possible duplicate payment: amount unknown on 2026-11-01 is within 7 days of amount unknown on 2026-11-02; remove one if it is the same"]
+
+
+def test_unknown_and_installments_in_same_thread_do_not_warn_about_duplicates():
+    f = fields([detail_signal(rid=1, amount=500), detail_signal(rid=2, day=1, amount=1000),
+                detail_signal(rid=3, day=2)])
+    assert len(f["payments"]["value"]) == 3
+    assert not any(w.startswith("Possible duplicate payment:") for w in f["needs_check"]["value"])
+
+
+def test_different_known_amounts_in_different_threads_do_not_warn_about_duplicates():
+    f = fields([detail_signal(rid=1, amount=500),
+                detail_signal(rid=2, day=1, amount=1000, thread="billing@acme.test:other")])
+    assert len(f["payments"]["value"]) == 2
+    assert not any(w.startswith("Possible duplicate payment:") for w in f["needs_check"]["value"])
