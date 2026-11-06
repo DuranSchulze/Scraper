@@ -12,6 +12,7 @@ from scraper.sources import sheets
 @pytest.fixture
 def conn(pg_url, monkeypatch):
     monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "1")
     db.migrate()
     with db.connect() as conn:
         yield conn
@@ -469,3 +470,304 @@ def test_job_stopped_from_parser_is_not_swallowed_as_an_extraction_error(conn, m
     with pytest.raises(JobStopped):
         pipeline.run_extract(lambda _: None)
     assert conn.execute("SELECT extracted_at,extract_error FROM raw_items").fetchone() == {"extracted_at": None, "extract_error": None}
+
+
+@pytest.mark.parametrize("name,default,maximum", [("SCRAPE_PARALLEL_MAILBOXES", 4, 8), ("SCRAPE_MESSAGE_WORKERS", 16, 25)])
+@pytest.mark.parametrize("raw", [None, "", "bad", "0", "-3", "999", "1", "MAX", "3"])
+def test_scrape_integer_settings_defaults_bounds_and_one_diagnostic(monkeypatch, name, default, maximum, raw):
+    from scraper import config
+
+    raw = str(maximum) if raw == "MAX" else raw
+    if raw is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, raw)
+    log = []
+    expected = default if raw in (None, "", "bad") else (1 if raw in ("0", "-3", "1") else maximum if raw in ("999", str(maximum)) else 3)
+    assert config.env_int(name, default, 1, maximum, log.append) == expected
+    adjusted = raw in (None, "", "bad", "0", "-3", "999")
+    assert len(log) == int(adjusted)
+    assert not log or name in log[0]
+
+
+@pytest.fixture
+def parallel_job(conn, monkeypatch):
+    from scraper import app as api
+
+    monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "4")
+    monkeypatch.setenv("SCRAPE_MESSAGE_WORKERS", "16")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    return api
+
+
+def test_four_mailboxes_overlap_and_use_distinct_closed_connections(conn, monkeypatch, parallel_job):
+    import time
+
+    connections, finished = [], []
+    def fetch(connection, mailbox, *args, **kwargs):
+        connections.append(connection)
+        time.sleep(.3)
+        db.set_cursor(connection, "gmail", mailbox, "cursor")
+        connection.commit()
+        finished.append(mailbox)
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", lambda *args, **kwargs: None)
+    start = time.perf_counter()
+    parallel_job.start_job("scrape", {"sources": ["gmail"], "mailboxes": ["a", "b", "c", "d"], "since": "2020-01-01", "full": False})
+    elapsed = time.perf_counter() - start
+    assert elapsed < .8, elapsed
+    assert set(finished) == {"a", "b", "c", "d"}
+    assert len({id(c) for c in connections}) == 4 and all(c.closed for c in connections)
+    row = conn.execute("SELECT status,params,failures FROM jobs").fetchone()
+    assert row["status"] == "done" and row["failures"] == 0
+    assert set(row["params"]["done_mailboxes"]) == set(finished)
+
+
+def test_parallel_resolved_mailboxes_are_deduplicated_and_done_ones_skipped(conn, monkeypatch, parallel_job):
+    from collections import Counter
+
+    monkeypatch.setattr(pipeline.gmail, "list_mailboxes", lambda: ["b", "a", "b", "c", "a"])
+    seen = []
+    def fetch(connection, mailbox, *args, **kwargs):
+        seen.append(mailbox)
+        db.set_cursor(connection, "gmail", mailbox, "once")
+        connection.commit()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", lambda *args, **kwargs: None)
+    parallel_job.start_job("scrape", {"sources": ["gmail"], "mailboxes": [], "since": "2020-01-01", "full": False, "done_mailboxes": ["c"]})
+    assert Counter(seen) == {"a": 1, "b": 1}
+    assert {r["mailbox"] for r in conn.execute("SELECT mailbox FROM sync_state")} == {"a", "b"}
+
+
+@pytest.mark.parametrize("fault", ["connect", "mailbox_done"])
+def test_parallel_task_setup_and_done_mark_errors_are_isolated_and_counted_once(conn, monkeypatch, parallel_job, fault):
+    import threading
+
+    seen = []
+    def fetch(connection, mailbox, *args, **kwargs):
+        seen.append(mailbox)
+        connection.commit()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", lambda *args, **kwargs: None)
+    if fault == "connect":
+        main = threading.get_ident()
+        original = db.connect
+        guard, injected = threading.Lock(), []
+        # Skip JobLog's checkpoint queries so the failure hits a task's own connection.
+        monkeypatch.setattr(parallel_job.JobLog, "checkpoint", lambda self: None)
+        def connect():
+            with guard:
+                if threading.get_ident() != main and not injected:
+                    injected.append(True)
+                    raise RuntimeError("task connection failed")
+            return original()
+        monkeypatch.setattr(db, "connect", connect)
+    else:
+        original = parallel_job.JobLog.mailbox_done
+        def mark(logger, mailbox):
+            if mailbox == "b":
+                raise RuntimeError("done mark failed")
+            original(logger, mailbox)
+        monkeypatch.setattr(parallel_job.JobLog, "mailbox_done", mark)
+    parallel_job.start_job("scrape", {"sources": ["gmail"], "mailboxes": ["a", "b", "c"], "since": "2020-01-01", "full": False})
+    row = conn.execute("SELECT * FROM jobs").fetchone()
+    assert row["status"] == "done_with_errors" and row["failures"] == 1
+    assert len(row["params"]["done_mailboxes"]) == 2
+    assert len(seen) == (2 if fault == "connect" else 3)
+    assert sum("FAILED" in r["line"] for r in conn.execute("SELECT line FROM job_log")) == 1
+
+
+def test_parallel_extraction_is_serialized_and_sheets_and_final_cover_late_rows(conn, monkeypatch, parallel_job):
+    import threading
+    import time
+
+    barrier, guard = threading.Barrier(4), threading.Lock()
+    active, overlaps, events, connections = [], [], [], []
+    def fetch(connection, mailbox, *args, **kwargs):
+        connections.append(connection)
+        db.upsert_raw(connection, "sheets", "", mailbox, {"sheet": "T", "tab": "A", "row": 2,
+                      "record": {"Name": mailbox, "Email": mailbox}})
+        connection.commit()
+        barrier.wait(timeout=5)
+    original = pipeline.run_extract
+    def extract(*args, **kwargs):
+        with guard:
+            if active:
+                overlaps.append(True)
+            active.append(True)
+            events.append("extract")
+        try:
+            time.sleep(.02)
+            return original(*args, **kwargs)
+        finally:
+            with guard:
+                active.pop()
+    def sheet(connection, ids, log, **kwargs):
+        assert all(c.closed for c in connections)
+        events.append("sheet")
+        db.upsert_raw(connection, "sheets", "", "late", {"sheet": "T", "tab": "A", "row": 2,
+                      "record": {"Name": "Late", "Email": "late@client.test"}})
+        connection.commit()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", extract)
+    monkeypatch.setattr(pipeline.sheets, "fetch_sheets", sheet)
+    monkeypatch.setenv("DRIVE_SHEET_IDS", "tracker")
+    boxes = [f"p{i}@client.test" for i in range(4)]
+    parallel_job.start_job("scrape", {"sources": ["gmail", "sheets"], "mailboxes": boxes, "since": "2020-01-01", "full": False})
+    assert overlaps == [] and events == ["extract"] * 4 + ["sheet", "extract"]
+    assert set(candidates(conn)) == set(boxes) | {"late@client.test"}
+    assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "done"
+
+
+def background_scrape(conn, api, params):
+    import threading
+
+    jid = conn.execute("INSERT INTO jobs(name,status,params) VALUES ('scrape','running',%s) RETURNING id", (Jsonb(params),)).fetchone()["id"]
+    conn.commit()
+    worker = threading.Thread(target=api._run_job, args=(jid, "scrape", params))
+    worker.start()
+    return jid, worker
+
+
+def wait_for(predicate):
+    import time
+
+    deadline = time.monotonic() + 5
+    while not predicate():
+        assert time.monotonic() < deadline, "condition did not become true within 5 seconds"
+        time.sleep(.01)
+
+
+def test_parallel_stop_drains_running_tasks_without_fetching_queued_mailboxes(conn, monkeypatch, parallel_job):
+    import threading
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "2")
+    monkeypatch.setenv("DRIVE_SHEET_IDS", "must-not-fetch")
+    barrier, ready, release = threading.Barrier(2), threading.Event(), threading.Event()
+    seen, connections, extracts, sheet_calls = [], [], [], []
+    def fetch(connection, mailbox, *args, checkpoint, **kwargs):
+        seen.append(mailbox)
+        connections.append(connection)
+        db.upsert_raw(connection, "sheets", "", mailbox, {"sheet": "T", "tab": "A", "row": 2,
+                      "record": {"Name": mailbox, "Email": mailbox}})
+        connection.commit()
+        barrier.wait(timeout=5)
+        ready.set()
+        assert release.wait(timeout=5)
+        checkpoint()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", lambda *a, **kw: extracts.append(True))
+    monkeypatch.setattr(pipeline.sheets, "fetch_sheets", lambda *a, **kw: sheet_calls.append(True))
+    params = {"sources": ["gmail", "sheets"], "mailboxes": [f"p{i}@client.test" for i in range(6)], "since": "2020-01-01", "full": False}
+    jid, worker = background_scrape(conn, parallel_job, params)
+    try:
+        assert ready.wait(timeout=5)
+        client = TestClient(parallel_job.app, base_url="http://localhost")
+        assert client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"}).status_code == 200
+        release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        if worker.is_alive():
+            with db.connect() as control:
+                control.execute("UPDATE jobs SET control='stop' WHERE id=%s AND status IN ('running','paused')", (jid,))
+            worker.join(timeout=5)
+    assert len(seen) == 2 and all(c.closed for c in connections)
+    assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 2
+    assert conn.execute("SELECT status,failures,control FROM jobs").fetchone() == {"status": "stopped", "failures": 0, "control": None}
+    assert extracts == [] and sheet_calls == []
+    assert not any("finished" in r["line"] for r in conn.execute("SELECT line FROM job_log"))
+
+
+def test_parallel_pause_blocks_every_fetch_thread_until_continue(conn, monkeypatch, parallel_job):
+    import threading
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "2")
+    monkeypatch.setattr(parallel_job, "PAUSE_POLL_SECONDS", .01)
+    barrier, ready, release, entered = threading.Barrier(2), threading.Event(), threading.Event(), threading.Event()
+    reached, progressed = [], []
+    def fetch(connection, mailbox, *args, checkpoint, **kwargs):
+        connection.commit()
+        barrier.wait(timeout=5)
+        ready.set()
+        assert release.wait(timeout=5)
+        reached.append(mailbox)
+        if len(reached) == 2:
+            entered.set()
+        checkpoint()
+        progressed.append(mailbox)
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", lambda *a, **kw: None)
+    params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False}
+    jid, worker = background_scrape(conn, parallel_job, params)
+    client = TestClient(parallel_job.app, base_url="http://localhost")
+    try:
+        assert ready.wait(timeout=5)
+        assert client.post(f"/api/jobs/{jid}/pause", headers={"X-Local-GUI": "1"}).status_code == 200
+        release.set()
+        assert entered.wait(timeout=5)
+        wait_for(lambda: conn.execute("SELECT status FROM jobs").fetchone()["status"] == "paused")
+        assert progressed == []
+        assert client.post(f"/api/jobs/{jid}/continue", headers={"X-Local-GUI": "1"}).status_code == 200
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        if worker.is_alive():
+            client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"})
+            worker.join(timeout=5)
+    assert set(progressed) == {"a", "b"}
+    assert conn.execute("SELECT status,failures FROM jobs").fetchone() == {"status": "done", "failures": 0}
+    lines = [r["line"] for r in conn.execute("SELECT line FROM job_log")]
+    assert sum(line.endswith("paused") for line in lines) == 1
+    assert sum(line.endswith("continued") for line in lines) == 1
+
+
+def test_worker_waiting_for_extraction_lock_observes_stop_without_extracting(conn, monkeypatch, parallel_job):
+    import threading
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "2")
+    barrier, holding, waiting, release = threading.Barrier(2), threading.Event(), threading.Event(), threading.Event()
+    connections, extracting = [], []
+    class ObservedLock:
+        def __init__(self): self.real = threading.Lock()
+        def acquire(self, timeout=-1):
+            if self.real.locked():
+                waiting.set()
+            return self.real.acquire(timeout=timeout)
+        def release(self): self.real.release()
+    def fetch(connection, mailbox, *args, **kwargs):
+        connections.append(connection)
+        connection.commit()
+        barrier.wait(timeout=5)
+    def extract(log, *, checkpoint):
+        extracting.append(True)
+        holding.set()
+        assert release.wait(timeout=5)
+        checkpoint()
+    monkeypatch.setattr(pipeline, "Lock", ObservedLock)
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "run_extract", extract)
+    params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False}
+    jid, worker = background_scrape(conn, parallel_job, params)
+    client = TestClient(parallel_job.app, base_url="http://localhost")
+    try:
+        assert holding.wait(timeout=5) and waiting.wait(timeout=5)
+        assert client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"}).status_code == 200
+        # The waiting task exits while the first extractor still holds the lock.
+        wait_for(lambda: any(c.closed for c in connections))
+        assert len(extracting) == 1
+        release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+    finally:
+        release.set()
+        if worker.is_alive():
+            client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"})
+            worker.join(timeout=5)
+    assert len(extracting) == 1 and all(c.closed for c in connections)
+    assert conn.execute("SELECT status,failures FROM jobs").fetchone() == {"status": "stopped", "failures": 0}

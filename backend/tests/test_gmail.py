@@ -408,3 +408,39 @@ def test_gmail_chunk_control_keeps_committed_rows_and_blocks_later_sources(conn,
     else:
         assert later == ["contacts"]
         assert any(line.endswith("paused") for line in lines) and any(line.endswith("continued") for line in lines)
+
+
+def test_message_pool_uses_env_worker_count_and_rate_retries_reset_per_chunk(conn, monkeypatch):
+    from scraper import google_client
+
+    fake = FakeGmail([message(str(i)) for i in range(4)])
+    monkeypatch.setattr(gmail, "service", fake.service)
+    monkeypatch.setattr(gmail, "CHUNK", 2)
+    monkeypatch.setenv("SCRAPE_MESSAGE_WORKERS", "2")
+    monkeypatch.setattr(google_client.time, "sleep", lambda _: None)
+    original_pool, pool_sizes = gmail.ThreadPoolExecutor, []
+    def pool(workers):
+        pool_sizes.append(workers)
+        return original_pool(workers)
+    monkeypatch.setattr(gmail, "ThreadPoolExecutor", pool)
+    original = Endpoint.get
+    failed, barrier = [], threading.Barrier(2)
+    def get(endpoint, **kw):
+        request = original(endpoint, **kw)
+        if endpoint.kind != "messages":
+            return request
+        def execute():
+            if kw["id"] == "0" and not failed:
+                failed.append(True)
+                raise HttpError(SimpleNamespace(status=429, reason="rate limited"), b'{}')
+            if kw["id"] in ("0", "1"):
+                barrier.wait(timeout=5)
+            return request.execute()
+        return Request(execute)
+    monkeypatch.setattr(Endpoint, "get", get)
+    log = []
+    assert fetch(conn, log=log.append) == 4
+    assert pool_sizes == [2]
+    assert f"{MAILBOX}: 2/4, 1 rate-limit retries" in log
+    assert f"{MAILBOX}: 4/4" in log
+    assert len(fake.created) == 3 and len(set(fake.created)) == 3

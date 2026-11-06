@@ -73,6 +73,11 @@ the browser until you approve or reject. If the API stops during a scrape, the G
 After upgrading: run `make migrate`, then **Re-run extraction**. Records already
 approved keep their old details until you move them **Back to pending** and approve them again.
 
+`SCRAPE_PARALLEL_MAILBOXES` controls concurrent mailboxes (default 4, range 1–8);
+`SCRAPE_MESSAGE_WORKERS` controls downloads per mailbox (default 16, range 1–25).
+Gmail limits apply per mailbox and vary by project; the worker count is not a throughput promise.
+If progress lines show frequent rate-limit retries, lower `SCRAPE_MESSAGE_WORKERS` to 12 and restart.
+
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
 Approved, rejected and merged records are never overwritten by a rerun.
 

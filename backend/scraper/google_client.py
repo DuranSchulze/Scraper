@@ -39,7 +39,7 @@ def service(kind: str, subject: str):
     return build(name, version, credentials=creds, cache_discovery=False)
 
 
-def execute(request, tries: int = 6):
+def execute(request, tries: int = 6, *, on_rate_limit=None):
     """Run a request, backing off on rate limits and server errors."""
     for attempt in range(tries):
         try:
@@ -48,14 +48,16 @@ def execute(request, tries: int = 6):
             rate_limited = e.resp.status == 403 and "ateLimitExceeded" in str(e)
             if not (e.resp.status in RETRY_STATUS or rate_limited) or attempt == tries - 1:
                 raise
+            if on_rate_limit and (e.resp.status == 429 or rate_limited):
+                on_rate_limit()
             time.sleep(min(60, 2**attempt + random.random()))
 
 
-def pages(make_request, items_key: str):
+def pages(make_request, items_key: str, *, on_rate_limit=None):
     """Yield items from every page of a paged list call. make_request(token) builds the request."""
     token = None
     while True:
-        resp = execute(make_request(token))
+        resp = execute(make_request(token), on_rate_limit=on_rate_limit)
         yield from resp.get(items_key, [])
         token = resp.get("nextPageToken")
         if not token:

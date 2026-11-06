@@ -12,7 +12,7 @@ from googleapiclient.errors import HttpError
 
 from .. import db
 from ..db import JobStopped
-from ..config import env, env_list, load_rules
+from ..config import env, env_int, env_list, load_rules
 from ..extract import wants_pdf_text
 from ..google_client import execute, pages, service
 
@@ -22,7 +22,7 @@ MAX_BODY = 20_000          # chars kept per message; enough for signatures, quot
 MAX_PDF_BYTES = 5_000_000  # invoice/quote PDFs larger than this are not downloaded
 MAX_PDF_TEXT = 8_000
 PAYLOAD_VERSION = 2        # v2 adds attachments + PDF text; older rows are refetched
-WORKERS = 8                # parallel downloads per mailbox; Gmail allows ~50 message reads/s per user
+WORKERS = 16               # default; SCRAPE_MESSAGE_WORKERS bounds each mailbox pool to 1-25
 CHUNK = 200                # messages saved to Neon per batch
 
 _local = threading.local()
@@ -117,10 +117,10 @@ def _gmail(mailbox: str):
     return _local.gm
 
 
-def fetch_message(mailbox: str, mid: str, label_names: dict, rules: dict) -> dict | None:
+def fetch_message(mailbox: str, mid: str, label_names: dict, rules: dict, *, on_rate_limit=None) -> dict | None:
     gm = _gmail(mailbox)
     try:
-        msg = execute(gm.users().messages().get(userId="me", id=mid, format="full"))
+        msg = execute(gm.users().messages().get(userId="me", id=mid, format="full"), on_rate_limit=on_rate_limit)
     except HttpError as e:
         if e.resp.status == 404:  # deleted since listing
             return None
@@ -132,52 +132,61 @@ def fetch_message(mailbox: str, mid: str, label_names: dict, rules: dict) -> dic
         if (att["mime"] == "application/pdf" and att["att_id"] and att["size"] <= MAX_PDF_BYTES
                 and wants_pdf_text(subject, att["filename"], rules)):
             data = execute(gm.users().messages().attachments().get(
-                userId="me", messageId=mid, id=att["att_id"]))["data"]
+                userId="me", messageId=mid, id=att["att_id"]), on_rate_limit=on_rate_limit)["data"]
             payload["attachment_text"][att["filename"]] = pdf_text(_decode(data))
     return payload
 
 
-def _history_ids(gm, start: str) -> list[str]:
+def _history_ids(gm, start: str, *, on_rate_limit=None) -> list[str]:
     ids = []
     for h in pages(lambda t: gm.users().history().list(
-            userId="me", startHistoryId=start, historyTypes=["messageAdded"], pageToken=t), "history"):
+            userId="me", startHistoryId=start, historyTypes=["messageAdded"], pageToken=t), "history", on_rate_limit=on_rate_limit):
         ids += [m["message"]["id"] for m in h.get("messagesAdded", [])]
     return list(dict.fromkeys(ids))
 
 
-def _all_ids(gm, since: str) -> list[str]:
+def _all_ids(gm, since: str, *, on_rate_limit=None) -> list[str]:
     q = f"after:{since.replace('-', '/')}"
     return [m["id"] for m in pages(lambda t: gm.users().messages().list(
-        userId="me", q=q, maxResults=500, pageToken=t), "messages")]
+        userId="me", q=q, maxResults=500, pageToken=t), "messages", on_rate_limit=on_rate_limit)]
 
 
 def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None) -> int:
     """Store new messages of one mailbox. Returns count stored."""
+    workers = env_int("SCRAPE_MESSAGE_WORKERS", WORKERS, 1, 25)
+    retries = 0
+    retry_lock = threading.Lock()
+    def rate_limit_retry():
+        nonlocal retries
+        with retry_lock:
+            retries += 1
     rules = load_rules()
     gm = service("gmail", mailbox)
-    start_history = execute(gm.users().getProfile(userId="me"))["historyId"]
-    label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"))["labels"]}
+    start_history = execute(gm.users().getProfile(userId="me"), on_rate_limit=rate_limit_retry)["historyId"]
+    label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"), on_rate_limit=rate_limit_retry)["labels"]}
 
     ids = None
     cursor = None if full else db.get_cursor(conn, "gmail", mailbox)
     if cursor:
         try:
-            ids = _history_ids(gm, cursor)
+            ids = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
         except HttpError as e:
             if e.resp.status != 404:
                 raise
             log(f"{mailbox}: history expired, doing full scan")
     if ids is None:
-        ids = _all_ids(gm, since)
+        ids = _all_ids(gm, since, on_rate_limit=rate_limit_retry)
 
     ids = list(dict.fromkeys(ids + db.outdated_gmail_ids(conn, mailbox, PAYLOAD_VERSION)))
     new = db.missing_ids(conn, "gmail", mailbox, ids, PAYLOAD_VERSION)
-    log(f"{mailbox}: {len(ids)} messages found, {len(new)} to download")
+    log(f"{mailbox}: {len(ids)} messages found, {len(new)} to download"
+        + (f", {retries} rate-limit retries" if retries else ""))
+    retries = 0
     stored = 0
-    with ThreadPoolExecutor(WORKERS) as pool:
+    with ThreadPoolExecutor(workers) as pool:
         for i in range(0, len(new), CHUNK):
             chunk = new[i:i + CHUNK]
-            payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules), chunk))
+            payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules, on_rate_limit=rate_limit_retry), chunk))
             items = [(p["id"], p) for p in payloads if p]
             db.upsert_raw_many(conn, "gmail", mailbox, items)
             with conn.cursor() as cur:
@@ -186,7 +195,8 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                     [(mailbox, mid) for mid, payload in zip(chunk, payloads) if payload is None])
             conn.commit()
             stored += len(items)
-            log(f"{mailbox}: {stored}/{len(new)}")
+            log(f"{mailbox}: {stored}/{len(new)}" + (f", {retries} rate-limit retries" if retries else ""))
+            retries = 0
             checkpoint()
     # Cursor saved only after every message is stored, so a crash just resumes.
     db.set_cursor(conn, "gmail", mailbox, str(start_history))

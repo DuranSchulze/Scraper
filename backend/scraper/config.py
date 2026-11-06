@@ -17,6 +17,18 @@ def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def env_int(name: str, default: int, minimum: int, maximum: int, log=None) -> int:
+    raw = env(name)
+    try:
+        requested = int(raw)
+    except ValueError:
+        requested = None
+    value = default if requested is None else max(minimum, min(maximum, requested))
+    if log and (requested is None or requested != value):
+        log(f"{name}: using {value} (configured {raw!r})")
+    return value
+
+
 def env_list(name: str) -> list[str]:
     return [x.strip().lower() for x in env(name).split(",") if x.strip()]
 

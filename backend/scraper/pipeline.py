@@ -1,12 +1,14 @@
 """Scrape (fetch from Google) and extract (raw_items -> signals -> candidates) jobs."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Event, Lock
 
 from psycopg.types.json import Jsonb
 
 from . import db
 from .db import JobStopped
-from .config import env, env_list, load_rules
+from .config import env, env_int, env_list, load_rules
 from .extract import extract_item
 from .merge import build_candidates, from_json, resolve, to_json
 from .sources import contacts, gmail, sheets
@@ -60,58 +62,85 @@ def _failure(log, count: int = 1) -> None:
 
 def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log, *,
                checkpoint=lambda: None, done_mailboxes=()) -> None:
-    done = set(done_mailboxes)
-    with db.connect() as conn:
-        if {"gmail", "contacts"} & set(sources):
-            mailboxes = mailboxes or gmail.list_mailboxes()
-            log(f"{len(mailboxes)} mailboxes")
-            for mb in mailboxes:
-                if mb in done:
-                    continue
+    parallel = env_int("SCRAPE_PARALLEL_MAILBOXES", 4, 1, 8, log)
+    env_int("SCRAPE_MESSAGE_WORKERS", gmail.WORKERS, 1, 25, log)
+    stopped, extract_lock = Event(), Lock()
+
+    def task_checkpoint():
+        if stopped.is_set():
+            raise JobStopped()
+        try:
+            checkpoint()
+        except JobStopped:
+            stopped.set()
+            raise
+        if stopped.is_set():
+            raise JobStopped()
+
+    def mailbox_task(mb):
+        step = "connect"
+        try:
+            task_checkpoint()
+            with db.connect() as conn:
                 succeeded = True
-                conn.commit()
-                checkpoint()
-                for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log, checkpoint=checkpoint)),
-                                    ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full, checkpoint=checkpoint))):
+                for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log, checkpoint=task_checkpoint)),
+                                    ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full, checkpoint=task_checkpoint))):
                     if name not in sources:
                         continue
+                    step = name
                     conn.commit()
-                    checkpoint()
+                    task_checkpoint()
                     try:
                         fetch()
                     except JobStopped:
                         raise
-                    except Exception as e:  # a bad mailbox must not stop other mailboxes
+                    except Exception as exc:
                         succeeded = False
                         conn.rollback()
-                        log(f"{mb} {name}: FAILED {e!r}")
+                        log(f"{mb} {name}: FAILED {exc!r}")
                         _failure(log)
                 if succeeded:
+                    step = "mailbox_done"
                     conn.commit()
                     mailbox_done = getattr(log, "mailbox_done", None)
                     if mailbox_done:
                         mailbox_done(mb)
-                    done.add(mb)
                 conn.commit()
-                checkpoint()
+                step = "extract"
+                task_checkpoint()
+                while not extract_lock.acquire(timeout=1):
+                    task_checkpoint()
                 try:
-                    run_extract(log, checkpoint=checkpoint)
-                except JobStopped:
-                    raise
-                except Exception as e:
-                    conn.rollback()
-                    log(f"{mb} extract: FAILED {e!r}")
-                    _failure(log)
-        if "sheets" in sources:
-            # Sheet ids are case-sensitive, so not env_list (which lower-cases).
-            ids = [x.strip() for x in env("DRIVE_SHEET_IDS").split(",") if x.strip()]
-            if ids:
+                    task_checkpoint()
+                    run_extract(log, checkpoint=task_checkpoint)
+                finally:
+                    extract_lock.release()
+        except JobStopped:
+            stopped.set()
+        except Exception as exc:
+            log(f"{mb} {step}: FAILED {exc!r}")
+            _failure(log)
+
+    if {"gmail", "contacts"} & set(sources):
+        resolved = list(dict.fromkeys(mailboxes or gmail.list_mailboxes()))
+        done = set(done_mailboxes)
+        pending = [mb for mb in resolved if mb not in done]
+        log(f"{len(pending)} mailboxes")
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            list(pool.map(mailbox_task, pending))
+    task_checkpoint()
+    if "sheets" in sources:
+        # Sheet ids are case-sensitive, so not env_list (which lower-cases).
+        ids = [x.strip() for x in env("DRIVE_SHEET_IDS").split(",") if x.strip()]
+        if ids:
+            with db.connect() as conn:
                 conn.commit()
-                checkpoint()
-                sheets.fetch_sheets(conn, ids, log, checkpoint=checkpoint)
-            else:
-                log("sheets: DRIVE_SHEET_IDS is empty, skipped")
-    run_extract(log, checkpoint=checkpoint)
+                task_checkpoint()
+                sheets.fetch_sheets(conn, ids, log, checkpoint=task_checkpoint)
+        else:
+            log("sheets: DRIVE_SHEET_IDS is empty, skipped")
+    task_checkpoint()
+    run_extract(log, checkpoint=task_checkpoint)
 
 
 def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) -> None:
