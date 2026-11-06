@@ -38,8 +38,7 @@ export function RecordsTable({ filters, selectedId, onSelect, toolbar }: {
         </div>
         {toolbar}
       </div>
-      <div className="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
-        <Table className="min-w-[1180px]">
+      <Table className="min-w-[1180px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
               <TableHead className="sticky left-0 z-10 w-72 bg-muted pl-4">Client</TableHead>
@@ -62,8 +61,7 @@ export function RecordsTable({ filters, selectedId, onSelect, toolbar }: {
             {rows?.length === 0 && <TableRow><TableCell colSpan={12} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
             {rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
           </TableBody>
-        </Table>
-      </div>
+      </Table>
     </Card>
   );
 }
