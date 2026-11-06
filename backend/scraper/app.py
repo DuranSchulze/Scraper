@@ -381,8 +381,8 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
     sql = " FROM candidates WHERE review_state=%s"
     args = [state]
     if q:
-        sql += " AND (email_key ILIKE %s OR fields->'name'->>'value' ILIKE %s)"
-        args += [f"%{q}%"] * 2
+        sql += " AND (email_key ILIKE %s OR fields->'name'->>'value' ILIKE %s OR fields->'company'->>'value' ILIKE %s)"
+        args += [f"%{q}%"] * 3
     if status:
         sql += " AND fields->'status'->>'value' = %s"
         args.append(status)
@@ -400,14 +400,27 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
             " lineage AS (SELECT id AS root_id,id,email_key,ARRAY[id] AS path FROM selected"
             " UNION ALL SELECT l.root_id,c.id,c.email_key,l.path || c.id FROM lineage l"
             " JOIN candidates c ON c.merged_into=l.id AND c.review_state='merged' WHERE NOT c.id=ANY(l.path)),"
-            " item_counts AS (SELECT root_id,count(DISTINCT s.raw_item_id) AS items FROM lineage l"
-            " JOIN signals s ON s.key=l.email_key GROUP BY root_id)"
+            " item_counts AS (SELECT root_id,count(DISTINCT s.raw_item_id) AS items,"
+            " count(DISTINCT s.raw_item_id) FILTER (WHERE r.source='gmail') AS gmail,"
+            " count(DISTINCT s.raw_item_id) FILTER (WHERE r.source='contacts') AS contacts,"
+            " count(DISTINCT s.raw_item_id) FILTER (WHERE r.source='sheets') AS sheets FROM lineage l"
+            " JOIN signals s ON s.key=l.email_key JOIN raw_items r ON r.id=s.raw_item_id GROUP BY root_id)"
             " SELECT c.id,c.email_key,c.review_state,fields->'name'->>'value' AS name,"
             " fields->'status'->>'value' AS status,fields->'department'->>'value' AS department,"
             " coalesce((fields->'engagement_paid'->>'value')::boolean,false) AS paid,"
             " coalesce(fields->'stage'->>'value','inquiry') AS stage,"
             " coalesce(jsonb_array_length(fields->'needs_check'->'value'),0) AS needs_check,"
             " fields->'last_contact'->>'value' AS last_contact,fields->'first_contact'->>'value' AS first_contact,"
+            " fields->'company'->>'value' AS company,"
+            " coalesce(nullif(fields->'phones'->'value','null'::jsonb),'[]'::jsonb) AS phones,"
+            " coalesce(nullif(nullif(fields->'services_availed'->'value','null'::jsonb),'[]'::jsonb),"
+            " nullif(fields->'services'->'value','null'::jsonb),'[]'::jsonb) AS services,"
+            " (SELECT jsonb_build_object('amount',a->'amount','currency',a->'currency',"
+            " 'stage',a->'stage','date',a->'date') FROM jsonb_array_elements("
+            " coalesce(nullif(fields->'amounts'->'value','null'::jsonb),'[]'::jsonb)) AS a"
+            " ORDER BY (a->>'date')::timestamptz DESC NULLS LAST LIMIT 1) AS latest_amount,"
+            " jsonb_build_object('gmail',coalesce(i.gmail,0),'contacts',coalesce(i.contacts,0),"
+            " 'sheets',coalesce(i.sheets,0)) AS item_sources,"
             " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
             " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST", args).fetchall()
 

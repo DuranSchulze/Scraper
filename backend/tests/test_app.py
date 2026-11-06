@@ -816,3 +816,64 @@ def test_progress_write_failure_never_fails_scrape(conn, monkeypatch, fail_job_w
     job = conn.execute('SELECT status, error FROM jobs WHERE id=%s', (jid,)).fetchone()
     assert (job['status'], job['error']) == ('done', None)
     assert 'mailbox write failed' in capsys.readouterr().err
+
+
+def test_list_scraped_details_latest_amount_and_company_search(conn):
+    amounts = [
+        {'amount': 100, 'currency': 'PHP', 'stage': 'quoted', 'date': '2026-03-01T00:00:00Z', 'raw_item_id': 99},
+        {'amount': 999, 'currency': 'USD', 'stage': 'quoted', 'date': None},
+        {'amount': 200, 'currency': 'PHP', 'stage': 'invoiced', 'date': '2026-05-01T00:00:00Z'},
+        {'amount': 50, 'currency': 'PHP', 'stage': 'quoted', 'date': '2026-01-01T00:00:00Z'},
+    ]
+    fields = {key: {'value': value} for key, value in {
+        'company': 'Unique Company', 'phones': ['09175551234'], 'services': ['Legacy'],
+        'services_availed': ['SEO', 'Design'], 'amounts': amounts,
+    }.items()}
+    conn.execute("INSERT INTO candidates(email_key,fields) VALUES ('details@client.test',%s)", (Jsonb(fields),))
+    conn.commit()
+    response = local.get('/api/candidates', params={'q': 'unique company'})
+    assert response.headers['X-Total-Count'] == '1'
+    row = response.json()[0]
+    assert row['company'] == 'Unique Company' and row['phones'] == ['09175551234']
+    assert row['services'] == ['SEO', 'Design']
+    assert row['latest_amount'] == amounts[2]
+    assert row['item_sources'] == {'gmail': 0, 'contacts': 0, 'sheets': 0} and row['items'] == 0
+    assert local.get('/api/candidates?q=unique&stage=paid').headers['X-Total-Count'] == '0'
+
+
+@pytest.mark.parametrize('fields,services,latest', [
+    ({}, [], None),
+    ({'company': None, 'phones': None, 'services_availed': None, 'services': None, 'amounts': None}, [], None),
+    ({'phones': [], 'services_availed': [], 'amounts': []}, [], None),
+    ({'services': ['Legacy']}, ['Legacy'], None),
+    ({'services_availed': [], 'services': ['Legacy']}, ['Legacy'], None),
+    ({'services_availed': None, 'services': ['Legacy']}, ['Legacy'], None),
+    ({'amounts': [{'amount': 10, 'currency': 'USD', 'stage': 'quoted', 'date': None, 'raw_item_id': 1}]},
+     [], {'amount': 10, 'currency': 'USD', 'stage': 'quoted', 'date': None}),
+])
+def test_list_scraped_details_empty_and_fallback(conn, fields, services, latest):
+    conn.execute("INSERT INTO candidates(email_key,fields) VALUES ('empty@client.test',%s)",
+                 (Jsonb({key: {'value': value} for key, value in fields.items()}),))
+    conn.commit()
+    row = local.get('/api/candidates').json()[0]
+    assert row['company'] is None and row['phones'] == []
+    assert row['services'] == services and row['latest_amount'] == latest
+
+
+def test_list_item_sources_deduplicate_across_merge_chain(conn):
+    ids = [conn.execute('INSERT INTO candidates(email_key) VALUES (%s) RETURNING id',
+                        (f'{key}@client.test',)).fetchone()['id'] for key in ('a', 'b', 'c')]
+    conn.execute("UPDATE candidates SET review_state='merged',merged_into=%s WHERE id=%s", (ids[1], ids[0]))
+    conn.execute("UPDATE candidates SET review_state='merged',merged_into=%s WHERE id=%s", (ids[2], ids[1]))
+    for source, keys in [('gmail', ['a', 'b', 'c']), ('contacts', ['a', 'c']), ('sheets', ['b'])]:
+        db.upsert_raw(conn, source, '', source, {})
+        raw_id = conn.execute('SELECT id FROM raw_items WHERE source=%s', (source,)).fetchone()['id']
+        with conn.cursor() as cur:
+            cur.executemany('INSERT INTO signals(raw_item_id,key,data) VALUES (%s,%s,%s)',
+                            [(raw_id, f'{key}@client.test', Jsonb({})) for key in keys])
+    conn.commit()
+    response = local.get('/api/candidates')
+    row = response.json()[0]
+    assert response.headers['X-Total-Count'] == '1' and row['id'] == ids[2]
+    assert row['item_sources'] == {'gmail': 1, 'contacts': 1, 'sheets': 1}
+    assert row['items'] == sum(row['item_sources'].values()) == 3
