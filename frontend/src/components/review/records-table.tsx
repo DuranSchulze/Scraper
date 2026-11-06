@@ -1,10 +1,10 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { BookUser, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { candidatesQuery, type Filters } from "@/lib/api";
+import { candidatesQuery, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -19,9 +19,23 @@ const SOURCES = [
   { key: "sheets", label: "sheet rows", icon: FileSpreadsheet },
 ] as const;
 
-export function RecordsTable({ filters, selectedId, onSelect, toolbar }: {
-  filters: Filters; selectedId: number | null; onSelect: (id: number) => void; toolbar?: React.ReactNode;
+export function RecordsTable({ filters, selectedId, onSelect, onSort, toolbar }: {
+  filters: Filters; selectedId: number | null; onSelect: (id: number) => void; onSort: (key: SortKey) => void; toolbar?: React.ReactNode;
 }) {
+  const sortHead = (key: SortKey, label: string) => {
+    const active = filters.sort === key;
+    const Icon = !active ? ArrowUpDown : filters.order === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <TableHead className="w-32" aria-sort={active ? (filters.order === "asc" ? "ascending" : "descending") : "none"}>
+        <button type="button" onClick={() => onSort(key)}
+          title={active && filters.order === "asc" ? "Oldest first. Click for newest first" : "Click to sort oldest first"}
+          className={cn("-ml-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-1 hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+            active && "text-foreground")}>
+          {label}<Icon aria-hidden className={cn("h-3.5 w-3.5 shrink-0", !active && "opacity-50")} />
+        </button>
+      </TableHead>
+    );
+  };
   const { data, error, isPending, isFetching } = useQuery(candidatesQuery(filters));
   const rows = data?.rows;
   return (
@@ -49,8 +63,8 @@ export function RecordsTable({ filters, selectedId, onSelect, toolbar }: {
               <TableHead className="w-36 text-right">Latest amount</TableHead>
               <TableHead className="w-20">Paid</TableHead>
               <TableHead className="w-40" title="Scraped emails, contacts and sheet rows behind this record">Scraped</TableHead>
-              <TableHead className="w-28">First contact</TableHead>
-              <TableHead className="w-28">Last contact</TableHead>
+              {sortHead("first_contact", "First contact")}
+              {sortHead("last_contact", "Last contact")}
               <TableHead className="w-24">Checks</TableHead>
               <TableHead className="w-8 pr-4"><span className="sr-only">Open</span></TableHead>
             </TableRow>

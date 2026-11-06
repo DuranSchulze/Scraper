@@ -37,7 +37,10 @@ async function requestWithTotal<T>(path: string): Promise<{ rows: T; total: numb
 export const post = <T = { ok: boolean }>(path: string, body?: unknown) =>
   request<T>(path, { method: "POST", body: JSON.stringify(body ?? {}) });
 
-export type Filters = { state: string; stage: string; status: string; department: string; q: string };
+export type SortKey = "last_contact" | "first_contact";
+export type Filters = {
+  state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc";
+};
 
 export const keys = {
   status: ["status"] as const,

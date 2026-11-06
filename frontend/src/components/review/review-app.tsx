@@ -35,6 +35,9 @@ export function ReviewApp() {
   const filters: Filters = {
     state: params.get("state") || "pending", stage: params.get("stage") || "", status: params.get("status") || "",
     department: params.get("department") || "", q: params.get("q") || "",
+    // Unknown URL values fall back to the API default (newest last contact first) instead of a 400.
+    sort: params.get("sort") === "first_contact" ? "first_contact" : "last_contact",
+    order: params.get("order") === "asc" ? "asc" : "desc",
   };
   const selectedId = Number(params.get("id")) || null;
   const tab = params.get("tab") === "scraping" ? "scraping" : "review";
@@ -98,6 +101,12 @@ export function ReviewApp() {
               </div>
             </div>
             <RecordsTable filters={filters} selectedId={selectedId} onSelect={(id) => setParams({ id: String(id) })}
+              onSort={(sort) => {
+                // A new column starts oldest first; the active column flips. The default (last contact, newest) leaves the URL clean.
+                const order = sort === filters.sort && filters.order === "asc" ? "desc" : "asc";
+                const isDefault = sort === "last_contact" && order === "desc";
+                setParams({ sort: isDefault ? null : sort, order: isDefault ? null : order });
+              }}
               toolbar={
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="relative">
