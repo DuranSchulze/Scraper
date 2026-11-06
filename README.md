@@ -23,17 +23,29 @@ Approved records go to the `clients` table in Neon Postgres. No AI or third-part
 cp .env.example .env        # fill in every value
 uv sync
 uv run python -m scraper.db migrate
+cd web && npm install && cd ..
 ```
 
 Edit `rules.yaml`: department aliases, service names and keywords.
 
 ## 3. Run
 
+Two processes, each in its own terminal:
+
 ```bash
-uv run python -m scraper.app
+uv run python -m scraper.app        # API on 127.0.0.1:8765 (scraping, extraction, database)
 ```
 
-Open http://127.0.0.1:8765.
+```bash
+cd web && npm run dev               # review GUI on 127.0.0.1:3000
+```
+
+Open http://127.0.0.1:3000. Both bind to this computer only.
+
+Nothing is lost on a restart: records live in Neon, the job log and status are stored in the
+`jobs` tables, filters and the open record are in the page URL, and unsaved form edits are kept in
+the browser until you approve or reject. If the API stops during a scrape, the GUI shows
+**Interrupted** about 2 minutes later with a **Resume** button; Resume skips mail already fetched.
 
 1. Pick sources and mailboxes (blank = every user), then **Run scrape**. Records appear while it runs:
    extraction runs after each mailbox.
@@ -57,6 +69,21 @@ approved keep their old details until you move them **Back to pending** and appr
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
 Approved, rejected and merged records are never overwritten by a rerun.
 
+## Start over (empty the database)
+
+**This permanently deletes every scraped email, every staging record, the job history and the
+official `clients` table.** There is no undo. The next scrape downloads every mailbox again.
+
+```bash
+uv run python -m scraper.db reset          # shows the database and row counts; deletes nothing
+```
+
+```bash
+uv run python -m scraper.db reset --yes    # deletes everything listed above
+```
+
+It refuses while a job is running. Tables and migrations stay in place.
+
 ## Tests
 
 Database tests run against a throwaway local Postgres (never Neon). Install it once:
@@ -78,3 +105,4 @@ uv run pytest
 | `candidates` | Staging: extracted records and the reviewer's approved edits. |
 | `clients` | Official directory, filled only by Publish. The directory app reads only this. Includes `payments`, `client_since`, `services_availed` and `departments`. |
 | `sync_state` | Where each mailbox's last scrape stopped. |
+| `jobs`, `job_log` | Scrape/extract runs, their status and log lines (kept across restarts). |

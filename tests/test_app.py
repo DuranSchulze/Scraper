@@ -5,9 +5,9 @@ from scraper.app import app
 local = TestClient(app, base_url="http://localhost")
 
 
-def test_gui_page_served_on_localhost():
+def test_root_points_to_nextjs_gui_on_localhost():
     r = local.get("/")
-    assert r.status_code == 200 and "Workspace Scraper" in r.text
+    assert r.status_code == 200 and "http://127.0.0.1:3000" in r.text
 
 
 def test_other_hosts_rejected():
