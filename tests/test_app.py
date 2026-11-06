@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import threading
 
 import pytest
+from psycopg import OperationalError
 from psycopg.types.json import Jsonb
 
 from scraper import db, pipeline
@@ -138,7 +139,7 @@ def test_status_list_and_detail_contract(conn):
 
 def test_extract_full_flag_reaches_pipeline(conn, monkeypatch):
     seen = []
-    monkeypatch.setattr(app_module, "start_job", lambda name, fn: fn())
+    monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
     monkeypatch.setattr(pipeline, "run_extract", lambda log, full=False: seen.append(full))
     assert local.post("/api/extract", json={"full": True}, headers=GUI).json() == {"started": True}
     assert local.post("/api/extract", json={}, headers=GUI).json() == {"started": True}
@@ -368,3 +369,194 @@ def test_payment_dates_accept_mixed_naive_and_aware_values_and_ignore_client_sin
     assert approve(cid, body).status_code == 200
     reviewed = local.get(f"/api/candidates/{cid}").json()["reviewed"]
     assert datetime.fromisoformat(reviewed["client_since"]) == datetime(2026, 8, 1, tzinfo=timezone.utc)
+
+
+def job_row(conn, status="running", name="extract", params=None, stale=False):
+    jid = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,%s) RETURNING id",
+                       (name, Jsonb(params or {"full": False}), status)).fetchone()["id"]
+    if stale:
+        conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes' WHERE id=%s", (jid,))
+    conn.commit()
+    return jid
+
+
+def test_job_log_survives_work_rollback_and_app_restart(conn):
+    jid = job_row(conn)
+    before = conn.execute("SELECT heartbeat_at FROM jobs WHERE id=%s", (jid,)).fetchone()["heartbeat_at"]
+    with pytest.raises(ValueError):
+        with db.connect() as work:
+            db.upsert_raw(work, "gmail", "a", "rollback", {})
+            app_module.log(jid, "survives rollback")
+            raise ValueError("rollback work")
+    assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 0
+    assert conn.execute("SELECT heartbeat_at FROM jobs WHERE id=%s", (jid,)).fetchone()["heartbeat_at"] > before
+    with TestClient(app, base_url="http://localhost") as restarted:
+        state = restarted.get("/api/status").json()
+        assert state["job_id"] == jid and state["job_status"] == "running"
+        assert state["log"][-1].endswith("survives rollback")
+    conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes'")
+    conn.commit()
+    with TestClient(app, base_url="http://localhost") as restarted:
+        assert conn.execute("SELECT status FROM jobs WHERE id=%s", (jid,)).fetchone()["status"] == "interrupted"
+        state = restarted.get("/api/status").json()
+        assert state["job_status"] == "interrupted" and not state["running"]
+        assert state["log"][-1].endswith("survives rollback")
+
+
+def test_status_last_500_lines_oldest_first_latest_job_only(conn):
+    old = job_row(conn, status="done")
+    conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s,'old log')", (old,))
+    conn.commit()
+    jid = job_row(conn, status="done")
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO job_log (job_id, line) VALUES (%s,%s)", [(jid, f"line {i}") for i in range(503)])
+    conn.commit()
+    with TestClient(app, base_url="http://localhost") as client:
+        state = client.get("/api/status").json()
+    assert state["log"] == [f"line {i}" for i in range(3, 503)]
+    assert state["job_id"] == jid and state["job_params"] == {"full": False}
+    assert state["job_failures"] == 0 and state["job_started_at"]
+    assert state["job_status"] == "done" and state["job"] == "extract" and state["error"] is None
+
+
+def test_status_marks_newly_stale_job_but_startup_preserves_fresh_remote_job(conn):
+    jid = job_row(conn)
+    with TestClient(app, base_url="http://localhost") as client:
+        assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "running"
+        conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes'")
+        conn.commit()
+        state = client.get("/api/status").json()
+        assert state["job_id"] == jid and state["job_status"] == "interrupted" and state["job_finished_at"]
+
+
+def test_duplicate_starts_across_connections_return_conflict(conn, monkeypatch):
+    monkeypatch.setattr(app_module, "_launch_job", lambda *_: None, raising=False)
+    def request():
+        return local.post("/api/extract", json={"full": False}, headers=GUI).status_code
+    with ThreadPoolExecutor(2) as pool:
+        assert sorted(pool.map(lambda _: request(), range(2))) == [200, 409]
+    assert conn.execute("SELECT count(*) AS n FROM jobs WHERE status='running'").fetchone()["n"] == 1
+
+
+@pytest.mark.parametrize("reset_done,want_full", [(False, True), (True, False)])
+def test_resume_full_extract_claims_once_and_chooses_correct_reset_mode(conn, monkeypatch, reset_done, want_full):
+    params = {"full": True}
+    if reset_done:
+        params["full_reset_done"] = True
+    jid = job_row(conn, status="interrupted", params=params)
+    launched = []
+    monkeypatch.setattr(app_module, "_launch_job", lambda *args: launched.append(args), raising=False)
+    response = local.post(f"/api/jobs/{jid}/resume", headers=GUI)
+    assert response.status_code == 200
+    rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+    assert len(rows) == 2 and rows[0]["status"] == "done" and rows[1]["status"] == "running"
+    assert rows[0]["error"] == f"resumed as job {rows[1]['id']}"
+    assert rows[1]["params"]["full"] is want_full
+    assert launched and launched[0][0] == rows[1]["id"]
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 400
+
+
+def test_resume_while_running_keeps_interrupted_row_and_scrape_params(conn, monkeypatch):
+    params = {"sources": ["gmail"], "mailboxes": ["sales@acme.test"], "since": "2020-01-01", "full": False}
+    jid = job_row(conn, status="interrupted", name="scrape", params=params)
+    active = job_row(conn)
+    monkeypatch.setattr(app_module, "_launch_job", lambda *_: None, raising=False)
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 409
+    assert conn.execute("SELECT status FROM jobs WHERE id=%s", (jid,)).fetchone()["status"] == "interrupted"
+    conn.execute("UPDATE jobs SET status='done' WHERE id=%s", (active,))
+    conn.commit()
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 200
+    successor = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+    assert successor["name"] == "scrape" and successor["params"] == params
+    assert local.post(f"/api/jobs/{jid}/resume").status_code == 403
+
+
+@pytest.mark.parametrize("outcome", ["done", "failed", "done_with_errors"])
+def test_runner_persists_completion_and_error_status(conn, monkeypatch, outcome):
+    def runner(log, full=False):
+        log("doing work")
+        if outcome == "failed":
+            raise ValueError("fixture failure")
+        if outcome == "done_with_errors":
+            log.failure(2)
+    monkeypatch.setattr(pipeline, "run_extract", runner)
+    monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
+    assert local.post("/api/extract", json={}, headers=GUI).status_code == 200
+    state = local.get("/api/status").json()
+    assert state["job_status"] == outcome and state["running"] is False and state["job_finished_at"]
+    assert state["job_failures"] == (2 if outcome == "done_with_errors" else 0)
+    assert state["error"] == ("ValueError('fixture failure')" if outcome == "failed" else None)
+    assert any(line.endswith("doing work") for line in state["log"])
+
+
+def test_heartbeat_updates_without_log_output_while_runner_is_alive(conn, monkeypatch):
+    import time
+
+    started, release = threading.Event(), threading.Event()
+    worker = []
+    def runner(log, full=False):
+        started.set()
+        assert release.wait(timeout=5)
+    def launch(*args):
+        thread = threading.Thread(target=app_module._run_job, args=args)
+        worker.append(thread)
+        thread.start()
+    monkeypatch.setattr(pipeline, "run_extract", runner)
+    monkeypatch.setattr(app_module, "HEARTBEAT_SECONDS", .01, raising=False)
+    monkeypatch.setattr(app_module, "_launch_job", launch, raising=False)
+    try:
+        assert local.post("/api/extract", json={}, headers=GUI).status_code == 200
+        assert started.wait(timeout=5)
+        initial = conn.execute("SELECT heartbeat_at FROM jobs").fetchone()["heartbeat_at"]
+        deadline = time.monotonic() + 3
+        while conn.execute("SELECT heartbeat_at FROM jobs").fetchone()["heartbeat_at"] <= initial:
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        assert local.get("/api/status").json()["running"] is True
+    finally:
+        release.set()
+        for thread in worker:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+
+def test_proxied_host_and_browser_header_pass_and_pointer_when_static_absent(conn, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "_launch_job", lambda *_: None, raising=False)
+    proxied = TestClient(app, base_url="http://127.0.0.1:8765")
+    assert proxied.post("/api/extract", json={}).status_code == 403
+    assert proxied.post("/api/extract", json={}, headers=GUI).status_code == 200
+    assert TestClient(app, base_url="http://foreign.test").get("/api/status").status_code == 400
+    monkeypatch.setattr(app_module, "ROOT", tmp_path)
+    response = proxied.get("/")
+    assert response.status_code == 200 and "http://127.0.0.1:3000" in response.text
+
+
+def test_concurrent_resume_claims_only_one_successor(conn, monkeypatch):
+    jid = job_row(conn, status="interrupted")
+    monkeypatch.setattr(app_module, "_launch_job", lambda *_: None)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda _: local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code, range(2)))
+    assert sorted(results) == [200, 400]
+    assert conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"] == 2
+
+
+@pytest.mark.parametrize("status,stale", [("done", False), ("failed", False), ("running", True)])
+def test_resume_requires_interrupted_state_without_changing_other_states(conn, monkeypatch, status, stale):
+    jid = job_row(conn, status=status, stale=stale)
+    monkeypatch.setattr(app_module, "_launch_job", lambda *_: None)
+    assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 400
+    assert conn.execute("SELECT status FROM jobs WHERE id=%s", (jid,)).fetchone()["status"] == status
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, OperationalError])
+def test_startup_serves_gui_when_database_is_unavailable_and_status_retries(conn, monkeypatch, error_type):
+    job_row(conn, stale=True)
+    original = db.connect
+    def unavailable():
+        raise error_type("database unavailable")
+    monkeypatch.setattr(db, "connect", unavailable)
+    with TestClient(app, base_url="http://localhost", raise_server_exceptions=False) as client:
+        assert client.get("/").status_code == 200
+        assert client.get("/api/status").status_code == 500
+        monkeypatch.setattr(db, "connect", original)
+        assert client.get("/api/status").json()["job_status"] == "interrupted"

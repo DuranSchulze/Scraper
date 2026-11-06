@@ -51,6 +51,12 @@ def rebuild(conn, keys, rules: dict, now: datetime) -> None:
             " AND NOT EXISTS (SELECT 1 FROM candidates src WHERE src.merged_into=c.id)", (absent,))
 
 
+def _failure(log, count: int = 1) -> None:
+    callback = getattr(log, "failure", None)
+    if count and callback:
+        callback(count)
+
+
 def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log) -> None:
     with db.connect() as conn:
         if {"gmail", "contacts"} & set(sources):
@@ -66,11 +72,13 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                     except Exception as e:  # a bad mailbox must not stop other mailboxes
                         conn.rollback()
                         log(f"{mb} {name}: FAILED {e!r}")
+                        _failure(log)
                 try:
                     run_extract(log)
                 except Exception as e:
                     conn.rollback()
                     log(f"{mb} extract: FAILED {e!r}")
+                    _failure(log)
         if "sheets" in sources:
             # Sheet ids are case-sensitive, so not env_list (which lower-cases).
             ids = [x.strip() for x in env("DRIVE_SHEET_IDS").split(",") if x.strip()]
@@ -98,6 +106,9 @@ def run_extract(log, full: bool = False, *, keys=()) -> None:
             conn.execute("DELETE FROM signals")
             conn.execute("UPDATE raw_items SET extracted_at=NULL, extract_error=NULL")
             conn.commit()
+            reset_done = getattr(log, "full_reset_done", None)
+            if reset_done:
+                reset_done()
         while True:
             rows = conn.execute(
                 "SELECT id, source, payload FROM raw_items WHERE extracted_at IS NULL AND id>%s"
@@ -127,6 +138,7 @@ def run_extract(log, full: bool = False, *, keys=()) -> None:
             rebuild(conn, affected, rules, datetime.now(timezone.utc))
             # Signals, markers and candidates commit together; a failed batch is retried.
             conn.commit()
+            _failure(log, len(rows) - len(successful))
             succeeded += len(successful)
             total_signals += len(signals)
             last_id = rows[-1]["id"]

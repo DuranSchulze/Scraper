@@ -1,22 +1,34 @@
 """Local review GUI. Run: uv run python -m scraper.app  (binds 127.0.0.1 only)."""
 
 import threading
-from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from getpass import getuser
 from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from psycopg import Error as PostgresError
+from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from . import db, pipeline
 from .config import RULES_PATH, ROOT, env, load_rules
 
-app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None)
+@asynccontextmanager
+async def lifespan(app):
+    try:
+        with db.connect() as conn:
+            db.interrupt_stale(conn)
+    except (RuntimeError, PostgresError):
+        pass  # Keep the GUI available; status reports the error and retries the check.
+    yield
+
+
+app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 # Blocks DNS-rebinding: only requests addressed to localhost are served.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
@@ -35,34 +47,115 @@ async def require_gui_header(request: Request, call_next):
     return await call_next(request)
 
 
-# --- Background job (one at a time) ---
+# --- Persistent jobs (one running row across all API processes) ---
 
-JOB = {"running": False, "name": "", "error": None, "log": deque(maxlen=500)}
-JOB_LOCK = threading.Lock()
-
-
-def log(msg: str) -> None:
-    JOB["log"].append(f"{datetime.now():%H:%M:%S} {msg}")
+HEARTBEAT_SECONDS = 30
 
 
-def start_job(name: str, fn) -> None:
-    with JOB_LOCK:
-        if JOB["running"]:
-            raise HTTPException(409, f"'{JOB['name']}' is still running")
-        JOB.update(running=True, name=name, error=None)
-        JOB["log"].clear()
+def log(job_id: int, msg: str) -> None:
+    with db.connect() as conn:
+        conn.autocommit = True
+        conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s,%s)",
+                     (job_id, f"{datetime.now():%H:%M:%S} {msg}"))
+        conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp() WHERE id=%s AND status='running'", (job_id,))
 
-    def run():
+
+class JobLog:
+    def __init__(self, job_id: int):
+        self.job_id = job_id
+
+    def __call__(self, msg: str) -> None:
+        log(self.job_id, msg)
+
+    def failure(self, count: int = 1) -> None:
+        with db.connect() as conn:
+            conn.autocommit = True
+            conn.execute("UPDATE jobs SET failures=failures+%s, heartbeat_at=clock_timestamp()"
+                         " WHERE id=%s AND status='running'", (count, self.job_id))
+
+    def full_reset_done(self) -> None:
+        with db.connect() as conn:
+            conn.autocommit = True
+            conn.execute("UPDATE jobs SET params=jsonb_set(params, '{full_reset_done}', 'true')"
+                         " WHERE id=%s AND status='running'", (self.job_id,))
+
+
+def _heartbeat(job_id: int, stopped: threading.Event) -> None:
+    while not stopped.wait(HEARTBEAT_SECONDS):
         try:
-            fn()
-            log(f"{name}: finished")
-        except Exception as e:
-            JOB["error"] = repr(e)
-            log(f"ERROR: {e!r}")
-        finally:
-            JOB["running"] = False
+            with db.connect() as conn:
+                conn.autocommit = True
+                if not conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp()"
+                                    " WHERE id=%s AND status='running' RETURNING id", (job_id,)).fetchone():
+                    return
+        except PostgresError:
+            continue  # A temporary DB outage gets another attempt on the next heartbeat.
 
-    threading.Thread(target=run, daemon=True).start()
+
+def _finish_job(job_id: int, error: str | None) -> None:
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status=CASE WHEN %s::text IS NOT NULL THEN 'failed'"
+            " WHEN failures>0 THEN 'done_with_errors' ELSE 'done' END,"
+            " error=%s, finished_at=clock_timestamp(), heartbeat_at=clock_timestamp()"
+            " WHERE id=%s AND status='running'", (error, error, job_id))
+
+
+def _run_job(job_id: int, name: str, params: dict) -> None:
+    stopped = threading.Event()
+    heartbeat = threading.Thread(target=_heartbeat, args=(job_id, stopped), daemon=True)
+    heartbeat.start()
+    logger, error = JobLog(job_id), None
+    try:
+        if name == "scrape":
+            pipeline.run_scrape(**params, log=logger)
+        elif name == "extract":
+            pipeline.run_extract(logger, full=params.get("full", False))
+        else:
+            raise RuntimeError(f"Unknown job: {name}")
+        logger(f"{name}: finished")
+    except Exception as exc:
+        error = repr(exc)
+        logger(f"ERROR: {error}")
+    finally:
+        stopped.set()
+        heartbeat.join(timeout=1)
+        _finish_job(job_id, error)
+
+
+def _launch_job(job_id: int, name: str, params: dict) -> None:
+    threading.Thread(target=_run_job, args=(job_id, name, params), daemon=True).start()
+
+
+def start_job(name: str, params: dict, *, resume_id: int | None = None) -> int:
+    try:
+        with db.connect() as conn:
+            if resume_id is not None:
+                previous = conn.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (resume_id,)).fetchone()
+                if not previous or previous["status"] != "interrupted":
+                    raise HTTPException(400, "job is not interrupted")
+                name, params = previous["name"], dict(previous["params"])
+                if name == "extract" and params.get("full_reset_done"):
+                    params["full"] = False
+            job_id = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,'running') RETURNING id",
+                                  (name, Jsonb(params))).fetchone()["id"]
+            if resume_id is not None:
+                conn.execute("UPDATE jobs SET status='done', error=%s WHERE id=%s AND status='interrupted'",
+                             (f"resumed as job {job_id}", resume_id))
+    except UniqueViolation as exc:
+        raise HTTPException(409, "another job is still running") from exc
+    try:
+        _launch_job(job_id, name, params)
+    except Exception as exc:
+        _finish_job(job_id, repr(exc))
+        raise
+    return job_id
+
+
+@app.post("/api/jobs/{job_id}/resume")
+def resume(job_id: int):
+    successor = start_job("", {}, resume_id=job_id)
+    return {"started": True, "job_id": successor}
 
 
 class ScrapeIn(BaseModel):
@@ -77,7 +170,7 @@ def scrape(body: ScrapeIn):
     since = body.since or env("SCRAPE_SINCE", "2018-01-01")
     datetime.strptime(since, "%Y-%m-%d")  # validate before starting
     mailboxes = [m.strip().lower() for m in body.mailboxes if m.strip()]
-    start_job("scrape", lambda: pipeline.run_scrape(body.sources, mailboxes, since, body.full, log))
+    start_job("scrape", {"sources": body.sources, "mailboxes": mailboxes, "since": since, "full": body.full})
     return {"started": True}
 
 
@@ -87,13 +180,17 @@ class ExtractIn(BaseModel):
 
 @app.post("/api/extract")
 def extract(body: ExtractIn):
-    start_job("extract", lambda: pipeline.run_extract(log, full=body.full))
+    start_job("extract", {"full": body.full})
     return {"started": True}
 
 
 @app.get("/api/status")
 def status():
     with db.connect() as conn:
+        db.interrupt_stale(conn)
+        job = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+        lines = conn.execute("SELECT line FROM job_log WHERE job_id=%s ORDER BY id DESC LIMIT 500",
+                             (job["id"],)).fetchall() if job else []
         counts = {r["review_state"]: r["n"] for r in conn.execute(
             "SELECT review_state, count(*) AS n FROM candidates GROUP BY review_state")}
         raw = {r["source"]: r["n"] for r in conn.execute(
@@ -102,9 +199,12 @@ def status():
             "SELECT count(*) AS n FROM candidates WHERE review_state='approved'"
             " AND (published_at IS NULL OR reviewed_at>published_at)").fetchone()["n"]
         failed = conn.execute("SELECT count(*) AS n FROM raw_items WHERE extract_error IS NOT NULL").fetchone()["n"]
-    return {"running": JOB["running"], "job": JOB["name"], "error": JOB["error"],
-            "log": list(JOB["log"]), "candidates": counts, "raw_items": raw,
-            "ready_to_publish": ready, "extract_failed": failed}
+    return {"running": bool(job and job["status"] == "running"), "job": job["name"] if job else "",
+            "error": job["error"] if job else None, "log": [r["line"] for r in reversed(lines)],
+            "candidates": counts, "raw_items": raw, "ready_to_publish": ready, "extract_failed": failed,
+            "job_id": job["id"] if job else None, "job_status": job["status"] if job else None,
+            "job_params": job["params"] if job else {}, "job_failures": job["failures"] if job else 0,
+            "job_started_at": job["started_at"] if job else None, "job_finished_at": job["finished_at"] if job else None}
 
 
 # --- Review ---
@@ -336,7 +436,8 @@ def rules():
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "scraper" / "static" / "index.html")
+    path = ROOT / "scraper" / "static" / "index.html"
+    return FileResponse(path) if path.is_file() else PlainTextResponse("Open the review GUI at http://127.0.0.1:3000")
 
 
 if __name__ == "__main__":

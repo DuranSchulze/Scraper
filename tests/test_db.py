@@ -17,7 +17,7 @@ def test_upgrade_001_backfills_legacy_and_rerun_is_noop(pg_url):
         client = conn.execute("INSERT INTO clients (name) VALUES ('Legacy') RETURNING id").fetchone()["id"]
         conn.execute("INSERT INTO candidates (email_key, review_state, client_id) VALUES ('old@x.test', 'approved', %s)", (client,))
         conn.execute("INSERT INTO candidates (email_key) VALUES ('new@x.test')")
-    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql"]
+    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         old = conn.execute("SELECT * FROM candidates WHERE email_key='old@x.test'").fetchone()
@@ -56,7 +56,7 @@ def test_upgrade_002_preserves_populated_clients_and_adds_details(pg_url):
         conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
         conn.execute("INSERT INTO schema_migrations VALUES ('001_init.sql'), ('002_stages_publish.sql')")
         conn.execute("INSERT INTO clients (name, emails, stage, amounts) VALUES ('Legacy', ARRAY['old@test.com'], 'paid', '[{\"amount\": 500}]')")
-    assert db.migrate() == ["003_client_details.sql"]
+    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM clients").fetchone()
@@ -64,3 +64,85 @@ def test_upgrade_002_preserves_populated_clients_and_adds_details(pg_url):
         assert row["amounts"] == [{"amount": 500}]
         assert row["payments"] == [] and row["client_since"] is None
         assert row["services_availed"] == [] and row["departments"] == []
+
+
+def test_upgrade_003_adds_job_tables_and_keeps_clients(pg_url):
+    from scraper import db
+
+    with db.connect() as conn:
+        conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
+        for name in ("001_init.sql", "002_stages_publish.sql", "003_client_details.sql"):
+            conn.execute((db.MIGRATIONS_DIR / name).read_text())
+            conn.execute("INSERT INTO schema_migrations VALUES (%s)", (name,))
+        conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
+    assert db.migrate() == ["004_jobs.sql"]
+    assert db.migrate() == []
+    with db.connect() as conn:
+        assert conn.execute("SELECT name FROM clients").fetchone()["name"] == "Kept"
+        assert conn.execute("SELECT count(*) AS n FROM jobs").fetchone()["n"] == 0
+        jid = conn.execute("INSERT INTO jobs (name, params, status) VALUES ('extract', '{}', 'done') RETURNING id").fetchone()["id"]
+        conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s, 'test')", (jid,))
+        conn.execute("DELETE FROM jobs WHERE id=%s", (jid,))
+        assert conn.execute("SELECT count(*) AS n FROM job_log").fetchone()["n"] == 0
+
+
+def reset_cli(pg_url, *args):
+    import os
+    import subprocess
+    import sys
+
+    return subprocess.run([sys.executable, "-m", "scraper.db", "reset", *args],
+                          env={**os.environ, "DATABASE_URL": pg_url}, capture_output=True, text=True, timeout=10)
+
+
+def test_reset_dry_run_and_yes_clear_all_data_and_restart_ids(pg_url):
+    from scraper import db
+
+    db.migrate()
+    tables = ("job_log", "jobs", "signals", "candidates", "clients", "raw_items", "sync_state")
+    with db.connect() as conn:
+        jid = conn.execute("INSERT INTO jobs (name, status) VALUES ('extract', 'done') RETURNING id").fetchone()["id"]
+        conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s, 'kept')", (jid,))
+        db.upsert_raw(conn, "gmail", "a", "m", {})
+        conn.execute("INSERT INTO signals (raw_item_id, key, data) SELECT id, 'a', '{}' FROM raw_items")
+        conn.execute("INSERT INTO clients (name) VALUES ('Official')")
+        conn.execute("INSERT INTO candidates (email_key, client_id) SELECT 'a', id FROM clients")
+        db.set_cursor(conn, "gmail", "a", "123")
+    dry = reset_cli(pg_url)
+    assert dry.returncode == 1
+    with db.connect() as conn:
+        assert conn.info.host in dry.stdout and conn.info.dbname in dry.stdout
+        for table in tables:
+            assert f"{table}: 1" in dry.stdout
+            assert conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"] == 1
+    reset = reset_cli(pg_url, "--yes")
+    assert reset.returncode == 0, reset.stderr
+    with db.connect() as conn:
+        for table in tables:
+            assert conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 4
+        assert conn.execute("INSERT INTO jobs (name, status) VALUES ('extract','done') RETURNING id").fetchone()["id"] == 1
+        assert conn.execute("INSERT INTO job_log (job_id, line) VALUES (1,'new') RETURNING id").fetchone()["id"] == 1
+        db.upsert_raw(conn, "gmail", "a", "new", {})
+        assert conn.execute("SELECT id FROM raw_items").fetchone()["id"] == 1
+        assert conn.execute("INSERT INTO signals (raw_item_id, key, data) VALUES (1,'a','{}') RETURNING id").fetchone()["id"] == 1
+        assert conn.execute("INSERT INTO clients DEFAULT VALUES RETURNING id").fetchone()["id"] == 1
+        assert conn.execute("INSERT INTO candidates (email_key) VALUES ('a') RETURNING id").fetchone()["id"] == 1
+
+
+def test_reset_refuses_fresh_running_job_but_allows_stale_one(pg_url):
+    from scraper import db
+
+    db.migrate()
+    with db.connect() as conn:
+        conn.execute("INSERT INTO jobs (name, status) VALUES ('scrape', 'running')")
+        conn.execute("INSERT INTO clients (name) VALUES ('Keep')")
+    result = reset_cli(pg_url, "--yes")
+    assert result.returncode == 1
+    with db.connect() as conn:
+        assert conn.execute("SELECT name FROM clients").fetchone()["name"] == "Keep"
+        assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "running"
+        conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes'")
+    assert reset_cli(pg_url, "--yes").returncode == 0
+    with db.connect() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM clients").fetchone()["n"] == 0

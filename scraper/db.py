@@ -95,8 +95,37 @@ def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict
         cur.executemany(UPSERT_RAW, [(source, mailbox, sid, Jsonb(p)) for sid, p in items])
 
 
+def interrupt_stale(conn) -> None:
+    conn.execute(
+        "UPDATE jobs SET status='interrupted', finished_at=clock_timestamp()"
+        " WHERE status='running' AND heartbeat_at < clock_timestamp()-interval '2 minutes'")
+
+
+def reset(confirmed: bool = False) -> bool:
+    tables = "job_log, jobs, signals, candidates, clients, raw_items, sync_state"
+    with connect() as conn:
+        print(f"Host: {conn.info.host}  Database: {conn.info.dbname}")
+        if not confirmed:
+            for table in tables.split(", "):
+                count = conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
+                print(f"{table}: {count}")
+            print("Nothing changed. Run reset --yes to permanently clear these tables, including clients.")
+            return False
+        conn.execute("LOCK TABLE jobs IN EXCLUSIVE MODE")
+        interrupt_stale(conn)
+        if conn.execute("SELECT 1 FROM jobs WHERE status='running'").fetchone():
+            print("Refusing reset: a job is still running.")
+            return False
+        conn.execute(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
+    print("Reset complete; schema_migrations kept.")
+    return True
+
+
 if __name__ == "__main__":
-    if sys.argv[1:] != ["migrate"]:
-        sys.exit("usage: python -m scraper.db migrate")
-    applied = migrate()
-    print("applied: " + ", ".join(applied) if applied else "up to date")
+    if sys.argv[1:] == ["migrate"]:
+        applied = migrate()
+        print("applied: " + ", ".join(applied) if applied else "up to date")
+    elif sys.argv[1:] in (["reset"], ["reset", "--yes"]):
+        sys.exit(0 if reset(confirmed="--yes" in sys.argv[1:]) else 1)
+    else:
+        sys.exit("usage: python -m scraper.db migrate | reset [--yes]")

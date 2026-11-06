@@ -271,3 +271,82 @@ def test_stored_signals_rebuild_details_and_merge_reopen_recompute_without_overw
     conn.commit()
     assert candidates(conn)["b@client.test"]["fields"] == saved
     assert candidates(conn)["b@client.test"]["reviewed"] == {"name": "Reviewer"}
+
+
+def test_full_reset_notifies_job_only_after_reset_commit(conn, monkeypatch):
+    from scraper.app import JobLog
+
+    seed(conn)
+    pipeline.run_extract(lambda _: None)
+    jid = conn.execute("INSERT INTO jobs (name, params, status) VALUES ('extract', '{\"full\": true}', 'running') RETURNING id").fetchone()["id"]
+    conn.commit()
+    log = JobLog(jid)
+    original = log.full_reset_done
+    def stopped():
+        with db.connect() as observer:
+            assert observer.execute("SELECT count(*) AS n FROM signals").fetchone()["n"] == 0
+            assert observer.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"] == 1
+        original()
+        raise RuntimeError("simulated termination after reset")
+    monkeypatch.setattr(log, "full_reset_done", stopped)
+    with pytest.raises(RuntimeError, match="simulated termination"):
+        pipeline.run_extract(log, full=True)
+    assert conn.execute("SELECT params FROM jobs").fetchone()["params"]["full_reset_done"] is True
+
+
+def test_job_counts_failed_mailbox_then_continues_and_extracts_good_one(conn, monkeypatch):
+    from scraper import app as app_module
+
+    def fetch(connection, mailbox, *_):
+        if mailbox == "bad@acme.test":
+            raise RuntimeError("unlicensed")
+        db.upsert_raw(connection, "sheets", "", "good", {"sheet": "T", "tab": "A", "row": 2,
+                      "record": {"Name": "Good", "Email": "good@client.test"}})
+        connection.commit()
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
+    app_module.start_job("scrape", {"sources": ["gmail"], "mailboxes": ["bad@acme.test", "good@acme.test"],
+                                   "since": "2020-01-01", "full": False})
+    row = conn.execute("SELECT * FROM jobs").fetchone()
+    assert row["status"] == "done_with_errors" and row["failures"] == 1 and row["error"] is None
+    assert set(candidates(conn)) == {"good@client.test"}
+    assert any("bad@acme.test gmail: FAILED" in r["line"] for r in conn.execute("SELECT line FROM job_log"))
+
+
+def test_extraction_failures_make_job_done_with_errors(conn, monkeypatch):
+    from scraper import app as app_module
+
+    db.upsert_raw(conn, "sheets", "", "bad", {"record": None})
+    conn.commit()
+    monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
+    app_module.start_job("extract", {"full": False})
+    assert conn.execute("SELECT status, failures FROM jobs").fetchone() == {"status": "done_with_errors", "failures": 1}
+    assert conn.execute("SELECT extract_error FROM raw_items").fetchone()["extract_error"]
+
+
+def test_full_reset_failure_before_commit_does_not_set_resume_marker(conn, monkeypatch):
+    from contextlib import contextmanager
+    from scraper.app import JobLog
+
+    seed(conn)
+    pipeline.run_extract(lambda _: None)
+    conn.execute("INSERT INTO jobs (name, params, status) VALUES ('extract', '{\"full\": true}', 'running')")
+    conn.commit()
+    original = db.connect
+    class Connection:
+        def __init__(self, real): self.real = real
+        def __getattr__(self, name): return getattr(self.real, name)
+        def execute(self, query, args=None):
+            if query.startswith("UPDATE raw_items SET extracted_at=NULL"):
+                raise RuntimeError("reset failed before commit")
+            return self.real.execute(query, args)
+    @contextmanager
+    def connect():
+        with original() as real:
+            yield Connection(real)
+    monkeypatch.setattr(db, "connect", connect)
+    with pytest.raises(RuntimeError, match="before commit"):
+        pipeline.run_extract(JobLog(1), full=True)
+    assert conn.execute("SELECT params FROM jobs").fetchone()["params"] == {"full": True}
+    assert conn.execute("SELECT count(*) AS n FROM signals").fetchone()["n"] == 1
+    assert conn.execute("SELECT extracted_at FROM raw_items").fetchone()["extracted_at"]
