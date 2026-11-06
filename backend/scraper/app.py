@@ -9,7 +9,7 @@ from getpass import getuser
 from typing import Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from psycopg import Error as PostgresError
@@ -94,13 +94,56 @@ class JobLog:
             print(f"job {self.job_id} log write failed: {exc!r}; line: full_reset_done", file=sys.stderr)
 
 
+    def _mailbox_write(self, sql, args) -> None:
+        try:
+            with db.connect() as conn:
+                conn.autocommit = True
+                conn.execute(sql, args)
+        except (PostgresError, RuntimeError) as exc:
+            print(f"job {self.job_id} mailbox write failed: {exc!r}", file=sys.stderr)
+
+    def mailboxes(self, mailboxes, done) -> None:
+        self._mailbox_write(
+            "INSERT INTO job_mailboxes (job_id, mailbox, status)"
+            " SELECT %s, mailbox, CASE WHEN mailbox=ANY(%s::text[]) THEN 'skipped' ELSE 'pending' END"
+            " FROM unnest(%s::text[]) AS mailbox ON CONFLICT DO NOTHING",
+            (self.job_id, list(done), mailboxes))
+
+    def mailbox_status(self, mailbox, status, error=None) -> None:
+        if status == "running":
+            self._mailbox_write(
+                "UPDATE job_mailboxes SET status='running', started_at=coalesce(started_at,clock_timestamp())"
+                " WHERE job_id=%s AND mailbox=%s AND status='pending'", (self.job_id, mailbox))
+        elif status == "failed":
+            self._mailbox_write(
+                "UPDATE job_mailboxes SET status='failed', error=coalesce(error,%s),"
+                " finished_at=coalesce(finished_at,clock_timestamp())"
+                " WHERE job_id=%s AND mailbox=%s AND status NOT IN ('done','skipped')",
+                (error, self.job_id, mailbox))
+        elif status == "pending":
+            self._mailbox_write(
+                "UPDATE job_mailboxes SET status='pending' WHERE job_id=%s AND mailbox=%s AND status='running'",
+                (self.job_id, mailbox))
+
+    def mailbox_progress(self, mailbox, fetched, total, rate_limited) -> None:
+        self._mailbox_write(
+            "UPDATE job_mailboxes SET fetched=greatest(fetched,%s), total=greatest(total,%s),"
+            " rate_limited=greatest(rate_limited,%s) WHERE job_id=%s AND mailbox=%s",
+            (fetched, total, rate_limited, self.job_id, mailbox))
+
     def mailbox_done(self, mailbox: str) -> None:
+        # The resume marker must not depend on the board write: a board failure only costs the display.
         with db.connect() as conn:
+            conn.autocommit = True
             conn.execute(
                 "UPDATE jobs SET params=jsonb_set(params, '{done_mailboxes}',"
                 " coalesce(params->'done_mailboxes','[]') || to_jsonb(%s::text))"
                 " WHERE id=%s AND status IN ('running','paused')"
                 " AND NOT (coalesce(params->'done_mailboxes','[]') ? %s)", (mailbox, self.job_id, mailbox))
+        self._mailbox_write(
+            "INSERT INTO job_mailboxes (job_id,mailbox,status,finished_at) VALUES (%s,%s,'done',clock_timestamp())"
+            " ON CONFLICT (job_id,mailbox) DO UPDATE SET status='done',finished_at=clock_timestamp()",
+            (self.job_id, mailbox))
 
     def checkpoint(self) -> None:
         while True:
@@ -297,15 +340,45 @@ def status():
 
 # --- Review ---
 
+def _mailboxes(conn, job_id):
+    items = conn.execute(
+        "SELECT mailbox,status,fetched,total,rate_limited,error,started_at,finished_at"
+        " FROM job_mailboxes WHERE job_id=%s ORDER BY CASE status WHEN 'running' THEN 0"
+        " WHEN 'failed' THEN 1 WHEN 'pending' THEN 2 WHEN 'done' THEN 3 ELSE 4 END, mailbox",
+        (job_id,)).fetchall()
+    counts = dict.fromkeys(("pending", "running", "done", "failed", "skipped"), 0)
+    for item in items:
+        counts[item["status"]] += 1
+    return {"items": items, "counts": counts}
+
+
+@app.get("/api/jobs/latest/mailboxes")
+def latest_mailboxes():
+    with db.connect() as conn:
+        job = conn.execute("SELECT id FROM jobs WHERE name='scrape' ORDER BY id DESC LIMIT 1").fetchone()
+        job_id = job["id"] if job else None
+        return {"job_id": job_id, **_mailboxes(conn, job_id)}
+
+
+@app.get("/api/jobs/{job_id}/mailboxes")
+def job_mailboxes(job_id: int):
+    with db.connect() as conn:
+        return _mailboxes(conn, job_id)
+
+
+@app.get("/api/jobs/{job_id}/log")
+def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=1, le=5000)):
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT line FROM job_log WHERE job_id=%s AND strpos(line,%s)>0 ORDER BY id DESC LIMIT %s",
+            (job_id, mailbox, limit)).fetchall()
+        return {"lines": [row["line"] for row in reversed(rows)]}
+
+
 @app.get("/api/candidates")
-def list_candidates(state: str = "pending", q: str = "", status: str = "", department: str = "", stage: str = ""):
-    sql = ("SELECT id, email_key, review_state, fields->'name'->>'value' AS name,"
-           " fields->'status'->>'value' AS status, fields->'department'->>'value' AS department,"
-           " coalesce((fields->'engagement_paid'->>'value')::boolean, false) AS paid,"
-           " coalesce(fields->'stage'->>'value', 'inquiry') AS stage,"
-           " coalesce(jsonb_array_length(fields->'needs_check'->'value'), 0) AS needs_check,"
-           " fields->'last_contact'->>'value' AS last_contact"
-           " FROM candidates WHERE review_state = %s")
+def list_candidates(response: Response, state: str = "pending", q: str = "", status: str = "",
+                    department: str = "", stage: str = ""):
+    sql = " FROM candidates WHERE review_state=%s"
     args = [state]
     if q:
         sql += " AND (email_key ILIKE %s OR fields->'name'->>'value' ILIKE %s)"
@@ -319,9 +392,24 @@ def list_candidates(state: str = "pending", q: str = "", status: str = "", depar
     if department:
         sql += " AND fields->'department'->>'value' = %s"
         args.append(department)
-    sql += " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST LIMIT 500"
     with db.connect() as conn:
-        return conn.execute(sql, args).fetchall()
+        response.headers["X-Total-Count"] = str(conn.execute("SELECT count(*) AS n" + sql, args).fetchone()["n"])
+        return conn.execute(
+            "WITH RECURSIVE selected AS (SELECT *" + sql +
+            " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST LIMIT 500),"
+            " lineage AS (SELECT id AS root_id,id,email_key,ARRAY[id] AS path FROM selected"
+            " UNION ALL SELECT l.root_id,c.id,c.email_key,l.path || c.id FROM lineage l"
+            " JOIN candidates c ON c.merged_into=l.id AND c.review_state='merged' WHERE NOT c.id=ANY(l.path)),"
+            " item_counts AS (SELECT root_id,count(DISTINCT s.raw_item_id) AS items FROM lineage l"
+            " JOIN signals s ON s.key=l.email_key GROUP BY root_id)"
+            " SELECT c.id,c.email_key,c.review_state,fields->'name'->>'value' AS name,"
+            " fields->'status'->>'value' AS status,fields->'department'->>'value' AS department,"
+            " coalesce((fields->'engagement_paid'->>'value')::boolean,false) AS paid,"
+            " coalesce(fields->'stage'->>'value','inquiry') AS stage,"
+            " coalesce(jsonb_array_length(fields->'needs_check'->'value'),0) AS needs_check,"
+            " fields->'last_contact'->>'value' AS last_contact,fields->'first_contact'->>'value' AS first_contact,"
+            " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
+            " ORDER BY fields->'last_contact'->>'value' DESC NULLS LAST", args).fetchall()
 
 
 def _get(conn, cid: int, lock: bool = False) -> dict:

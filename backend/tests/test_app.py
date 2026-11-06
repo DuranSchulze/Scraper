@@ -605,6 +605,8 @@ def fail_job_write(monkeypatch):
                 if predicate(query, args):
                     raise OperationalError("transient write failure")
                 return self.real.execute(query, args)
+            def __getattr__(self, name):  # commit, rollback, cursor... for pipeline connections
+                return getattr(self.real, name)
         @contextmanager
         def connect():
             with original() as real:
@@ -736,3 +738,72 @@ def test_late_stop_wins_terminal_transition_and_never_logs_finished(conn, monkey
     lines = [r["line"] for r in conn.execute("SELECT line FROM job_log")]
     assert any(line.endswith("stopped") for line in lines)
     assert not any("finished" in line for line in lines)
+
+
+def test_mailbox_board_order_latest_and_logs(conn):
+    assert local.get('/api/jobs/latest/mailboxes').json()['job_id'] is None
+    jid = job_row(conn, status='done', name='scrape')
+    logger = app_module.JobLog(jid)
+    logger.mailboxes(['z', 'a', 'b', 'c', 'd', 'z'], ['d'])
+    logger.mailbox_status('z', 'running')
+    logger.mailbox_status('a', 'failed', "ValueError('first')")
+    logger.mailbox_status('a', 'failed', 'second')
+    conn.execute("UPDATE job_mailboxes SET status='done' WHERE mailbox='c'")
+    conn.commit()
+    job_row(conn, status='done', name='extract')
+    board = local.get(f'/api/jobs/{jid}/mailboxes').json()
+    assert [r['mailbox'] for r in board['items']] == ['z', 'a', 'b', 'c', 'd']
+    assert board['counts'] == dict.fromkeys(['pending', 'running', 'done', 'failed', 'skipped'], 1)
+    assert board['items'][0]['started_at'] and board['items'][1]['finished_at']
+    assert board['items'][1]['error'] == "ValueError('first')"
+    assert local.get('/api/jobs/latest/mailboxes').json() == {'job_id': jid, **board}
+    # A resume creates a new scrape job; the board follows it.
+    resumed = job_row(conn, status='running', name='scrape')
+    assert local.get('/api/jobs/latest/mailboxes').json()['job_id'] == resumed
+    conn.execute("UPDATE jobs SET status='done' WHERE id=%s", (resumed,))
+    conn.commit()
+    with conn.cursor() as cur:
+        cur.executemany('INSERT INTO job_log(job_id,line) VALUES (%s,%s)',
+                        [(jid, f'{i} a%_@test') for i in range(1005)] + [(jid, 'unrelated')])
+    conn.commit()
+    assert len(local.get(f'/api/jobs/{jid}/log').json()['lines']) == 1000
+    assert local.get(f'/api/jobs/{jid}/log', params={'mailbox': 'a%_@test', 'limit': 2}).json() == {
+        'lines': ['1003 a%_@test', '1004 a%_@test']}
+    assert local.get(f'/api/jobs/{jid}/log', params={'mailbox': 'aXX@test'}).json() == {'lines': []}
+    assert len(local.get(f'/api/jobs/{jid}/log?limit=5000').json()['lines']) == 1006
+    for limit in (0, -1, 5001):
+        assert local.get(f'/api/jobs/{jid}/log?limit={limit}').status_code == 422
+
+
+def test_candidate_counts_merge_chain_shared_items_and_cap(conn):
+    ids = [candidate(conn, email=f'{key}@client.test') for key in ['a', 'b', 'c']]
+    # A shared signal must count once, even across a multi-hop merge.
+    raw = conn.execute("SELECT raw_item_id FROM signals WHERE key='a@client.test'").fetchone()['raw_item_id']
+    conn.execute("INSERT INTO signals(raw_item_id,key,data) VALUES (%s,'b@client.test','{}')", (raw,))
+    conn.execute("UPDATE candidates SET review_state='merged',merged_into=%s WHERE id=%s", (ids[1], ids[0]))
+    conn.execute("UPDATE candidates SET review_state='merged',merged_into=%s WHERE id=%s", (ids[2], ids[1]))
+    conn.execute("UPDATE candidates SET fields=jsonb_set(fields,'{first_contact}',%s) WHERE id=%s",
+                 (Jsonb({'value': '2020-01-01T00:00:00Z'}), ids[2]))
+    with conn.cursor() as cur:
+        cur.executemany('INSERT INTO candidates(email_key) VALUES (%s)', [(f'zero{i}@test',) for i in range(501)])
+    conn.commit()
+    response = local.get('/api/candidates')
+    assert response.headers['X-Total-Count'] == '502' and len(response.json()) == 500
+    response = local.get('/api/candidates?q=c@client')
+    assert response.headers['X-Total-Count'] == '1'
+    row = response.json()[0]
+    assert row['items'] == 3 and row['first_contact'] == '2020-01-01T00:00:00Z'
+    response = local.get('/api/candidates?q=zero0')
+    assert response.json()[0]['items'] == 0 and response.json()[0]['first_contact'] is None
+    response = local.get('/api/candidates?status=impossible')
+    assert response.json() == [] and response.headers['X-Total-Count'] == '0'
+
+
+def test_progress_write_failure_never_fails_scrape(conn, monkeypatch, fail_job_write, capsys):
+    fail_job_write(lambda query, args: 'job_mailboxes' in query)
+    monkeypatch.setattr(pipeline.gmail, 'fetch_mailbox', lambda *args, **kwargs: None)
+    monkeypatch.setattr(app_module, '_launch_job', app_module._run_job)
+    jid = app_module.start_job('scrape', {'sources': ['gmail'], 'mailboxes': ['a'], 'since': '2020-01-01', 'full': False})
+    job = conn.execute('SELECT status, error FROM jobs WHERE id=%s', (jid,)).fetchone()
+    assert (job['status'], job['error']) == ('done', None)
+    assert 'mailbox write failed' in capsys.readouterr().err

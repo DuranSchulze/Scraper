@@ -771,3 +771,34 @@ def test_worker_waiting_for_extraction_lock_observes_stop_without_extracting(con
             worker.join(timeout=5)
     assert len(extracting) == 1 and all(c.closed for c in connections)
     assert conn.execute("SELECT status,failures FROM jobs").fetchone() == {"status": "stopped", "failures": 0}
+
+
+@pytest.mark.parametrize('outcome', ['done', 'failed', 'stop', 'extract_stop'])
+def test_mailbox_outcomes_follow_sources_not_extraction(conn, monkeypatch, outcome):
+    from scraper import app as api
+    from scraper.db import JobStopped
+
+    def gmail_fetch(connection, mailbox, *args, **kwargs):
+        row = connection.execute('SELECT * FROM job_mailboxes WHERE mailbox=%s', (mailbox,)).fetchone()
+        assert row['status'] == 'running' and row['started_at']
+        if outcome == 'stop':
+            raise JobStopped()
+    def contacts_fetch(*args, **kwargs):
+        if outcome == 'failed':
+            raise ValueError('contacts failed')
+    def extract(*args, **kwargs):
+        if outcome == 'extract_stop':
+            raise JobStopped()
+    monkeypatch.setattr(pipeline.gmail, 'fetch_mailbox', gmail_fetch)
+    monkeypatch.setattr(pipeline.contacts, 'fetch_contacts', contacts_fetch)
+    monkeypatch.setattr(pipeline, 'run_extract', extract)
+    monkeypatch.setattr(api, '_launch_job', api._run_job)
+    jid = api.start_job('scrape', {'sources': ['gmail', 'contacts'], 'mailboxes': ['a', 'a', 'old'],
+                                 'done_mailboxes': ['old'], 'since': '2020-01-01', 'full': False})
+    rows = {r['mailbox']: r for r in conn.execute('SELECT * FROM job_mailboxes WHERE job_id=%s', (jid,))}
+    assert len(rows) == 2 and rows['old']['status'] == 'skipped'
+    row = rows['a']
+    assert row['status'] == {'done': 'done', 'failed': 'failed', 'stop': 'pending', 'extract_stop': 'done'}[outcome]
+    assert row['fetched'] == row['total'] == row['rate_limited'] == 0
+    if outcome == 'failed':
+        assert row['error'] == "ValueError('contacts failed')"

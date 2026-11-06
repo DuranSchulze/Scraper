@@ -17,7 +17,7 @@ def test_upgrade_001_backfills_legacy_and_rerun_is_noop(pg_url):
         client = conn.execute("INSERT INTO clients (name) VALUES ('Legacy') RETURNING id").fetchone()["id"]
         conn.execute("INSERT INTO candidates (email_key, review_state, client_id) VALUES ('old@x.test', 'approved', %s)", (client,))
         conn.execute("INSERT INTO candidates (email_key) VALUES ('new@x.test')")
-    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql", "005_job_controls.sql"]
+    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         old = conn.execute("SELECT * FROM candidates WHERE email_key='old@x.test'").fetchone()
@@ -56,7 +56,7 @@ def test_upgrade_002_preserves_populated_clients_and_adds_details(pg_url):
         conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
         conn.execute("INSERT INTO schema_migrations VALUES ('001_init.sql'), ('002_stages_publish.sql')")
         conn.execute("INSERT INTO clients (name, emails, stage, amounts) VALUES ('Legacy', ARRAY['old@test.com'], 'paid', '[{\"amount\": 500}]')")
-    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql", "005_job_controls.sql"]
+    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM clients").fetchone()
@@ -75,7 +75,7 @@ def test_upgrade_003_adds_job_tables_and_keeps_clients(pg_url):
             conn.execute((db.MIGRATIONS_DIR / name).read_text())
             conn.execute("INSERT INTO schema_migrations VALUES (%s)", (name,))
         conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
-    assert db.migrate() == ["004_jobs.sql", "005_job_controls.sql"]
+    assert db.migrate() == ["004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT name FROM clients").fetchone()["name"] == "Kept"
@@ -121,7 +121,7 @@ def test_reset_dry_run_and_yes_clear_all_data_and_restart_ids(pg_url):
     with db.connect() as conn:
         for table in tables:
             assert conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"] == 0
-        assert conn.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 5
+        assert conn.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 6
         assert conn.execute("INSERT INTO jobs (name, status) VALUES ('extract','done') RETURNING id").fetchone()["id"] == 1
         assert conn.execute("INSERT INTO job_log (job_id, line) VALUES (1,'new') RETURNING id").fetchone()["id"] == 1
         db.upsert_raw(conn, "gmail", "a", "new", {})
@@ -203,7 +203,7 @@ def test_upgrade_004_preserves_jobs_logs_and_data_and_reserves_paused_slot(pg_ur
         conn.execute("INSERT INTO jobs (name,status,params) VALUES ('scrape','running','{\"done_mailboxes\":[\"a\"]}')")
         conn.execute("INSERT INTO job_log (job_id,line) VALUES (1,'kept')")
         conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
-    assert db.migrate() == ["005_job_controls.sql"]
+    assert db.migrate() == ["005_job_controls.sql", "006_job_mailboxes.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT params, control FROM jobs").fetchone() == {"params": {"done_mailboxes": ["a"]}, "control": None}
@@ -248,3 +248,19 @@ def test_reset_refuses_paused_job(pg_url):
     assert reset_cli(pg_url, "--yes").returncode == 1
     with db.connect() as conn:
         assert conn.execute("SELECT status, control FROM jobs").fetchone() == {"status": "paused", "control": "pause"}
+
+
+def test_mailbox_migration_defaults_validation_and_cascade(pg_url):
+    import pytest
+    from psycopg.errors import CheckViolation
+    from scraper import db
+    db.migrate()
+    with db.connect() as conn:
+        jid = conn.execute("INSERT INTO jobs(name,status) VALUES ('scrape','done') RETURNING id").fetchone()['id']
+        conn.execute("INSERT INTO job_mailboxes(job_id,mailbox,status) VALUES (%s,'a','pending')", (jid,))
+        row = conn.execute('SELECT * FROM job_mailboxes').fetchone()
+        assert row['fetched'] == row['total'] == row['rate_limited'] == 0
+        with pytest.raises(CheckViolation), conn.transaction():
+            conn.execute("UPDATE job_mailboxes SET status='invalid'")
+        conn.execute('DELETE FROM jobs WHERE id=%s', (jid,))
+        assert conn.execute('SELECT * FROM job_mailboxes').fetchall() == []

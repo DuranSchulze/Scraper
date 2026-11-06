@@ -154,52 +154,65 @@ def _all_ids(gm, since: str, *, on_rate_limit=None) -> list[str]:
 def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None) -> int:
     """Store new messages of one mailbox. Returns count stored."""
     workers = env_int("SCRAPE_MESSAGE_WORKERS", WORKERS, 1, 25)
-    retries = 0
+    retries = cumulative_retries = handled = total = 0
     retry_lock = threading.Lock()
     def rate_limit_retry():
-        nonlocal retries
+        nonlocal retries, cumulative_retries
         with retry_lock:
             retries += 1
-    rules = load_rules()
-    gm = service("gmail", mailbox)
-    start_history = execute(gm.users().getProfile(userId="me"), on_rate_limit=rate_limit_retry)["historyId"]
-    label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"), on_rate_limit=rate_limit_retry)["labels"]}
+            cumulative_retries += 1
+    def report():
+        callback = getattr(log, "mailbox_progress", None)
+        if callback:
+            callback(mailbox, handled, total, cumulative_retries)
 
-    ids = None
-    cursor = None if full else db.get_cursor(conn, "gmail", mailbox)
-    if cursor:
-        try:
-            ids = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
-        except HttpError as e:
-            if e.resp.status != 404:
-                raise
-            log(f"{mailbox}: history expired, doing full scan")
-    if ids is None:
-        ids = _all_ids(gm, since, on_rate_limit=rate_limit_retry)
+    try:
+        rules = load_rules()
+        gm = service("gmail", mailbox)
+        start_history = execute(gm.users().getProfile(userId="me"), on_rate_limit=rate_limit_retry)["historyId"]
+        label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"), on_rate_limit=rate_limit_retry)["labels"]}
 
-    ids = list(dict.fromkeys(ids + db.outdated_gmail_ids(conn, mailbox, PAYLOAD_VERSION)))
-    new = db.missing_ids(conn, "gmail", mailbox, ids, PAYLOAD_VERSION)
-    log(f"{mailbox}: {len(ids)} messages found, {len(new)} to download"
-        + (f", {retries} rate-limit retries" if retries else ""))
-    retries = 0
-    stored = 0
-    with ThreadPoolExecutor(workers) as pool:
-        for i in range(0, len(new), CHUNK):
-            chunk = new[i:i + CHUNK]
-            payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules, on_rate_limit=rate_limit_retry), chunk))
-            items = [(p["id"], p) for p in payloads if p]
-            db.upsert_raw_many(conn, "gmail", mailbox, items)
-            with conn.cursor() as cur:
-                cur.executemany(
-                    "INSERT INTO gone_items (source, mailbox, source_id) VALUES ('gmail',%s,%s) ON CONFLICT DO NOTHING",
-                    [(mailbox, mid) for mid, payload in zip(chunk, payloads) if payload is None])
-            conn.commit()
-            stored += len(items)
-            log(f"{mailbox}: {stored}/{len(new)}" + (f", {retries} rate-limit retries" if retries else ""))
-            retries = 0
-            checkpoint()
-    # Cursor saved only after every message is stored, so a crash just resumes.
-    db.set_cursor(conn, "gmail", mailbox, str(start_history))
-    conn.commit()
-    checkpoint()
-    return stored
+        ids = None
+        cursor = None if full else db.get_cursor(conn, "gmail", mailbox)
+        if cursor:
+            try:
+                ids = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
+            except HttpError as e:
+                if e.resp.status != 404:
+                    raise
+                log(f"{mailbox}: history expired, doing full scan")
+        if ids is None:
+            ids = _all_ids(gm, since, on_rate_limit=rate_limit_retry)
+
+        ids = list(dict.fromkeys(ids + db.outdated_gmail_ids(conn, mailbox, PAYLOAD_VERSION)))
+        new = db.missing_ids(conn, "gmail", mailbox, ids, PAYLOAD_VERSION)
+        total = len(new)
+        report()
+        log(f"{mailbox}: {len(ids)} messages found, {len(new)} to download"
+            + (f", {retries} rate-limit retries" if retries else ""))
+        retries = 0
+        stored = 0
+        with ThreadPoolExecutor(workers) as pool:
+            for i in range(0, len(new), CHUNK):
+                chunk = new[i:i + CHUNK]
+                payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules, on_rate_limit=rate_limit_retry), chunk))
+                items = [(p["id"], p) for p in payloads if p]
+                db.upsert_raw_many(conn, "gmail", mailbox, items)
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO gone_items (source, mailbox, source_id) VALUES ('gmail',%s,%s) ON CONFLICT DO NOTHING",
+                        [(mailbox, mid) for mid, payload in zip(chunk, payloads) if payload is None])
+                conn.commit()
+                stored += len(items)
+                handled += len(chunk)
+                report()
+                log(f"{mailbox}: {stored}/{len(new)}" + (f", {retries} rate-limit retries" if retries else ""))
+                retries = 0
+                checkpoint()
+        # Cursor saved only after every message is stored, so a crash just resumes.
+        db.set_cursor(conn, "gmail", mailbox, str(start_history))
+        conn.commit()
+        checkpoint()
+        return stored
+    finally:
+        report()

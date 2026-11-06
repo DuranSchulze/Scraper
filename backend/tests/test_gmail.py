@@ -444,3 +444,36 @@ def test_message_pool_uses_env_worker_count_and_rate_retries_reset_per_chunk(con
     assert f"{MAILBOX}: 2/4, 1 rate-limit retries" in log
     assert f"{MAILBOX}: 4/4" in log
     assert len(fake.created) == 3 and len(set(fake.created)) == 3
+
+
+@pytest.mark.parametrize('empty', [False, True])
+def test_progress_counts_chunks_deleted_messages_and_cumulative_retries(conn, monkeypatch, empty):
+    fake = FakeGmail([] if empty else [message(str(i)) for i in range(3)])
+    fake.missing.add('1')
+    monkeypatch.setattr(gmail, 'service', fake.service)
+    monkeypatch.setattr(gmail, 'CHUNK', 2)
+    original = gmail.execute
+    def execute(request, *, on_rate_limit=None):
+        if on_rate_limit:
+            on_rate_limit()
+        return original(request, on_rate_limit=on_rate_limit)
+    monkeypatch.setattr(gmail, 'execute', execute)
+    # Listing pages go through google_client.execute; count those calls the same way.
+    import scraper.google_client as google_client
+    listing = google_client.execute
+    def list_execute(request, *, on_rate_limit=None, **kwargs):
+        if on_rate_limit:
+            on_rate_limit()
+        return listing(request, on_rate_limit=on_rate_limit, **kwargs)
+    monkeypatch.setattr(google_client, 'execute', list_execute)
+    reports = []
+    class Log:
+        def __call__(self, line): pass
+        def mailbox_progress(self, mailbox, fetched, total, rate_limited):
+            assert mailbox == MAILBOX
+            reports.append((fetched, total, rate_limited))
+    assert fetch(conn, log=Log()) == (0 if empty else 2)
+    assert reports[0][0:2] == (0, 0 if empty else 3)
+    assert reports[-1] == ((0, 0, 3) if empty else (3, 3, 6))
+    if not empty:
+        assert reports[1] == (2, 3, 5)

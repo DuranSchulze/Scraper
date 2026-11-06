@@ -77,6 +77,11 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
         if stopped.is_set():
             raise JobStopped()
 
+    def mailbox_status(mb, status, error=None):
+        callback = getattr(log, "mailbox_status", None)
+        if callback:
+            callback(mb, status, error)
+
     def mailbox_task(mb):
         step = "connect"
         try:
@@ -90,12 +95,14 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                     step = name
                     conn.commit()
                     task_checkpoint()
+                    mailbox_status(mb, "running")
                     try:
                         fetch()
                     except JobStopped:
                         raise
                     except Exception as exc:
                         succeeded = False
+                        mailbox_status(mb, "failed", repr(exc)[:500])
                         conn.rollback()
                         log(f"{mb} {name}: FAILED {exc!r}")
                         _failure(log)
@@ -117,13 +124,19 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                     extract_lock.release()
         except JobStopped:
             stopped.set()
+            mailbox_status(mb, "pending")
         except Exception as exc:
+            if step != "extract":
+                mailbox_status(mb, "failed", repr(exc)[:500])
             log(f"{mb} {step}: FAILED {exc!r}")
             _failure(log)
 
     if {"gmail", "contacts"} & set(sources):
         resolved = list(dict.fromkeys(mailboxes or gmail.list_mailboxes()))
         done = set(done_mailboxes)
+        seed_mailboxes = getattr(log, "mailboxes", None)
+        if seed_mailboxes:
+            seed_mailboxes(resolved, done)
         pending = [mb for mb in resolved if mb not in done]
         log(f"{len(pending)} mailboxes")
         with ThreadPoolExecutor(max_workers=parallel) as pool:
