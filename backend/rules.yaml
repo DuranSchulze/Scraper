@@ -229,6 +229,11 @@ form_fields:
   company: [company, company name, organization, business, business name]
   message: [message, inquiry, comments, details, your message]
 
+# Skip signature lines describing identifiers rather than phone numbers.
+phone_exclude_context:
+  [tin, tax, vat, account, acct, a/c, invoice, inv, ref, reference, order, po, or no, soa,
+   sss, philhealth, pag-ibig, hdmf, bank, swift, iban, case no, ticket, tracking, receipt, permit, license]
+
 # --- Google Sheets column headers (lowercase) -> field ------------------------
 sheet_headers:
   name: [name, client, client name, contact, contact name, full name]

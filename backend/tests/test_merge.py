@@ -20,6 +20,12 @@ def fields(signals):
     return build_candidates(signals, RULES, NOW)["bob@client.test"]["fields"]
 
 
+def test_phone_formats_merge_into_one_e164_number():
+    f = fields([sig("inquiry", phones=["0917 123 4567"]),
+                sig("inquiry", phones=["+63 917 123 4567"])])
+    assert f["phones"]["value"] == ["+639171234567"]
+
+
 @pytest.mark.parametrize("signals", [
     [sig("payment_confirmed")],
     [sig("payment_claim", has_proof=True)],

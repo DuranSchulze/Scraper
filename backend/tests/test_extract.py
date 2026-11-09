@@ -7,6 +7,7 @@ import pytest
 
 from scraper.config import load_rules
 from scraper.extract import amounts_in, classify_stage, extract_contact, extract_gmail, extract_sheet, parse_form, services_in
+from scraper.extract import norm_phone, signature_phones, strict_phone
 from scraper.merge import build_candidates, resolve
 from scraper.sources.gmail import message_to_payload
 from scraper.sources.sheets import rows_to_records
@@ -56,6 +57,58 @@ def test_form_notification_yields_the_inquirer_not_the_form_sender():
     assert (s["email"], s["name"]) == ("ana@shop.test", "Ana Reyes")
     assert s["services"] == ["Work Visa Services"]
     assert s["phones"] == ["0917 555 1234"]
+
+
+@pytest.mark.parametrize("phone,expected", [
+    ("262-828-336-0000", None), ("2025 2025-0991", None), ("1600-4743-9", None),
+    ("786-389781863", None), ("0010100500", None), ("1000195079", None),
+    ("+63 917 123 4567", "+639171234567"), ("0917 555 1234", "+639175551234"),
+    ("(02) 8478 5826", "+63284785826"), ("+1 470 705 3865", "+14707053865"),
+    ("+61 3 8808 8130", "+61388088130"),
+])
+def test_signature_phone_validation_and_normalization(phone, expected):
+    [s] = extract_gmail(1, mail("bob@client.test", "sales@acme.test", "Hello",
+                              f"Regards,\nBob\nPhone: {phone}"), RULES, INTERNAL)
+    assert s["phones"] == ([phone] if expected else [])
+    assert strict_phone(phone) == bool(expected)
+    if expected:
+        assert norm_phone(phone) == expected
+
+
+@pytest.mark.parametrize("word", RULES["phone_exclude_context"])
+def test_signature_identifier_lines_are_excluded(word):
+    assert signature_phones(f"{word.upper()}: +63 917 123 4567\nMobile: 0917 555 1234", RULES) == [
+        "0917 555 1234"]
+
+
+def test_signature_phones_stay_on_their_line_and_ignore_quotes():
+    body = "Reporting contact:\n0917 555 1234\n+1 470 705 3865\n0917 555 1234\n> +61 3 8808 8130"
+    assert signature_phones(body, RULES) == ["0917 555 1234", "+1 470 705 3865"]
+
+
+@pytest.mark.parametrize("path", ["contacts", "sheets", "form"])
+def test_explicit_phone_fields_keep_lenient_validation_through_merge(path):
+    phone = "4155550123"
+    assert not strict_phone(phone)
+    if path == "contacts":
+        signals = extract_contact(1, {"name": "Bob", "emails": ["bob@client.test"],
+                                      "phones": [phone], "company": ""}, INTERNAL)
+        signals += extract_gmail(2, mail("bob@client.test", "sales@acme.test", "Inquiry", "Hello"),
+                                 RULES, INTERNAL)
+    elif path == "sheets":
+        signals = extract_sheet(1, {"sheet": "T", "tab": "A", "row": 2,
+                                   "record": {"Email": "bob@client.test", "Phone": phone}}, RULES, INTERNAL)
+    else:
+        signals = extract_gmail(1, mail("wordpress@acme.test", "sales@acme.test", "New form",
+                                       f"Email: bob@client.test\nPhone: {phone}"), RULES, INTERNAL)
+    assert signals[0]["phones"] == [phone]
+    assert build_candidates(signals, RULES, NOW)["bob@client.test"]["fields"]["phones"]["value"] == [phone]
+
+
+@pytest.mark.parametrize("phone,expected", [("", ""), ("abc", ""), ("++12", "++12")])
+def test_malformed_phone_helpers_do_not_raise(phone, expected):
+    assert not strict_phone(phone)
+    assert norm_phone(phone) == expected
 
 
 @pytest.mark.parametrize("text,expected", [

@@ -13,8 +13,10 @@ import re
 from datetime import datetime, timezone
 from email.utils import getaddresses, parseaddr
 
+import phonenumbers
+
 EMAIL_RE = re.compile(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+")
-PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
+PHONE_RE = re.compile(r"\+?\(?\d[\d\s().-]{7,}\d")
 REPLY_RE = re.compile(r"^\s*((re|fw|fwd|aw|sv)\s*(\[\d+\])?\s*:\s*)+", re.I)
 FORM_LINE_RE = re.compile(r"^\s*\**([A-Za-z][\w /-]{0,40}?)\**\s*[:：]\s*(.+?)\s*$")
 
@@ -64,7 +66,20 @@ def address_matches(address: str, key: str) -> bool:
 
 
 def norm_phone(p: str) -> str:
+    try:
+        number = phonenumbers.parse(p, "PH")
+        if phonenumbers.is_valid_number(number):
+            return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
+    except phonenumbers.NumberParseException:
+        pass
     return re.sub(r"[^\d+]", "", p)
+
+
+def strict_phone(p: str) -> bool:
+    try:
+        return phonenumbers.is_valid_number(phonenumbers.parse(p, "PH"))
+    except phonenumbers.NumberParseException:
+        return False
 
 
 def valid_phone(p: str) -> bool:
@@ -154,10 +169,13 @@ def parse_form(body: str, rules: dict) -> dict | None:
     return found
 
 
-def signature_phones(body: str) -> list[str]:
+def signature_phones(body: str, rules: dict) -> list[str]:
     """Phones in the last lines of the sender's own text."""
     tail = own_text(body)[-1500:]
-    return list(dict.fromkeys(m.strip() for m in PHONE_RE.findall(tail) if valid_phone(m)))
+    return list(dict.fromkeys(
+        m.strip() for line in tail.splitlines()
+        if not has_word(line, rules["phone_exclude_context"])
+        for m in PHONE_RE.findall(line) if strict_phone(m)))
 
 
 def wants_pdf_text(subject: str, filename: str, rules: dict) -> bool:
@@ -279,7 +297,7 @@ def extract_gmail(item_id: int, payload: dict, rules: dict, internal: set[str]) 
         if not sender or domain(sender) in internal:
             return []
         return [signal(sender, "gmail", item_id, name=sender_name.strip('" '),
-                       phones=signature_phones(body), direction="in", **common)]
+                       phones=signature_phones(body, rules), direction="in", **common)]
 
     out = []
     for name, addr in addresses(h.get("to", ""), h.get("cc", "")):
