@@ -13,7 +13,7 @@ import { LogPanel } from "@/components/scrape/log-panel";
 import { MailboxBoard } from "@/components/scrape/mailbox-board";
 import { ScrapeForm } from "@/components/scrape/scrape-form";
 import { StatusBar } from "@/components/scrape/status-bar";
-import type { Filters } from "@/lib/api";
+import { PAGE_SIZE, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Pick } from "./pick";
@@ -29,6 +29,7 @@ const STATE_OPTIONS = [
 ];
 const STAGE_OPTIONS = [{ value: "", label: "Any stage" }, ...STAGES.map((s) => ({ value: s, label: s }))];
 const STATUS_OPTIONS = [{ value: "", label: "Any status" }, ...STATUSES.map((s) => ({ value: s, label: s }))];
+const RESETS_PAGE = new Set(["state", "stage", "status", "department", "q", "sort", "order"]);
 
 export function ReviewApp() {
   const router = useRouter(), pathname = usePathname(), params = useSearchParams();
@@ -38,6 +39,7 @@ export function ReviewApp() {
     // Unknown URL values fall back to the API default (newest last contact first) instead of a 400.
     sort: params.get("sort") === "first_contact" ? "first_contact" : "last_contact",
     order: params.get("order") === "asc" ? "asc" : "desc",
+    page: Math.max(1, Math.floor(Number(params.get("page"))) || 1),
   };
   const selectedId = Number(params.get("id")) || null;
   const tab = params.get("tab") === "scraping" ? "scraping" : "review";
@@ -49,11 +51,22 @@ export function ReviewApp() {
   const pos = selectedId ? ids.indexOf(selectedId) : -1;
   const filtered = !!(filters.stage || filters.status || filters.department || filters.q);
 
-  const setParams = (patch: Record<string, string | null>) => {
+  const href = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
     for (const [k, v] of Object.entries(patch)) if (v) next.set(k, v); else next.delete(k);
-    router.replace(`${pathname}?${next}`, { scroll: false });
+    // Any filter or sort change starts again at page 1.
+    if (Object.keys(patch).some((k) => RESETS_PAGE.has(k))) next.delete("page");
+    return `${pathname}?${next}`;
   };
+  const setParams = (patch: Record<string, string | null>) => router.replace(href(patch), { scroll: false });
+  const pagePatch = (p: number) => ({ page: p > 1 ? String(p) : null });
+
+  // Reviewing records shrinks the list; step back if the current page no longer exists.
+  const lastPage = list ? Math.max(1, Math.ceil(list.total / PAGE_SIZE)) : null;
+  useEffect(() => {
+    if (lastPage && filters.page > lastPage) setParams(pagePatch(lastPage));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a changed total should trigger this
+  }, [lastPage, filters.page]);
 
   // Text filters update the URL 300 ms after typing stops.
   const [q, setQ] = useState(filters.q), [dept, setDept] = useState(filters.department);
@@ -101,6 +114,7 @@ export function ReviewApp() {
               </div>
             </div>
             <RecordsTable filters={filters} selectedId={selectedId} onSelect={(id) => setParams({ id: String(id) })}
+              onPage={(p) => setParams(pagePatch(p))} pageHref={(p) => href(pagePatch(p))}
               onSort={(sort) => {
                 // A new column starts oldest first; the active column flips. The default (last contact, newest) leaves the URL clean.
                 const order = sort === filters.sort && filters.order === "asc" ? "desc" : "asc";
@@ -133,7 +147,7 @@ export function ReviewApp() {
                 {selectedId && (
                   <RecordDetail key={selectedId} id={selectedId} onDone={() => setParams({ id: null })}
                     prevId={ids[pos - 1] ?? null} nextId={pos >= 0 ? ids[pos + 1] ?? null : null}
-                    onNav={(id) => setParams({ id: String(id) })} position={pos >= 0 ? `${pos + 1} of ${ids.length}` : null} />
+                    onNav={(id) => setParams({ id: String(id) })} position={pos >= 0 && list ? `${((filters.page - 1) * PAGE_SIZE + pos + 1).toLocaleString()} of ${list.total.toLocaleString()}` : null} />
                 )}
               </SheetContent>
             </Sheet>

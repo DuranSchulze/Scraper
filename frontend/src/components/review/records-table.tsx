@@ -1,10 +1,14 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
 import { Card } from "@/components/ui/card";
+import {
+  Pagination, PaginationContent, PaginationEllipsis, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious,
+} from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { candidatesQuery, type Filters, type SortKey } from "@/lib/api";
+import { candidatesQuery, PAGE_SIZE, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -19,9 +23,20 @@ const SOURCES = [
   { key: "sheets", label: "sheet rows", icon: FileSpreadsheet },
 ] as const;
 
-export function RecordsTable({ filters, selectedId, onSelect, onSort, toolbar }: {
-  filters: Filters; selectedId: number | null; onSelect: (id: number) => void; onSort: (key: SortKey) => void; toolbar?: React.ReactNode;
+/** Page numbers to show: first, last, and the current page with one neighbour each side; gaps become "…". */
+export function pageList(page: number, pages: number): (number | "…")[] {
+  const keep = [...new Set([1, page - 1, page, page + 1, pages])].filter((p) => p >= 1 && p <= pages).sort((a, b) => a - b);
+  // A gap of exactly one page shows that page instead of an ellipsis.
+  return keep.flatMap((p, i) => i === 0 || p - keep[i - 1] === 1 ? [p] : p - keep[i - 1] === 2 ? [p - 1, p] : ["…" as const, p]);
+}
+
+export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pageHref, toolbar }: {
+  filters: Filters; selectedId: number | null; onSelect: (id: number) => void; onSort: (key: SortKey) => void;
+  onPage: (page: number) => void; pageHref: (page: number) => string; toolbar?: React.ReactNode;
 }) {
+  const tableRef = useRef<HTMLTableElement>(null);
+  // A new page starts at the top of the scrolling table.
+  useEffect(() => { tableRef.current?.parentElement?.scrollTo({ top: 0 }); }, [filters.page]);
   const sortHead = (key: SortKey, label: string) => {
     const active = filters.sort === key;
     const Icon = !active ? ArrowUpDown : filters.order === "asc" ? ArrowUp : ArrowDown;
@@ -36,8 +51,17 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, toolbar }:
       </TableHead>
     );
   };
-  const { data, error, isPending, isFetching } = useQuery(candidatesQuery(filters));
+  const { data, error, isPending, isFetching, isPlaceholderData } = useQuery(candidatesQuery(filters));
   const rows = data?.rows;
+  const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
+  const from = (filters.page - 1) * PAGE_SIZE;
+  // Real links (middle-click opens a new tab); a plain click pages in place without a reload.
+  const pageLink = (p: number, disabled: boolean) => disabled
+    ? { "aria-disabled": true, tabIndex: -1, className: "pointer-events-none opacity-50" }
+    : { href: pageHref(p), onClick: (e: React.MouseEvent) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault(); onPage(p);
+      } };
   return (
     <Card className="gap-0 overflow-hidden py-0">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
@@ -46,13 +70,10 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, toolbar }:
           <span className="text-sm font-semibold text-primary tabular-nums" aria-live="polite">
             {data ? data.total.toLocaleString() : "…"}
           </span>
-          {data && data.total > data.rows.length && (
-            <span className="text-xs text-muted-foreground tabular-nums">showing the latest {data.rows.length.toLocaleString()}</span>
-          )}
         </div>
         {toolbar}
       </div>
-      <Table className="min-w-[1180px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
+      <Table ref={tableRef} className="min-w-[1180px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
               <TableHead className="sticky left-0 z-10 w-72 bg-muted pl-4">Client</TableHead>
@@ -69,13 +90,38 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, toolbar }:
               <TableHead className="w-8 pr-4"><span className="sr-only">Open</span></TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody className={cn("transition-opacity [&_td]:px-3 [&_td]:py-2.5", (isPending || isFetching) && !rows && "opacity-60")}>
+          <TableBody className={cn("transition-opacity [&_td]:px-3 [&_td]:py-2.5", ((isPending && !rows) || (isFetching && isPlaceholderData)) && "opacity-60")}>
             {error && <TableRow><TableCell colSpan={12} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
             {isPending && !error && <TableRow><TableCell colSpan={12} className="py-10 text-center text-muted-foreground">Loading records…</TableCell></TableRow>}
             {rows?.length === 0 && <TableRow><TableCell colSpan={12} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
             {rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
           </TableBody>
       </Table>
+      {data && data.total > PAGE_SIZE && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 px-4 py-2.5">
+          <p className="text-sm text-muted-foreground tabular-nums" aria-live="polite">
+            Showing <span className="font-medium text-foreground">{(from + 1).toLocaleString()}–{Math.min(from + PAGE_SIZE, data.total).toLocaleString()}</span> of{" "}
+            <span className="font-medium text-foreground">{data.total.toLocaleString()}</span> records
+          </p>
+          <Pagination aria-label="Records pages" className="mx-0 w-auto justify-end">
+            <PaginationContent>
+              <PaginationItem>
+                <PaginationPrevious {...pageLink(filters.page - 1, filters.page <= 1)} />
+              </PaginationItem>
+              {pageList(filters.page, pages).map((p, i) => (
+                <PaginationItem key={p === "…" ? `gap${i}` : p}>
+                  {p === "…" ? <PaginationEllipsis /> : (
+                    <PaginationLink isActive={p === filters.page} className="tabular-nums" {...pageLink(p, false)}>{p.toLocaleString()}</PaginationLink>
+                  )}
+                </PaginationItem>
+              ))}
+              <PaginationItem>
+                <PaginationNext {...pageLink(filters.page + 1, filters.page >= pages)} />
+              </PaginationItem>
+            </PaginationContent>
+          </Pagination>
+        </div>
+      )}
     </Card>
   );
 }

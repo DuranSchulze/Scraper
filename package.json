@@ -1,0 +1,15 @@
+{
+  "name": "scraper",
+  "private": true,
+  "scripts": {
+    "setup": "uv sync --directory backend && npm --prefix frontend install && npm install",
+    "migrate": "uv run --directory backend python -m scraper.db migrate",
+    "api": "uv run --directory backend python -m scraper.app",
+    "web": "npm --prefix frontend run dev",
+    "dev": "concurrently --kill-others --names api,web --prefix-colors blue,magenta \"npm:api\" \"npm:web\"",
+    "test": "uv run --directory backend pytest -q && npm --prefix frontend run typecheck && npm --prefix frontend run lint"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

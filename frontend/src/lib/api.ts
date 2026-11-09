@@ -26,7 +26,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return data as T;
 }
 
-/** Like request(), but also returns the X-Total-Count header (number of rows before the 500 cap). */
+/** Like request(), but also returns the X-Total-Count header (number of rows across all pages). */
 async function requestWithTotal<T>(path: string): Promise<{ rows: T; total: number }> {
   const res = await fetch(path, { headers: { "X-Local-GUI": "1" } });
   if (!res.ok) return request<{ rows: T; total: number }>(path); // reuse request()'s error message
@@ -39,8 +39,9 @@ export const post = <T = { ok: boolean }>(path: string, body?: unknown) =>
 
 export type SortKey = "last_contact" | "first_contact";
 export type Filters = {
-  state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc";
+  state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc"; page: number;
 };
+export const PAGE_SIZE = 50;
 
 export const keys = {
   status: ["status"] as const,
@@ -62,7 +63,8 @@ export const statusQuery = queryOptions({
 
 export const candidatesQuery = (f: Filters) => queryOptions({
   queryKey: keys.candidates(f),
-  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + new URLSearchParams(f)),
+  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + new URLSearchParams({ ...f, page: String(f.page), size: String(PAGE_SIZE) })),
+  placeholderData: (prev) => prev,
 });
 
 /** Mailbox progress of the latest scrape job; polled faster while a job runs. */

@@ -798,6 +798,14 @@ def test_candidate_counts_merge_chain_shared_items_and_cap(conn):
     conn.commit()
     response = local.get('/api/candidates')
     assert response.headers['X-Total-Count'] == '502' and len(response.json()) == 500
+    first = [r['id'] for r in response.json()]
+    response = local.get('/api/candidates?page=2')
+    assert response.headers['X-Total-Count'] == '502' and len(response.json()) == 2
+    assert not {r['id'] for r in response.json()} & set(first)
+    pages = [local.get('/api/candidates', params={'page': p, 'size': 50}).json() for p in (1, 2)]
+    assert [r['id'] for r in pages[0] + pages[1]] == first[:100]
+    for bad in ({'page': 0}, {'size': 0}, {'size': 501}):
+        assert local.get('/api/candidates', params=bad).status_code == 422
     response = local.get('/api/candidates?q=c@client')
     assert response.headers['X-Total-Count'] == '1'
     row = response.json()[0]

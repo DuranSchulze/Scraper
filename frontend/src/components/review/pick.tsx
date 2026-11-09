@@ -16,7 +16,8 @@ export function Pick({ value, onChange, options, label, id, className }: {
       <SelectTrigger id={id} aria-label={label} className={cn("w-full", className)}>
         <SelectValue />
       </SelectTrigger>
-      <SelectContent>
+      {/* Open below the trigger, not over it, so neighbouring filters stay visible. */}
+      <SelectContent alignItemWithTrigger={false} align="start">
         {items.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
       </SelectContent>
     </Select>
