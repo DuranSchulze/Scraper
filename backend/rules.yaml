@@ -20,11 +20,64 @@ label_departments: {}
 
 # --- Services -------------------------------------------------------------
 # Service name -> keywords found in subject or body.
-# EDIT ME: replace with the company's real service list.
+# Source of truth: FilePino SERVICE CATALOG v1.0 (one entry per Service Type, A01-E08).
+# Keywords come from each type's service titles and description. A message may match several.
+# Use specific phrases only. Never add bare ambiguous acronyms (SEC, BIR, DTI, DOLE, TIN, ACR,
+# SPA, PEA, ECC, DAU, PWP, SWP): they occur in normal text ("one sec", "Dole", "spa").
+# Each catalog title goes to exactly one service, so one request is not tagged twice.
 services:
-  Web Development: [website, web development, web design, wordpress, landing page]
-  Digital Marketing: [seo, social media, ads, digital marketing, google ads]
-  Consulting: [consulting, consultation, advisory]
+  # A01 - registration and permits to establish or operate a business
+  Business Permits & Registration: [sec registration, dti registration, bplo registration, bir registration, business registration, company registration, company incorporation, incorporate a company, register a business, register our business, register my business, business name registration, sole proprietorship, one person corporation, sec name search, name reservation, sec name appeal, employer registration, sss employer registration, philhealth employer registration, pag-ibig registration, virtual pag-ibig, company setup, business setup, set up a company]
+  # A02 - opening a corporate bank account
+  Bank Account Opening: [bank account opening, open a bank account, opening a bank account, corporate bank account, open a corporate account, titf account]
+  # A03 - professional business address and mail handling
+  Virtual Office: [virtual office, virtual address, mail handling]
+  # B01 - renewing and filing permits, certificates and registrations
+  Business Permits, Certificates & Filings: [business permit renewal, renewal of business permit, "mayor's permit renewal", certificate of good standing, certificate of non-registration, sec monitoring clearance, gis filing, general information sheet, appointment form, "secretary's certificate", tax residency certificate, stock and transfer book, fire safety inspection certificate, fsic, bod filing]
+  # B02 - bookkeeping, tax registration and filing, payroll
+  Accounting Services: [accounting services, bookkeeping, books of accounts, loose leaf, looseleaf, tin application, bir orus, efps, authority to print, vat registration, non-vat, tax clearance, bir tax filing, tax filing, tax return, payroll service, payroll services, disbursement management, invoicing service, notice to issue receipt, financial statements]
+  # B03 - HR and employment templates, forms and policies
+  HR Consulting & Outsourcing - HR & Legal Templates: [hr template, hr templates, hr forms, employee handbook, code of conduct, dole internal policy, dole internal policies, employment contract template, probationary employment contract, regular employment contract, training bond, notice to explain, quitclaim, termination letter, performance appraisal form, exit interview, contract template, agreement template]
+  # B04 - employee and applicant background verification
+  HR Consulting & Outsourcing - Background Checks: [background check, background checks, background verification, background investigation, pre-employment screening, employment check, employment verification, reference check, criminal check, identity check, address verification, credit record check, directorship check, kasambahay check, "driver's check", "shareholder's check"]
+  # B05 - business advisory, legal consultancy, nominee services
+  Consultancy: [business consultancy, business consulting, business advisory, consultancy services, legal consultancy, nominee director, nominee officer, nominee service, nominee services, resident agent]
+  # C01 - recurring SEC and other compliance requirements
+  Permits, Renewals & Compliance: [sec compliance, mc 28, memorandum circular 28, efast, dry seal, export performance report, nominee contract, compliance calendar]
+  # C02 - PhilGEPS, DPO/NPC, AMLC and DOLE registrations and reports
+  PhilGEPS, DPO, AMLC & DOLE Services: [philgeps, data protection officer, dpo registration, npc registration, npc renewal, amlc, amla registration, amla certificate, poea accreditation, do 174, department order 174, non-resident digital service provider, nrdsp, dole annual medical report, annual medical report]
+  # C03 - amending registered address, name, purpose or capital
+  Line of Business Changes & Amendments: [sec amendment, amendment of articles, amended articles, change of address, change of business address, change of corporate name, change of company name, primary purpose, additional line of business, change of line of business, increase in authorized capital stock, increase of capital stock, term of existence, change of calendar year, change of fiscal year, opc conversion, reduction of directors]
+  # C04 - formal closure or retirement of a business
+  Business Retirement: [business retirement, retirement of business, business closure, closure of business, close a business, close the business, closing the business, cessation of business, dissolution of corporation, corporate dissolution, cancellation of registration]
+  # D01 - work visas (9G) for foreign nationals
+  Work Visa Services: [work visa, working visa, employment visa, 9g visa, 9(g) visa, 9g renewal, 9g dependent, pre-arranged employment]
+  # D02 - visas for foreign spouses (13A)
+  Spouse Visa Services: [spouse visa, marriage visa, 13a visa, 13(a) visa, 13a, 13(a), non-quota immigrant]
+  # D03 - Alien Employment Permit (DOLE)
+  Alien Employment Permit (AEP): [alien employment permit, aep, aep renewal, aep exemption, aep exclusion, aep cancellation]
+  # D04 - Alien Certificate of Registration (BI)
+  Alien Certificate of Registration (ACR): [alien certificate of registration, acr i-card, acr icard, acr card, acr renewal, acr waiver, acr cancellation, acr reprinting, acr re-printing]
+  # D05 - Temporary Resident Visa
+  Temporary Resident Visa (TRV): [temporary resident visa, trv]
+  # D06 - other visa, immigration and foreign-national requirements
+  Other Visa & Immigration Services: [special work permit, provisional work permit, peza visa, srrv, special resident retiree, sirv, special investor resident visa, sveg, special visa for employment generation, authority to employ foreign, dual citizenship, blacklist lifting, lifting of blacklist, blacklist order, visa downgrade, visa downgrading, exit clearance, tourist visa extension, visa extension, visa waiver, visa revalidation, visa re-stamping, voluntary deportation, long-stay visitor visa, lsvve, understudy training program, quota visa, immigrant visa, not the same person]
+  # E01 - trademarks, copyrights and other IP
+  Intellectual Property Rights Services: [trademark, trademark registration, trademark search, trademark renewal, declaration of actual use, revival of mark, intellectual property, ipophl, copyright registration, patent]
+  # E02 - project-based PEZA, BOI, BSP, PCAB, PEA, DMW work
+  Special Projects: [peza registration, peza accreditation, peza expansion, peza additional space, peza compliance, peza delisting, boi registration, board of investments, bsp certification, pcab, pea accreditation, pea renewal, dmw application, dmw accreditation]
+  # E03 - case-to-case services, legal document drafting, retainers
+  Other Ad Hoc Services: [apostille, special power of attorney, lease agreement, loan agreement, contract review, legal document drafting, deed of sale, deed of absolute sale, extrajudicial settlement, extra judicial settlement, last will and testament, demand letter, contract to sell, affidavit of support, affidavit of one and the same person, board resolution, stock certificate, maternity benefit, maternity benefits, nbi renewal, nbi clearance renewal, hr outsourcing, lawyer retainer, legal retainer]
+  # E04 - representation in criminal matters
+  Litigation Services - Criminal Cases: [criminal case, criminal complaint, estafa, adultery, concubinage, vawc, libel, cyber libel, theft, qualified theft, preliminary investigation, bp 22, bouncing check]
+  # E05 - representation in civil actions
+  Litigation Services - Civil Cases: [civil case, civil complaint, small claims, collection case, sum of money, breach of contract, claim for damages, temporary restraining order, preliminary attachment]
+  # E06 - special proceedings (annulment, custody, adoption, title, civil registry)
+  Litigation Services - Special Proceedings: [annulment, legal separation, recognition of foreign divorce, foreign divorce, child custody, child support, adoption, separation of properties, dissolution of property regime, cancellation of encumbrance, reconstitution of title, correction of title, insolvency, bankruptcy, naturalization, correction of birth certificate, correction of entry, change of name petition, petition for change of name, correction of gender, annulment of judgment, certiorari]
+  # E07 - labor, property, citizenship and other special legal matters
+  Litigation Services - Special Projects / Cases: [labor case, illegal dismissal, nlrc, hlurb, dhsud, consular assistance, tort, ra 9225, re-acquisition of philippine citizenship, retention of philippine citizenship, late registration of birth, late birth registration, philippine passport, filipino passport, tax free exchange, tax-free exchange, property due diligence, annotation of title, registry of deeds, transfer of title]
+  # E08 - matters before the Court of Appeals
+  Litigation Services - Court of Appeals: [court of appeals, appellate, petition for review, notice of appeal]
 
 # --- Engagement stages (sales trigger) ------------------------------------------
 # inquiry -> quoted (staff send pricing / quote) -> invoiced (staff send invoice)

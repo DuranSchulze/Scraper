@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from scraper.config import load_rules
-from scraper.extract import amounts_in, classify_stage, extract_contact, extract_gmail, extract_sheet, parse_form
+from scraper.extract import amounts_in, classify_stage, extract_contact, extract_gmail, extract_sheet, parse_form, services_in
 from scraper.merge import build_candidates, resolve
 from scraper.sources.gmail import message_to_payload
 from scraper.sources.sheets import rows_to_records
@@ -39,23 +39,34 @@ def test_gmail_message_to_payload_decodes_body_and_direction():
 
 
 def test_inbound_inquiry_extracts_sender_service_department_phone():
-    p = mail('"Bob Cruz" <Bob@Client.test>', "sales@acme.test", "Quote for a new website",
-             "Hi, we need a WordPress site.\n\nBob Cruz\nMobile: +63 917 123 4567\n\n> old quoted 0999 999 9999")
+    p = mail('"Bob Cruz" <Bob@Client.test>', "sales@acme.test", "Quote for SEC registration",
+             "Hi, we need to register our business.\n\nBob Cruz\nMobile: +63 917 123 4567\n\n> old quoted 0999 999 9999")
     [s] = extract_gmail(1, p, RULES, INTERNAL)
     assert s["email"] == "bob@client.test" and s["name"] == "Bob Cruz"
-    assert s["services"] == ["Web Development"]
+    assert s["services"] == ["Business Permits & Registration"]
     assert s["department"] == "Sales"
     assert s["phones"] == ["+63 917 123 4567"]
     assert s["stage"] == "inquiry"
 
 
 def test_form_notification_yields_the_inquirer_not_the_form_sender():
-    body = "New submission\nName: Ana Reyes\nEmail: ana@shop.test\nPhone: 0917 555 1234\nMessage: SEO help"
+    body = "New submission\nName: Ana Reyes\nEmail: ana@shop.test\nPhone: 0917 555 1234\nMessage: 9G visa help"
     p = mail("WordPress <wordpress@acme.test>", "info@acme.test", "New form entry", body)
     [s] = extract_gmail(2, p, RULES, INTERNAL)
     assert (s["email"], s["name"]) == ("ana@shop.test", "Ana Reyes")
-    assert s["services"] == ["Digital Marketing"]
+    assert s["services"] == ["Work Visa Services"]
     assert s["phones"] == ["0917 555 1234"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("one sec please", []),
+    ("Dole bananas for the office", []),
+    ("spa weekend", []),
+    ("our website", []),
+    ("AEP renewal and 9G visa", ["Work Visa Services", "Alien Employment Permit (AEP)"]),
+])
+def test_services_need_catalog_phrases(text, expected):
+    assert services_in(text, RULES) == expected
 
 
 def test_outbound_invoice_marks_external_recipients_invoiced():
