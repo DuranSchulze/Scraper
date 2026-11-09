@@ -3,16 +3,19 @@
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
+import { badgeVariants } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import {
   Pagination, PaginationContent, PaginationEllipsis, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious,
 } from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { candidatesQuery, PAGE_SIZE, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
+import { PhoneNumber } from "./phone";
 
 const DASH = <span className="text-muted-foreground">—</span>;
 // The pinned Client cell needs an opaque background, or scrolled cells show through it.
@@ -73,12 +76,12 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         </div>
         {toolbar}
       </div>
-      <Table ref={tableRef} className="min-w-[1180px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
+      <Table ref={tableRef} className="min-w-[1300px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
               <TableHead className="sticky left-0 z-10 w-72 bg-muted pl-4">Client</TableHead>
-              <TableHead className="w-36">Phone</TableHead>
-              <TableHead className="w-52">Services</TableHead>
+              <TableHead className="w-48">Phone</TableHead>
+              <TableHead className="w-72">Services</TableHead>
               <TableHead className="w-28">Stage</TableHead>
               <TableHead className="w-24">Status</TableHead>
               <TableHead className="w-36 text-right">Latest amount</TableHead>
@@ -126,6 +129,34 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
   );
 }
 
+const TIP_MAX = 10;
+
+/** Tooltip list, capped so it fits on screen; the record details show everything. */
+function tipList(items: string[], render: (item: string) => React.ReactNode) {
+  return (
+    <ul className="flex flex-col gap-1">
+      {items.slice(0, TIP_MAX).map((item) => <li key={item}>{render(item)}</li>)}
+      {items.length > TIP_MAX && <li className="opacity-70">and {items.length - TIP_MAX} more. Open the record to see all.</li>}
+    </ul>
+  );
+}
+
+/** A badge that shows a tooltip on hover or focus. Clicks and Enter stay on the badge, not the row. */
+function TipBadge({ variant = "outline", label, tip, className, children }: {
+  variant?: "outline" | "secondary"; label?: string; tip: React.ReactNode; className?: string; children: React.ReactNode;
+}) {
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <Tooltip>
+      <TooltipTrigger type="button" aria-label={label} onClick={stop} onKeyDown={stop}
+        className={cn(badgeVariants({ variant }), "cursor-default tabular-nums", className)}>
+        {children}
+      </TooltipTrigger>
+      <TooltipContent className="items-start">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; onSelect: (id: number) => void }) {
   const more = r.services.slice(2);
   return (
@@ -140,14 +171,34 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
           {r.company && <span className="truncate text-xs text-muted-foreground" title={r.company}>{r.company}</span>}
         </div>
       </TableCell>
-      <TableCell className="text-sm tabular-nums">
-        {r.phones.length ? <span title={r.phones.join(", ")}>{r.phones[0]}{r.phones.length > 1 && <span className="text-muted-foreground"> +{r.phones.length - 1}</span>}</span> : DASH}
+      <TableCell className="text-sm">
+        {r.phones.length ? (
+          <div className="flex items-center gap-1.5">
+            <PhoneNumber raw={r.phones[0]} />
+            {r.phones.length > 1 && (
+              <TipBadge label={`${r.phones.length - 1} more phone numbers`}
+                tip={tipList(r.phones, (p) => <PhoneNumber raw={p} />)}>
+                +{r.phones.length - 1}
+              </TipBadge>
+            )}
+          </div>
+        ) : DASH}
       </TableCell>
       <TableCell>
         {r.services.length ? (
-          <div className="flex flex-wrap gap-1">
-            {r.services.slice(0, 2).map((s) => <Pill key={s} className="max-w-40 truncate">{s}</Pill>)}
-            {more.length > 0 && <Pill tone="info" className="cursor-help"><span title={more.join(", ")}>+{more.length}</span></Pill>}
+          <div className="flex w-64 flex-wrap gap-1">
+            {r.services.slice(0, 2).map((s) => (
+              <TipBadge key={s} variant="secondary" tip={s}
+                className="h-auto max-w-full justify-start rounded-md whitespace-normal py-0.5 text-left leading-snug">
+                {s}
+              </TipBadge>
+            ))}
+            {more.length > 0 && (
+              <TipBadge label={`${more.length} more services`}
+                tip={tipList(more, (s) => s)}>
+                +{more.length}
+              </TipBadge>
+            )}
           </div>
         ) : DASH}
       </TableCell>
