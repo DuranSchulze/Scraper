@@ -136,15 +136,7 @@ html[data-theme="light"] {
   --info: #1f55b8;
 }
 
-/* Theme switch: a short colour cross-fade, only while data-theme-switching is set (lib/theme.ts). */
-html[data-theme-switching] *,
-html[data-theme-switching] *::before,
-html[data-theme-switching] *::after {
-  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, fill 0.3s ease, stroke 0.3s ease, box-shadow 0.3s ease, outline-color 0.3s ease !important;
-}
-@media (prefers-reduced-motion: reduce) {
-  html[data-theme-switching] *, html[data-theme-switching] *::before, html[data-theme-switching] *::after { transition: none !important; }
-}
+/* Theme switching is tweened with GSAP in lib/theme.ts (custom properties on <html>); no CSS transition is used. */
 
 .dark {
   --background: oklch(0.145 0 0);

@@ -72,7 +72,7 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
     : s?.job_status === "failed" ? `${s.error ?? "The job failed."} Resume continues from where it stopped; finished work is kept.` : null;
 
   return (
-    <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
+    <header className="sticky top-0 z-30 border-b bg-card">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 lg:px-6">
         {leading}
 

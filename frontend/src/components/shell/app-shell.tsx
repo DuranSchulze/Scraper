@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
 import { announceSessionChange, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
-import { toggleTheme, useTheme } from "@/lib/theme";
+import { prewarmTheme, toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 // Nav stays plain data; admin-only items are hidden for members (pages and the API check again).
@@ -105,27 +105,6 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
         ))}
       </nav>
       <div className="flex flex-col gap-1 border-t border-sidebar-border p-2">
-        {me && (
-          <div className="flex h-12 items-center rounded-lg">
-            <span className={SLOT}>
-              <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold uppercase">{me.name.slice(0, 1)}</span>
-            </span>
-            <span className="sb-label min-w-0 pr-3 leading-tight whitespace-nowrap">
-              <span className="block truncate text-sm font-medium">{me.name}</span>
-              <span className="block truncate text-xs text-sidebar-foreground/80 capitalize">{me.role}</span>
-            </span>
-          </div>
-        )}
-        <Tooltip disabled={!tip}>
-          <TooltipTrigger render={
-            <button type="button" onClick={onLogout} aria-label="Sign out"
-              className={cn(ROW, "text-sidebar-foreground/85 hover:bg-destructive/15 hover:text-destructive")} />
-          }>
-            <span className={SLOT}><LogOut className="h-[1.15rem] w-[1.15rem] shrink-0" /></span>
-            <span className="sb-label pr-3 whitespace-nowrap">Sign out</span>
-          </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={10}>Sign out</TooltipContent>
-        </Tooltip>
         <Tooltip disabled={!tip}>
           <TooltipTrigger render={
             <button type="button" onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
@@ -151,6 +130,27 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
             <TooltipContent side="right" sideOffset={10}>Expand sidebar</TooltipContent>
           </Tooltip>
         )}
+        {me && (
+          <div className="flex h-12 items-center rounded-lg">
+            <span className={SLOT}>
+              <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold uppercase">{me.name.slice(0, 1)}</span>
+            </span>
+            <span className="sb-label min-w-0 pr-3 leading-tight whitespace-nowrap">
+              <span className="block truncate text-sm font-medium">{me.name}</span>
+              <span className="block truncate text-xs text-sidebar-foreground/80 capitalize">{me.role}</span>
+            </span>
+          </div>
+        )}
+        <Tooltip disabled={!tip}>
+          <TooltipTrigger render={
+            <button type="button" onClick={onLogout} aria-label="Sign out"
+              className={cn(ROW, "text-sidebar-foreground/85 hover:bg-destructive/15 hover:text-destructive")} />
+          }>
+            <span className={SLOT}><LogOut className="h-[1.15rem] w-[1.15rem] shrink-0" /></span>
+            <span className="sb-label pr-3 whitespace-nowrap">Sign out</span>
+          </TooltipTrigger>
+          <TooltipContent side="right" sideOffset={10}>Sign out</TooltipContent>
+        </Tooltip>
       </div>
     </div>
   );
@@ -166,6 +166,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const id = requestAnimationFrame(() => requestAnimationFrame(() => { document.documentElement.dataset.sidebarReady = ""; }));
     return () => cancelAnimationFrame(id);
+  }, []);
+
+  // Read both themes' colours while idle, so the first switch costs no extra style recalculation.
+  useEffect(() => {
+    const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 300));
+    const id = idle(prewarmTheme);
+    return () => { if (window.cancelIdleCallback) window.cancelIdleCallback(id as number); else window.clearTimeout(id as number); };
   }, []);
 
   // Another tab signed in or out: reload so this one never shows the previous account's cached data.
