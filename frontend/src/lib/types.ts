@@ -112,3 +112,7 @@ export type RawItem = {
     attachments?: { filename: string }[]; attachment_text?: Record<string, string>;
   } & Record<string, unknown>;
 };
+
+export type Role = "admin" | "member";
+export type User = { id: number; email: string; name: string; role: Role };
+export type Account = User & { active: boolean; created_at: string };

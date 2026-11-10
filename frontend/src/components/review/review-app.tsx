@@ -3,16 +3,11 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ListChecks, ScanSearch, Search, X } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { candidatesQuery, statusQuery } from "@/lib/api";
-import { LogPanel } from "@/components/scrape/log-panel";
-import { MailboxBoard } from "@/components/scrape/mailbox-board";
-import { ScrapeForm } from "@/components/scrape/scrape-form";
-import { StatusBar } from "@/components/scrape/status-bar";
 import { PAGE_SIZE, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -42,10 +37,7 @@ export function ReviewApp() {
     page: Math.max(1, Math.floor(Number(params.get("page"))) || 1),
   };
   const selectedId = Number(params.get("id")) || null;
-  const tab = params.get("tab") === "scraping" ? "scraping" : "review";
-  const logMailbox = params.get("mailbox") || "";
   const { data: status } = useQuery(statusQuery);
-  const pending = status?.candidates.pending;
   const { data: list } = useQuery(candidatesQuery(filters));
   const ids = list?.rows.map((r) => r.id) ?? [];
   const pos = selectedId ? ids.indexOf(selectedId) : -1;
@@ -79,24 +71,8 @@ export function ReviewApp() {
   }, [q, dept]);
 
   return (
-    <>
-      <StatusBar />
-      <main className="p-4 lg:p-6">
-        <Tabs value={tab} onValueChange={(v) => setParams({ tab: v === "review" ? null : String(v) })}>
-          <TabsList aria-label="Sections">
-            <TabsTrigger value="review"><ListChecks className="h-4 w-4 shrink-0" /> Review{pending ? ` (${pending.toLocaleString()})` : ""}</TabsTrigger>
-            <TabsTrigger value="scraping"><ScanSearch className="h-4 w-4 shrink-0" /> Scraping</TabsTrigger>
-          </TabsList>
-          <TabsContent value="scraping" className="pt-2">
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
-              <div className="flex min-w-0 flex-col gap-4">
-                <ScrapeForm />
-                <MailboxBoard selected={logMailbox} onSelect={(mb) => setParams({ mailbox: mb || null })} />
-              </div>
-              <LogPanel mailbox={logMailbox} onClearMailbox={() => setParams({ mailbox: null })} />
-            </div>
-          </TabsContent>
-          <TabsContent value="review" className="flex flex-col gap-4 pt-2">
+    <div className="flex flex-col gap-4">
+      <h1 className="text-xl font-semibold tracking-tight">Review</h1>
             <div className="flex flex-wrap items-center gap-2">
               <div role="group" aria-label="Review state" className="inline-flex max-w-full overflow-x-auto rounded-full border bg-muted/40 p-0.5">
                 {STATE_OPTIONS.map((o) => {
@@ -151,9 +127,6 @@ export function ReviewApp() {
                 )}
               </SheetContent>
             </Sheet>
-          </TabsContent>
-        </Tabs>
-      </main>
-    </>
+    </div>
   );
 }

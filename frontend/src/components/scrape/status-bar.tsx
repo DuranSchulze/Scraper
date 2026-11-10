@@ -23,7 +23,7 @@ const JOB_STATE = {
 } as const;
 
 /** Slim bar shown on both tabs: current job, its controls, mailbox progress and Publish. */
-export function StatusBar() {
+export function StatusBar({ leading }: { leading?: React.ReactNode }) {
   const qc = useQueryClient();
   const { data: s, error } = useQuery(statusQuery);
   const running = !!s?.running;
@@ -74,7 +74,7 @@ export function StatusBar() {
   return (
     <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 lg:px-6">
-        <h1 className="text-lg font-semibold tracking-tight">Workspace Scraper</h1>
+        {leading}
 
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
           {s?.job ? <span className="text-muted-foreground">Last job: <span className="font-medium text-foreground">{s.job}</span></span>
