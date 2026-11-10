@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import type { PaymentBasis } from "@/lib/types";
 
 const TONE = {
-  neutral: "bg-muted text-muted-foreground",
+  neutral: "bg-foreground/10 text-foreground/85",
   info: "bg-info/15 text-info",
   warning: "bg-warning/20 text-foreground",
   success: "bg-success/15 text-success",

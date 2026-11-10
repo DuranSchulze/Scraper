@@ -25,6 +25,7 @@
   --color-chart-1: var(--chart-1);
   --color-ring: var(--ring);
   --color-input: var(--input);
+  --color-field: var(--field);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
   --color-accent-foreground: var(--accent-foreground);
@@ -69,12 +70,13 @@
   --secondary: #293138;
   --secondary-foreground: #dee3ea;
   --muted: #293138;
-  --muted-foreground: #98a3b0;
+  --muted-foreground: #aeb8c4;
   --accent: #2d353e;
   --accent-foreground: #dee3ea;
   --destructive: #ffb4ab;
-  --border: #2d353e;
-  --input: #3a434d;
+  --border: #4b5663;
+  --input: #76828f;
+  --field: #151a1f;
   --ring: #ffc513;
   --chart-1: #ffc513;
   --chart-2: #bfc7d0;
@@ -117,6 +119,7 @@ html[data-theme="light"] {
   --destructive: #c62828;
   --border: #dfe4ea;
   --input: #c5ccd5;
+  --field: #ffffff;
   --ring: #b58500;
   --chart-1: #d99a00;
   --chart-2: #5a6572;
