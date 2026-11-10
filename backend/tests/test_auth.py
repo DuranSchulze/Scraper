@@ -81,6 +81,23 @@ def test_unknown_user_and_wrong_password_are_identical(authenticated_client):
     assert a.status_code == b.status_code == 401 and a.json() == b.json()
 
 
+@pytest.mark.parametrize("configured,expected", [(None, "lax"), ("lax", "lax"), ("none", "none"),
+                                               ("strict", "strict"), ("invalid", "lax")])
+def test_configured_cookie_samesite(authenticated_client, monkeypatch, configured, expected):
+    if configured is None:
+        monkeypatch.delenv("COOKIE_SAMESITE", raising=False)
+    else:
+        monkeypatch.setenv("COOKIE_SAMESITE", configured)
+    response = authenticated_client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD}, headers=GUI)
+    assert response.status_code == 200
+    if expected == "none":
+        authenticated_client.base_url = "https://localhost"
+    for cookie in (response.headers["set-cookie"],
+                   authenticated_client.post("/api/auth/logout", headers=GUI).headers["set-cookie"]):
+        assert f"SameSite={expected}" in cookie and "HttpOnly" in cookie and "Path=/" in cookie
+        assert ("Secure" in cookie) == (expected == "none")
+
+
 @pytest.mark.parametrize("kind", ["expired", "tampered", "wrong_secret", "missing_claim", "wrong_algorithm", "bad_subject"])
 def test_invalid_tokens_are_unauthorized(authenticated_client, kind):
     now = int(time.time())

@@ -95,6 +95,35 @@ If progress lines show frequent rate-limit retries, lower `SCRAPE_MESSAGE_WORKER
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
 Approved, rejected and merged records are never overwritten by a rerun.
 
+## Deploy the backend on Render
+
+Create a Render Blueprint from the root `render.yaml` (Python 3.12, paid Starter,
+one instance). The build uses `uv sync --locked --no-dev`; each start runs migrations
+(`python -m scraper.db push`) before starting the API. Supply the prompted secrets,
+including the Neon `DATABASE_URL`, `JWT_SECRET`, and initial admin credentials. Upload
+the Google service-account JSON as a Render Secret File named `sa-key.json`; it is read
+from `/etc/secrets/sa-key.json`. Set the Google Workspace variables as for local setup
+and add `DRIVE_SHEET_IDS` if needed.
+
+Set `ALLOWED_HOSTS` to a comma list of API hostnames, including your service's
+`<name>.onrender.com` hostname and any custom domain (no scheme or port). It defaults
+to `127.0.0.1,localhost`; other hosts receive 400. `HOST` defaults to `127.0.0.1`;
+the Blueprint sets `0.0.0.0`. Render supplies `PORT`, which overrides `GUI_PORT`
+(default 8765). Set `APP_URL` to the HTTPS frontend URL to force Secure cookies.
+
+The Next.js rewrite via `SCRAPER_API_URL` needs no CORS: set it to the Render API URL
+on Vercel. Only direct browser calls need `CORS_ORIGINS`: an exact comma list of
+HTTPS frontend origins (no trailing slash), never `*`; empty disables CORS. Direct
+calls must send credentials and `X-Local-GUI: 1` on writes. For cross-site cookies,
+set `COOKIE_SAMESITE=none`, which always sets Secure; browsers may still block
+third-party cookies, so prefer the Next.js rewrite. `lax` is the default and invalid
+values fall back to it; `strict` is also supported. Restart after changing settings.
+
+Keep **one instance and one API process**: jobs run in threads and rate limits are
+in memory. The free tier sleeps and would kill active scrapes; use an always-on paid
+service. Deploys/restarts also interrupt jobs; resume them after startup. No dedicated
+health-check path is configured; `/` is an unauthenticated GUI pointer.
+
 ## Start over (empty the database)
 
 **This permanently deletes every scraped email, every staging record, the job history and the

@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: workspace-scraper-api
+    runtime: python
+    rootDir: backend
+    plan: starter
+    numInstances: 1
+    buildCommand: uv sync --locked --no-dev
+    startCommand: uv run --no-sync python -m scraper.db push && uv run --no-sync python -m scraper.app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.12
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: COOKIE_SAMESITE
+        value: lax
+      - key: GOOGLE_SERVICE_ACCOUNT_FILE
+        value: /etc/secrets/sa-key.json
+      - key: GOOGLE_ADMIN_EMAIL
+        sync: false
+      - key: GOOGLE_WORKSPACE_DOMAIN
+        sync: false
+      - key: INTERNAL_DOMAINS
+        sync: false

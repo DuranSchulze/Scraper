@@ -165,6 +165,11 @@ class Account(User):
 router = APIRouter(prefix="/api")
 
 
+def cookie_samesite():
+    value = env("COOKIE_SAMESITE", "lax")
+    return value if value in ("lax", "none", "strict") else "lax"
+
+
 @router.post("/auth/login", response_model=User)
 def login(body: LoginIn, request: Request, response: Response):
     peer = request.client.host if request.client else "unknown"
@@ -176,16 +181,18 @@ def login(body: LoginIn, request: Request, response: Response):
     valid = verify_password(body.password, user["password_hash"] if user else DUMMY_HASH)
     if not valid or not user or not user["active"]:
         raise HTTPException(401, "Invalid email or password")
+    samesite = cookie_samesite()
     response.set_cookie(COOKIE, sign_token(user), max_age=SESSION_SECONDS, httponly=True,
-                        secure=request.url.scheme == "https" or env("APP_URL").startswith("https://"),
-                        samesite="lax", path="/")
+                        secure=samesite == "none" or request.url.scheme == "https" or env("APP_URL").startswith("https://"),
+                        samesite=samesite, path="/")
     return user
 
 
 @router.post("/auth/logout")
 def logout(request: Request, response: Response):
-    response.delete_cookie(COOKIE, path="/", httponly=True, samesite="lax",
-                           secure=request.url.scheme == "https" or env("APP_URL").startswith("https://"))
+    samesite = cookie_samesite()
+    response.delete_cookie(COOKIE, path="/", httponly=True, samesite=samesite,
+                           secure=samesite == "none" or request.url.scheme == "https" or env("APP_URL").startswith("https://"))
     return {"ok": True}
 
 

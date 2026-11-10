@@ -1,4 +1,4 @@
-"""Local review GUI. Run: uv run python -m scraper.app  (binds 127.0.0.1 only)."""
+"""Review API. Run: uv run python -m scraper.app (localhost by default)."""
 
 import sys
 import logging
@@ -13,6 +13,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from psycopg import Error as PostgresError
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 
 from . import auth, db, pipeline
 from .db import JobStopped
-from .config import RULES_PATH, ROOT, env, jwt_secret, load_rules
+from .config import RULES_PATH, ROOT, env, env_list, jwt_secret, load_rules
 
 @asynccontextmanager
 async def lifespan(app):
@@ -37,8 +38,6 @@ async def lifespan(app):
 app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan,
               dependencies=[Depends(auth.current_user)])
 app.include_router(auth.router)
-# Blocks DNS-rebinding: only requests addressed to localhost are served.
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
 
 @app.exception_handler(RuntimeError)
@@ -54,6 +53,21 @@ async def require_gui_header(request: Request, call_next):
     if request.method != "GET" and request.headers.get("x-local-gui") != "1":
         return JSONResponse({"detail": "missing X-Local-GUI header"}, status_code=403)
     return await call_next(request)
+
+
+def configure_middleware(application):
+    # Blocks DNS rebinding: serve only explicitly allowed hosts (localhost by default).
+    application.add_middleware(TrustedHostMiddleware,
+                               allowed_hosts=env_list("ALLOWED_HOSTS") or ["127.0.0.1", "localhost"])
+    origins = [origin for origin in env_list("CORS_ORIGINS") if origin != "*"]
+    if origins:
+        # Outermost so preflights do not reach the GUI header or authentication checks.
+        application.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
+                                   allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+                                   allow_headers=["Content-Type", "X-Local-GUI"])
+
+
+configure_middleware(app)
 
 
 # --- Persistent jobs (one running row across all API processes) ---
@@ -666,4 +680,5 @@ def index():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=int(env("GUI_PORT", "8765")), proxy_headers=False)
+    uvicorn.run(app, host=env("HOST", "127.0.0.1"),
+                port=int(env("PORT") or env("GUI_PORT", "8765")), proxy_headers=False)

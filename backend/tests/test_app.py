@@ -22,6 +22,7 @@ def test_post_without_gui_header_rejected():
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import threading
+import runpy
 
 import pytest
 from psycopg import OperationalError
@@ -31,6 +32,51 @@ from scraper import db, pipeline
 from scraper import app as app_module
 
 GUI = {"X-Local-GUI": "1"}
+
+
+@pytest.mark.parametrize("origins", ["", "*", "https://ui.example.test, https://other.example.test"])
+def test_configured_hosts_and_cors(monkeypatch, origins):
+    monkeypatch.setenv("ALLOWED_HOSTS", " localhost, api.example.test ")
+    monkeypatch.setenv("CORS_ORIGINS", origins)
+    configured = runpy.run_module("scraper.app")["app"]
+    client = TestClient(configured, base_url="http://api.example.test")
+    assert client.get("/").status_code == 200
+    assert client.get("/", headers={"Host": "evil.test"}).status_code == 400
+    headers = {"Origin": "https://ui.example.test", "Access-Control-Request-Method": "POST",
+               "Access-Control-Request-Headers": "content-type,x-local-gui"}
+    response = client.options("/api/extract", headers=headers)
+    if origins.startswith("https"):
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == headers["Origin"]
+        assert response.headers["access-control-allow-credentials"] == "true"
+        assert set(response.headers["access-control-allow-methods"].split(", ")) == {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        assert client.post("/api/extract", headers={"Origin": headers["Origin"]}).status_code == 403
+        denied = client.options("/api/extract", headers={**headers, "Origin": "https://evil.test"})
+        assert denied.status_code == 400 and "access-control-allow-origin" not in denied.headers
+        actual = client.post("/api/extract", headers={**GUI, "Origin": headers["Origin"]})
+        assert actual.status_code == 401 and actual.headers["access-control-allow-origin"] == headers["Origin"]
+    else:
+        assert response.status_code == 403 and "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.parametrize("host,port,gui_port,expected", [
+    (None, None, None, ("127.0.0.1", 8765)),
+    ("0.0.0.0", "10000", "9000", ("0.0.0.0", 10000)),
+    (None, None, "9000", ("127.0.0.1", 9000)),
+])
+def test_api_bind_settings(monkeypatch, host, port, gui_port, expected):
+    import uvicorn
+
+    for key, value in (("HOST", host), ("PORT", port), ("GUI_PORT", gui_port)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    settings = {}
+    monkeypatch.setattr(uvicorn, "run", lambda application, **kwargs: settings.update(kwargs))
+    runpy.run_module("scraper.app", run_name="__main__")
+    assert (settings["host"], settings["port"]) == expected
+    assert settings["proxy_headers"] is False
 
 
 @pytest.fixture
