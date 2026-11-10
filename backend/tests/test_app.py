@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from scraper.app import app
+from test_auth import authenticated_client
 
 local = TestClient(app, base_url="http://localhost")
 
@@ -33,7 +34,8 @@ GUI = {"X-Local-GUI": "1"}
 
 
 @pytest.fixture
-def conn(pg_url, monkeypatch):
+def conn(pg_url, monkeypatch, authenticated_client):
+    monkeypatch.setitem(globals(), "local", authenticated_client)
     monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
     db.migrate()
     with db.connect() as conn:
@@ -96,7 +98,7 @@ def test_publish_failure_rolls_back_clients_and_markers(conn):
     assert approve(b, edited("Bad")).status_code == 200
     conn.execute("ALTER TABLE clients ADD CONSTRAINT injected_failure CHECK (name <> 'Bad')")
     conn.commit()
-    with TestClient(app, base_url="http://localhost", raise_server_exceptions=False) as client:
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies, raise_server_exceptions=False) as client:
         assert client.post("/api/publish", headers=GUI).status_code == 500
     assert conn.execute("SELECT count(*) AS n FROM clients").fetchone()["n"] == 0
     assert conn.execute("SELECT count(*) AS n FROM candidates WHERE published_at IS NOT NULL OR client_id IS NOT NULL").fetchone()["n"] == 0
@@ -390,13 +392,13 @@ def test_job_log_survives_work_rollback_and_app_restart(conn):
             raise ValueError("rollback work")
     assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 0
     assert conn.execute("SELECT heartbeat_at FROM jobs WHERE id=%s", (jid,)).fetchone()["heartbeat_at"] > before
-    with TestClient(app, base_url="http://localhost") as restarted:
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies) as restarted:
         state = restarted.get("/api/status").json()
         assert state["job_id"] == jid and state["job_status"] == "running"
         assert state["log"][-1].endswith("survives rollback")
     conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes'")
     conn.commit()
-    with TestClient(app, base_url="http://localhost") as restarted:
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies) as restarted:
         assert conn.execute("SELECT status FROM jobs WHERE id=%s", (jid,)).fetchone()["status"] == "interrupted"
         state = restarted.get("/api/status").json()
         assert state["job_status"] == "interrupted" and not state["running"]
@@ -411,7 +413,7 @@ def test_status_last_500_lines_oldest_first_latest_job_only(conn):
     with conn.cursor() as cur:
         cur.executemany("INSERT INTO job_log (job_id, line) VALUES (%s,%s)", [(jid, f"line {i}") for i in range(503)])
     conn.commit()
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies) as client:
         state = client.get("/api/status").json()
     assert state["log"] == [f"line {i}" for i in range(3, 503)]
     assert state["job_id"] == jid and state["job_params"] == {"full": False}
@@ -421,7 +423,7 @@ def test_status_last_500_lines_oldest_first_latest_job_only(conn):
 
 def test_status_marks_newly_stale_job_but_startup_preserves_fresh_remote_job(conn):
     jid = job_row(conn)
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies) as client:
         assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "running"
         conn.execute("UPDATE jobs SET heartbeat_at=now()-interval '3 minutes'")
         conn.commit()
@@ -531,7 +533,8 @@ def test_heartbeat_updates_without_log_output_while_runner_is_alive(conn, monkey
 
 def test_proxied_host_and_browser_header_pass_and_pointer_when_static_absent(conn, monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "_launch_job", lambda *_: None, raising=False)
-    proxied = TestClient(app, base_url="http://127.0.0.1:8765")
+    proxied = TestClient(app, base_url="http://127.0.0.1:8765", cookies=local.cookies)
+    proxied.cookies.set("scraper_session", local.cookies.get("scraper_session"), domain="127.0.0.1", path="/")
     assert proxied.post("/api/extract", json={}).status_code == 403
     assert proxied.post("/api/extract", json={}, headers=GUI).status_code == 200
     assert TestClient(app, base_url="http://foreign.test").get("/api/status").status_code == 400
@@ -564,7 +567,7 @@ def test_startup_serves_gui_when_database_is_unavailable_and_status_retries(conn
     def unavailable():
         raise error_type("database unavailable")
     monkeypatch.setattr(db, "connect", unavailable)
-    with TestClient(app, base_url="http://localhost", raise_server_exceptions=False) as client:
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies, raise_server_exceptions=False) as client:
         assert client.get("/").status_code == 200
         assert client.get("/api/status").status_code == 500
         monkeypatch.setattr(db, "connect", original)

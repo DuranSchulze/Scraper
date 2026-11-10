@@ -33,5 +33,12 @@ def env_list(name: str) -> list[str]:
     return [x.strip().lower() for x in env(name).split(",") if x.strip()]
 
 
+def jwt_secret() -> str:
+    secret = env("JWT_SECRET")
+    if len(secret) < 32:
+        raise RuntimeError("JWT_SECRET must contain at least 32 characters")
+    return secret
+
+
 def load_rules() -> dict:
     return yaml.safe_load(RULES_PATH.read_text())

@@ -1,6 +1,7 @@
 """Local review GUI. Run: uv run python -m scraper.app  (binds 127.0.0.1 only)."""
 
 import sys
+import logging
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -9,7 +10,7 @@ from getpass import getuser
 from typing import Literal
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from psycopg import Error as PostgresError
@@ -17,29 +18,34 @@ from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from . import db, pipeline
+from . import auth, db, pipeline
 from .db import JobStopped
-from .config import RULES_PATH, ROOT, env, load_rules
+from .config import RULES_PATH, ROOT, env, jwt_secret, load_rules
 
 @asynccontextmanager
 async def lifespan(app):
+    jwt_secret()
     try:
         with db.connect() as conn:
             db.interrupt_stale(conn)
+            auth.seed_admin(conn)
     except (RuntimeError, PostgresError):
         pass  # Keep the GUI available; status reports the error and retries the check.
     yield
 
 
-app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan,
+              dependencies=[Depends(auth.current_user)])
+app.include_router(auth.router)
 # Blocks DNS-rebinding: only requests addressed to localhost are served.
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
 
 @app.exception_handler(RuntimeError)
-async def config_error(request: Request, exc: RuntimeError):
-    # Our RuntimeErrors are setup problems (missing .env values); show them in the GUI.
-    return JSONResponse({"detail": str(exc)}, status_code=500)
+@app.exception_handler(Exception)
+async def config_error(request: Request, exc: Exception):
+    logging.getLogger(__name__).error("Unhandled request error", exc_info=(type(exc), exc, exc.__traceback__))
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
 
 @app.middleware("http")

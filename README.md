@@ -37,6 +37,20 @@ npm run migrate                     # creates or updates the database tables
 
 Use an absolute path for `GOOGLE_SERVICE_ACCOUNT_FILE` in `.env`.
 
+Set `JWT_SECRET` to a random secret of at least 32 characters (for example, generate one with
+`uv run --directory backend python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` (at least 10 characters) to create the first admin.
+The API seeds it at startup only when the `users` table is empty; missing admin values log
+a warning. Keep these values private. Set `APP_URL` to your HTTPS application URL when
+using HTTPS behind a proxy so session cookies are always Secure.
+
+After updating, run migrations first (`npm run migrate`, including migration 007), then
+start the API and GUI (`npm run dev`), then sign in with the admin account. Sessions last
+8 hours. Login is limited to 5 attempts per email and socket peer IP per 15 minutes, and
+30 per peer IP. Behind the Next.js rewrite, clients share the loopback IP; forwarded IP
+headers are ignored. Limits are kept in each API process's memory and reset on restart.
+Admins can list and create accounts with `/api/users`; members cannot manage accounts.
+
 Edit `backend/rules.yaml`: department aliases, service names and keywords.
 
 ## 3. Run

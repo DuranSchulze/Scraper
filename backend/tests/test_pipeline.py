@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 
 import pytest
+
+from test_auth import authenticated_client
 from psycopg.types.json import Jsonb
 
 from scraper import db, pipeline
@@ -231,9 +233,8 @@ def test_rebuild_without_signals_preserves_merge_target_and_mapping(conn):
     assert candidates(conn)["bob@client.test"]["id"] == target
 
 
-def test_stored_signals_rebuild_details_and_merge_reopen_recompute_without_overwriting_reviewed(conn):
+def test_stored_signals_rebuild_details_and_merge_reopen_recompute_without_overwriting_reviewed(conn, authenticated_client):
     from datetime import datetime, timedelta, timezone
-    from fastapi.testclient import TestClient
     from scraper.app import app
     from scraper.config import load_rules
     from scraper.extract import signal
@@ -253,7 +254,7 @@ def test_stored_signals_rebuild_details_and_merge_reopen_recompute_without_overw
     before = candidates(conn)
     a_id, b_id = before["a@client.test"]["id"], before["b@client.test"]["id"]
     assert before["a@client.test"]["fields"]["payments"]["value"][0]["raw_item_id"] == a
-    local = TestClient(app, base_url="http://localhost")
+    local = authenticated_client
     gui = {"X-Local-GUI": "1"}
     assert local.post(f"/api/candidates/{a_id}/merge", json={"into_id": b_id}, headers=gui).status_code == 200
     merged = candidates(conn)["b@client.test"]["fields"]
@@ -354,10 +355,9 @@ def test_full_reset_failure_before_commit_does_not_set_resume_marker(conn, monke
 
 
 @pytest.mark.parametrize("action", ["pause", "stop"])
-def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, monkeypatch, action):
+def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, monkeypatch, action, authenticated_client):
     import threading
     import time
-    from fastapi.testclient import TestClient
     from scraper import app as api
     from psycopg.types.json import Jsonb
 
@@ -379,7 +379,7 @@ def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, 
         original(logger)
     monkeypatch.setattr(api.JobLog, "checkpoint", checkpoint)
     worker = threading.Thread(target=api._run_job, args=(jid, "extract", params))
-    client = TestClient(api.app, base_url="http://localhost")
+    client = authenticated_client
     worker.start()
     before = None
     try:
@@ -410,8 +410,7 @@ def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, 
 
 
 @pytest.mark.parametrize("sources", [["gmail"], ["contacts"], ["gmail", "contacts"]])
-def test_stopped_scrape_resume_skips_done_mailboxes_but_new_run_does_not(conn, monkeypatch, sources):
-    from fastapi.testclient import TestClient
+def test_stopped_scrape_resume_skips_done_mailboxes_but_new_run_does_not(conn, monkeypatch, sources, authenticated_client):
     from scraper import app as api
 
     seen = []
@@ -437,7 +436,7 @@ def test_stopped_scrape_resume_skips_done_mailboxes_but_new_run_does_not(conn, m
     jid = api.start_job("scrape", params)
     row = conn.execute("SELECT * FROM jobs WHERE id=%s", (jid,)).fetchone()
     assert row["status"] == "stopped" and row["params"]["done_mailboxes"] == ["a"]
-    client = TestClient(api.app, base_url="http://localhost")
+    client = authenticated_client
     assert client.post(f"/api/jobs/{jid}/resume", headers={"X-Local-GUI": "1"}).status_code == 200
     assert seen == [(source, mailbox) for mailbox in ("a", "b") for source in sources]
     latest = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
@@ -638,9 +637,8 @@ def wait_for(predicate):
         time.sleep(.01)
 
 
-def test_parallel_stop_drains_running_tasks_without_fetching_queued_mailboxes(conn, monkeypatch, parallel_job):
+def test_parallel_stop_drains_running_tasks_without_fetching_queued_mailboxes(conn, monkeypatch, parallel_job, authenticated_client):
     import threading
-    from fastapi.testclient import TestClient
 
     monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "2")
     monkeypatch.setenv("DRIVE_SHEET_IDS", "must-not-fetch")
@@ -663,7 +661,7 @@ def test_parallel_stop_drains_running_tasks_without_fetching_queued_mailboxes(co
     jid, worker = background_scrape(conn, parallel_job, params)
     try:
         assert ready.wait(timeout=5)
-        client = TestClient(parallel_job.app, base_url="http://localhost")
+        client = authenticated_client
         assert client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"}).status_code == 200
         release.set()
         worker.join(timeout=5)
@@ -681,9 +679,8 @@ def test_parallel_stop_drains_running_tasks_without_fetching_queued_mailboxes(co
     assert not any("finished" in r["line"] for r in conn.execute("SELECT line FROM job_log"))
 
 
-def test_parallel_pause_blocks_every_fetch_thread_until_continue(conn, monkeypatch, parallel_job):
+def test_parallel_pause_blocks_every_fetch_thread_until_continue(conn, monkeypatch, parallel_job, authenticated_client):
     import threading
-    from fastapi.testclient import TestClient
 
     monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "2")
     monkeypatch.setattr(parallel_job, "PAUSE_POLL_SECONDS", .01)
@@ -703,7 +700,7 @@ def test_parallel_pause_blocks_every_fetch_thread_until_continue(conn, monkeypat
     monkeypatch.setattr(pipeline, "run_extract", lambda *a, **kw: None)
     params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False}
     jid, worker = background_scrape(conn, parallel_job, params)
-    client = TestClient(parallel_job.app, base_url="http://localhost")
+    client = authenticated_client
     try:
         assert ready.wait(timeout=5)
         assert client.post(f"/api/jobs/{jid}/pause", headers={"X-Local-GUI": "1"}).status_code == 200
@@ -726,9 +723,8 @@ def test_parallel_pause_blocks_every_fetch_thread_until_continue(conn, monkeypat
     assert sum(line.endswith("continued") for line in lines) == 1
 
 
-def test_worker_waiting_for_extraction_lock_observes_stop_without_extracting(conn, monkeypatch, parallel_job):
+def test_worker_waiting_for_extraction_lock_observes_stop_without_extracting(conn, monkeypatch, parallel_job, authenticated_client):
     import threading
-    from fastapi.testclient import TestClient
 
     monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "2")
     barrier, holding, waiting, release = threading.Barrier(2), threading.Event(), threading.Event(), threading.Event()
@@ -754,7 +750,7 @@ def test_worker_waiting_for_extraction_lock_observes_stop_without_extracting(con
     monkeypatch.setattr(pipeline, "run_extract", extract)
     params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False}
     jid, worker = background_scrape(conn, parallel_job, params)
-    client = TestClient(parallel_job.app, base_url="http://localhost")
+    client = authenticated_client
     try:
         assert holding.wait(timeout=5) and waiting.wait(timeout=5)
         assert client.post(f"/api/jobs/{jid}/stop", headers={"X-Local-GUI": "1"}).status_code == 200

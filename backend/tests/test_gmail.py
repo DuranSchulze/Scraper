@@ -11,6 +11,8 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 import pytest
 
+from test_auth import authenticated_client
+
 from scraper import db
 from scraper.sources import contacts, gmail, sheets
 
@@ -355,9 +357,8 @@ def test_empty_contacts_mark_fresh_and_partial_failure_does_not(conn, people_ser
 
 
 @pytest.mark.parametrize("action", ["pause", "stop"])
-def test_gmail_chunk_control_keeps_committed_rows_and_blocks_later_sources(conn, monkeypatch, action):
+def test_gmail_chunk_control_keeps_committed_rows_and_blocks_later_sources(conn, monkeypatch, action, authenticated_client):
     from scraper import app as api
-    from fastapi.testclient import TestClient
     from psycopg.types.json import Jsonb
 
     fake = FakeGmail([message(str(i)) for i in range(5)])
@@ -382,7 +383,7 @@ def test_gmail_chunk_control_keeps_committed_rows_and_blocks_later_sources(conn,
     monkeypatch.setattr(api.JobLog, "checkpoint", checkpoint)
     worker = threading.Thread(target=api._run_job, args=(jid, "scrape", params))
     worker.start()
-    client = TestClient(api.app, base_url="http://localhost")
+    client = authenticated_client
     try:
         assert requested.wait(timeout=5)
         if action == "pause":
