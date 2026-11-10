@@ -244,16 +244,19 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
                 name, params = previous["name"], dict(previous["params"])
                 if name == "extract" and params.get("full_reset_done"):
                     params["full"] = False
-            elif carry:
+            if carry or (resume_id is not None and name == "scrape"):
                 previous_jobs = conn.execute(
                     "SELECT id,params FROM jobs WHERE name='scrape'"
                     " AND status IN ('interrupted','stopped','failed')"
+                    " AND (%s::bigint IS NULL OR id<%s)"
                     " AND id > COALESCE((SELECT max(id) FROM jobs WHERE name='scrape'"
-                    " AND status IN ('done','done_with_errors')),0) ORDER BY id DESC FOR UPDATE"
+                    " AND status IN ('done','done_with_errors')),0) ORDER BY id DESC FOR UPDATE",
+                    (resume_id, resume_id),
                 ).fetchall()
-                done_mailboxes = set()
+                done_mailboxes = set(params.get("done_mailboxes", []))
+                match_keys = ("since", "sources", "mailboxes", "full") if resume_id is not None else ("since", "sources", "mailboxes")
                 for previous in previous_jobs:
-                    if all(previous["params"].get(key) == params[key] for key in ("since", "sources", "mailboxes")):
+                    if all(previous["params"].get(key) == params.get(key) for key in match_keys):
                         carried_ids.append(previous["id"])
                         done_mailboxes.update(previous["params"].get("done_mailboxes", []))
                 if carried_ids:

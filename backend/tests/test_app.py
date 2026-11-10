@@ -888,6 +888,94 @@ def test_scrape_carry_marking_failure_rolls_back_new_job(conn, monkeypatch, fail
     assert conn.execute('SELECT status,error FROM jobs WHERE id=%s', (old,)).fetchone() == {'status': 'stopped', 'error': None}
 
 
+@pytest.mark.parametrize('full', [False, True])
+@pytest.mark.parametrize('overlap', [False, True])
+def test_resume_scrape_merges_older_union_and_preserves_full(conn, monkeypatch, full, overlap):
+    mailboxes = [f'm{i}@test' for i in range(92)]
+    params = {'sources': ['gmail'], 'mailboxes': mailboxes, 'since': '2020-01-01', 'full': full}
+    first = mailboxes[:59]
+    last = mailboxes[58:62] if overlap else mailboxes[59:63]
+    older = [job_row(conn, status=status, name='scrape', params={**params, 'done_mailboxes': done})
+             for status, done in [('interrupted', first), ('stopped', first[:1])]]
+    target = job_row(conn, status='failed', name='scrape', params={**params, 'done_mailboxes': last})
+    conn.execute("UPDATE jobs SET control='stop' WHERE id=ANY(%s)", (older + [target],))
+    conn.commit()
+    launched = []
+    monkeypatch.setattr(app_module, '_launch_job', lambda *args: launched.append(args))
+    response = local.post(f'/api/jobs/{target}/resume', headers=GUI)
+    new = conn.execute('SELECT * FROM jobs ORDER BY id DESC LIMIT 1').fetchone()
+    expected = {**params, 'done_mailboxes': sorted(set(first + last))}
+    assert response.status_code == 200 and response.json() == {'started': True, 'job_id': new['id']}
+    assert new['params'] == expected
+    assert launched == [(new['id'], 'scrape', expected)]
+    for jid in older + [target]:
+        marker = 'resumed' if jid == target else 'continued'
+        assert conn.execute('SELECT status,control,error FROM jobs WHERE id=%s', (jid,)).fetchone() == {
+            'status': 'done', 'control': None, 'error': f"{marker} as job {new['id']}"}
+    assert local.post(f'/api/jobs/{target}/resume', headers=GUI).status_code == 400
+
+
+@pytest.mark.parametrize('key,value', [('since', '2019-01-01'), ('sources', ['contacts']),
+                                       ('mailboxes', ['other@test']), ('full', True)])
+def test_resume_scrape_excludes_other_settings_and_job_kinds(conn, monkeypatch, key, value):
+    params = {'sources': ['gmail'], 'mailboxes': ['a@test', 'b@test'], 'since': '2020-01-01', 'full': False}
+    ignored = [job_row(conn, status='stopped', name=name, params={**params, **changes, 'done_mailboxes': ['a@test']})
+               for name, changes in [('scrape', {key: value}), ('extract', {})]]
+    target = job_row(conn, status='interrupted', name='scrape', params={**params, 'done_mailboxes': ['b@test']})
+    monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
+    assert local.post(f'/api/jobs/{target}/resume', headers=GUI).status_code == 200
+    assert conn.execute('SELECT params FROM jobs ORDER BY id DESC LIMIT 1').fetchone()['params'] == {
+        **params, 'done_mailboxes': ['b@test']}
+    assert [r['status'] for r in conn.execute('SELECT status FROM jobs WHERE id=ANY(%s)', (ignored,))] == ['stopped'] * 2
+
+
+@pytest.mark.parametrize('status,error', [('done', None), ('done_with_errors', None), ('done', 'resumed as job 99')])
+def test_resume_scrape_chain_respects_completed_boundary_and_target_id(conn, monkeypatch, status, error):
+    params = {'sources': ['gmail'], 'mailboxes': [], 'since': '2020-01-01', 'full': False}
+    before = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['before']})
+    boundary = job_row(conn, status=status, name='scrape', params={'sources': ['contacts']})
+    conn.execute('UPDATE jobs SET error=%s WHERE id=%s', (error, boundary))
+    conn.commit()
+    older = job_row(conn, status='failed', name='scrape', params={**params, 'done_mailboxes': ['older']})
+    target = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['target']})
+    newer = job_row(conn, status='interrupted', name='scrape', params={**params, 'done_mailboxes': ['newer']})
+    job_row(conn, status='done', name='extract')
+    monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
+    assert local.post(f'/api/jobs/{target}/resume', headers=GUI).status_code == 200
+    assert conn.execute('SELECT params FROM jobs ORDER BY id DESC LIMIT 1').fetchone()['params']['done_mailboxes'] == ['older', 'target']
+    assert conn.execute('SELECT status FROM jobs WHERE id=%s', (before,)).fetchone()['status'] == 'stopped'
+    assert conn.execute('SELECT status FROM jobs WHERE id=%s', (newer,)).fetchone()['status'] == 'interrupted'
+    assert conn.execute('SELECT error FROM jobs WHERE id=%s', (boundary,)).fetchone()['error'] == error
+    assert conn.execute('SELECT error FROM jobs WHERE id=%s', (older,)).fetchone()['error'].startswith('continued as job ')
+
+
+@pytest.mark.parametrize('marker', ['resumed', 'continued'])
+def test_resume_scrape_chain_markers_roll_back_with_successor(conn, monkeypatch, fail_job_write, marker):
+    params = {'sources': ['gmail'], 'mailboxes': [], 'since': '2020-01-01', 'full': False}
+    older = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['a']})
+    target = job_row(conn, status='interrupted', name='scrape', params={**params, 'done_mailboxes': ['b']})
+    fail_job_write(lambda query, args: query.startswith("UPDATE jobs SET status='done', control=NULL")
+                   and args[0].startswith(marker))
+    monkeypatch.setattr(app_module, '_launch_job', lambda *args: pytest.fail('must not launch'))
+    with pytest.raises(OperationalError, match='transient write failure'):
+        local.post(f'/api/jobs/{target}/resume', headers=GUI)
+    rows = conn.execute('SELECT id,status,error FROM jobs ORDER BY id').fetchall()
+    assert rows == [{'id': older, 'status': 'stopped', 'error': None},
+                    {'id': target, 'status': 'interrupted', 'error': None}]
+
+
+def test_concurrent_scrape_resume_merges_chain_only_once(conn, monkeypatch):
+    params = {'sources': ['gmail'], 'mailboxes': [], 'since': '2020-01-01', 'full': False}
+    job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['a']})
+    target = job_row(conn, status='interrupted', name='scrape', params={**params, 'done_mailboxes': ['b']})
+    monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda _: local.post(f'/api/jobs/{target}/resume', headers=GUI).status_code, range(2)))
+    assert sorted(results) == [200, 400]
+    assert conn.execute('SELECT count(*) AS n FROM jobs').fetchone()['n'] == 3
+    assert conn.execute('SELECT params FROM jobs ORDER BY id DESC LIMIT 1').fetchone()['params']['done_mailboxes'] == ['a', 'b']
+
+
 def test_candidate_counts_merge_chain_shared_items_and_cap(conn):
     ids = [candidate(conn, email=f'{key}@client.test') for key in ['a', 'b', 'c']]
     # A shared signal must count once, even across a multi-hop merge.
