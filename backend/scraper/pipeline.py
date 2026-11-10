@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from threading import Event, Lock
+from threading import Event
 import time
 
 import psycopg
@@ -66,7 +66,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                checkpoint=lambda: None, done_mailboxes=()) -> None:
     parallel = env_int("SCRAPE_PARALLEL_MAILBOXES", 4, 1, 8, log)
     env_int("SCRAPE_MESSAGE_WORKERS", gmail.WORKERS, 1, 25, log)
-    stopped, extract_lock = Event(), Lock()
+    stopped = Event()
 
     def task_checkpoint():
         if stopped.is_set():
@@ -115,21 +115,11 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                     if mailbox_done:
                         mailbox_done(mb)
                 conn.commit()
-                step = "extract"
-                task_checkpoint()
-                while not extract_lock.acquire(timeout=1):
-                    task_checkpoint()
-                try:
-                    task_checkpoint()
-                    run_extract(log, checkpoint=task_checkpoint)
-                finally:
-                    extract_lock.release()
         except JobStopped:
             stopped.set()
             mailbox_status(mb, "pending")
         except Exception as exc:
-            if step != "extract":
-                mailbox_status(mb, "failed", repr(exc)[:500])
+            mailbox_status(mb, "failed", repr(exc)[:500])
             log(f"{mb} {step}: FAILED {exc!r}")
             _failure(log)
 
