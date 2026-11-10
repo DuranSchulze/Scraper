@@ -233,9 +233,10 @@ def _launch_job(job_id: int, name: str, params: dict) -> None:
     threading.Thread(target=_run_job, args=(job_id, name, params), daemon=True).start()
 
 
-def start_job(name: str, params: dict, *, resume_id: int | None = None) -> int:
+def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: bool = False) -> int:
     try:
         with db.connect() as conn:
+            carried_ids = []
             if resume_id is not None:
                 previous = conn.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (resume_id,)).fetchone()
                 if not previous or previous["status"] not in ("interrupted", "stopped", "failed"):
@@ -243,11 +244,28 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None) -> int:
                 name, params = previous["name"], dict(previous["params"])
                 if name == "extract" and params.get("full_reset_done"):
                     params["full"] = False
+            elif carry:
+                previous_jobs = conn.execute(
+                    "SELECT id,params FROM jobs WHERE name='scrape'"
+                    " AND status IN ('interrupted','stopped','failed')"
+                    " AND id > COALESCE((SELECT max(id) FROM jobs WHERE name='scrape'"
+                    " AND status IN ('done','done_with_errors')),0) ORDER BY id DESC FOR UPDATE"
+                ).fetchall()
+                done_mailboxes = set()
+                for previous in previous_jobs:
+                    if all(previous["params"].get(key) == params[key] for key in ("since", "sources", "mailboxes")):
+                        carried_ids.append(previous["id"])
+                        done_mailboxes.update(previous["params"].get("done_mailboxes", []))
+                if carried_ids:
+                    params["done_mailboxes"] = sorted(done_mailboxes)
             job_id = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,'running') RETURNING id",
                                   (name, Jsonb(params))).fetchone()["id"]
             if resume_id is not None:
                 conn.execute("UPDATE jobs SET status='done', control=NULL, error=%s WHERE id=%s AND status IN ('interrupted','stopped','failed')",
                              (f"resumed as job {job_id}", resume_id))
+            if carried_ids:
+                conn.execute("UPDATE jobs SET status='done', control=NULL, error=%s WHERE id=ANY(%s)",
+                             (f"continued as job {job_id}", carried_ids))
     except UniqueViolation as exc:
         raise HTTPException(409, "another job is still running") from exc
     try:
@@ -299,6 +317,7 @@ class ScrapeIn(BaseModel):
     mailboxes: list[str] = []
     since: str = ""
     full: bool = False
+    fresh: bool = False
 
 
 @app.post("/api/scrape")
@@ -306,8 +325,9 @@ def scrape(body: ScrapeIn):
     since = body.since or env("SCRAPE_SINCE", "2018-01-01")
     datetime.strptime(since, "%Y-%m-%d")  # validate before starting
     mailboxes = [m.strip().lower() for m in body.mailboxes if m.strip()]
-    start_job("scrape", {"sources": body.sources, "mailboxes": mailboxes, "since": since, "full": body.full})
-    return {"started": True}
+    params = {"sources": body.sources, "mailboxes": mailboxes, "since": since, "full": body.full}
+    start_job("scrape", params, carry=not body.full and not body.fresh)
+    return {"started": True, "carried": len(params.get("done_mailboxes", []))}
 
 
 class ExtractIn(BaseModel):
@@ -348,14 +368,17 @@ def status():
 
 def _mailboxes(conn, job_id):
     items = conn.execute(
-        "SELECT mailbox,status,fetched,total,rate_limited,error,started_at,finished_at"
-        " FROM job_mailboxes WHERE job_id=%s ORDER BY CASE status WHEN 'running' THEN 0"
+        "SELECT m.mailbox,m.status,m.fetched,m.total,m.rate_limited,m.error,m.started_at,m.finished_at,s.last_synced"
+        " FROM job_mailboxes m LEFT JOIN (SELECT mailbox,max(updated_at) AS last_synced"
+        " FROM sync_state WHERE source='gmail' GROUP BY mailbox) s ON s.mailbox=m.mailbox"
+        " WHERE m.job_id=%s ORDER BY CASE m.status WHEN 'running' THEN 0"
         " WHEN 'failed' THEN 1 WHEN 'pending' THEN 2 WHEN 'done' THEN 3 ELSE 4 END, mailbox",
         (job_id,)).fetchall()
     counts = dict.fromkeys(("pending", "running", "done", "failed", "skipped"), 0)
     for item in items:
         counts[item["status"]] += 1
-    return {"items": items, "counts": counts}
+    synced_before = sum(item["last_synced"] is not None or item["status"] in ("done", "skipped") for item in items)
+    return {"job_id": job_id, "items": items, "counts": counts, "synced_before": synced_before}
 
 
 @app.get("/api/jobs/latest/mailboxes")
@@ -363,7 +386,7 @@ def latest_mailboxes():
     with db.connect() as conn:
         job = conn.execute("SELECT id FROM jobs WHERE name='scrape' ORDER BY id DESC LIMIT 1").fetchone()
         job_id = job["id"] if job else None
-        return {"job_id": job_id, **_mailboxes(conn, job_id)}
+        return _mailboxes(conn, job_id)
 
 
 @app.get("/api/jobs/{job_id}/mailboxes")
