@@ -33,14 +33,14 @@ export default function Page() {
                   <Icon className="h-4 w-4 shrink-0" />
                 </span>
                 <span>
-                  <span className="block text-sm font-semibold"><span className="text-sidebar-foreground/60 tabular-nums">{i + 1}.</span> {title}</span>
-                  <span className="block text-sm text-sidebar-foreground/75">{text}</span>
+                  <span className="block text-sm font-semibold"><span className="text-sidebar-foreground/75 tabular-nums">{i + 1}.</span> {title}</span>
+                  <span className="block text-sm text-sidebar-foreground/80">{text}</span>
                 </span>
               </li>
             ))}
           </ol>
         </div>
-        <p className="relative hidden text-xs text-sidebar-foreground/60 lg:block">Access is by invitation only.</p>
+        <p className="relative hidden text-xs text-sidebar-foreground/75 lg:block">Access is by invitation only.</p>
       </section>
       <section className="flex items-center justify-center p-6 sm:p-10">
         <Suspense fallback={null}>

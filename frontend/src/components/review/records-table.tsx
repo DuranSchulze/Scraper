@@ -70,7 +70,7 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
         <div className="flex items-baseline gap-2">
           <h2 className="text-base font-medium text-muted-foreground">Records</h2>
-          <span className="text-sm font-semibold text-primary tabular-nums" aria-live="polite">
+          <span className="text-sm font-semibold text-primary-text tabular-nums" aria-live="polite">
             {data ? data.total.toLocaleString() : "…"}
           </span>
         </div>

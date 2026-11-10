@@ -35,6 +35,8 @@
   --color-secondary: var(--secondary);
   --color-primary-foreground: var(--primary-foreground);
   --color-primary: var(--primary);
+  --color-primary-text: var(--primary-text);
+  --color-notify: var(--notify);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-info: var(--info);
@@ -62,6 +64,8 @@
   --popover-foreground: #dee3ea;
   --primary: #ffc513;
   --primary-foreground: #1a1f24;
+  --primary-text: #ffc513;
+  --notify: #ef4444;
   --secondary: #293138;
   --secondary-foreground: #dee3ea;
   --muted: #293138;
@@ -89,6 +93,57 @@
   --success: #6fd3a6;
   --warning: #ffc513;
   --info: #8db4ff;
+}
+
+/* Light theme: same gold accent; gold used as text switches to a darker gold (--primary-text) to stay readable. */
+html[data-theme="light"] {
+  color-scheme: light;
+  --background: #f4f6f8;
+  --foreground: #1a1f24;
+  --card: #ffffff;
+  --card-foreground: #1a1f24;
+  --popover: #ffffff;
+  --popover-foreground: #1a1f24;
+  --primary: #ffc513;
+  --primary-foreground: #1a1f24;
+  --primary-text: #8a6500;
+  --notify: #dc2626;
+  --secondary: #eceff3;
+  --secondary-foreground: #1a1f24;
+  --muted: #eceff3;
+  --muted-foreground: #5a6572;
+  --accent: #e6eaef;
+  --accent-foreground: #1a1f24;
+  --destructive: #c62828;
+  --border: #dfe4ea;
+  --input: #c5ccd5;
+  --ring: #b58500;
+  --chart-1: #d99a00;
+  --chart-2: #5a6572;
+  --chart-3: #6b82a3;
+  --chart-4: #8a98ab;
+  --chart-5: #b4bdc9;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #2b343e;
+  --sidebar-primary: #ffc513;
+  --sidebar-primary-foreground: #1a1f24;
+  --sidebar-accent: #eef1f4;
+  --sidebar-accent-foreground: #1a1f24;
+  --sidebar-border: #dfe4ea;
+  --sidebar-ring: #b58500;
+  --success: #146c45;
+  --warning: #8a5a00;
+  --info: #1f55b8;
+}
+
+/* Theme switch: a short colour cross-fade, only while data-theme-switching is set (lib/theme.ts). */
+html[data-theme-switching] *,
+html[data-theme-switching] *::before,
+html[data-theme-switching] *::after {
+  transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease, fill 0.3s ease, stroke 0.3s ease, box-shadow 0.3s ease, outline-color 0.3s ease !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme-switching] *, html[data-theme-switching] *::before, html[data-theme-switching] *::after { transition: none !important; }
 }
 
 .dark {
@@ -140,15 +195,19 @@
    Desktop only: the mobile drawer is always expanded. Transitions start after the first frame (data-sidebar-ready). */
 .sb-aside { width: 16rem; }
 .sb-label { opacity: 1; }
-.sb-chevron { transform: rotate(0deg); }
 html[data-sidebar-ready] .sb-aside { transition: width 0.2s ease; }
 html[data-sidebar-ready] .sb-label { transition: opacity 0.15s ease 0.05s; }
-html[data-sidebar-ready] .sb-chevron { transition: transform 0.2s ease; }
 @media (min-width: 1024px) {
   html[data-sidebar="collapsed"] .sb-aside { width: 4rem; }
   html[data-sidebar="collapsed"] .sb-label { opacity: 0; transition-delay: 0s; }
-  html[data-sidebar="collapsed"] .sb-chevron { transform: rotate(180deg); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .sb-aside, .sb-label, .sb-chevron { transition: none !important; }
+  .sb-aside, .sb-label { transition: none !important; }
+}
+
+/* Collapse row: show the "open" icon while collapsed. */
+.sb-icon-collapsed { display: none; }
+@media (min-width: 1024px) {
+  html[data-sidebar="collapsed"] .sb-icon-expanded { display: none; }
+  html[data-sidebar="collapsed"] .sb-icon-collapsed { display: block; }
 }

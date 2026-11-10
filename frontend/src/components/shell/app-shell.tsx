@@ -4,7 +4,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ListChecks, LogOut, Menu, ScanSearch, Users } from "lucide-react";
+import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, ScanSearch, Sun, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
@@ -12,6 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
 import { announceSessionChange, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
+import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 // Nav stays plain data; admin-only items are hidden for members (pages and the API check again).
@@ -63,7 +64,7 @@ function NavRow({ href, label, icon: Icon, active, count, tip, onNavigate }: {
       }>
         <span className={cn(SLOT, "relative")}>
           <Icon className="h-[1.15rem] w-[1.15rem] shrink-0" />
-          {!!count && <span className="absolute top-2 right-2.5 h-2 w-2 rounded-full bg-sidebar-ring ring-2 ring-sidebar not-in-data-[sidebar=collapsed]:hidden max-lg:hidden" />}
+          {!!count && <span aria-hidden className={cn("absolute top-1 right-1.5 h-2.5 w-2.5 rounded-full bg-notify ring-2 not-in-data-[sidebar=collapsed]:hidden max-lg:hidden", active ? "ring-sidebar-primary" : "ring-sidebar")} />}
         </span>
         <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-3 whitespace-nowrap">
           <span className="truncate">{label}</span>
@@ -80,7 +81,8 @@ function NavRow({ href, label, icon: Icon, active, count, tip, onNavigate }: {
   );
 }
 
-function SidebarContent({ tip, onNavigate, onLogout }: { tip: boolean; onNavigate?: () => void; onLogout: () => void }) {
+function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: { tip: boolean; collapsed: boolean; showCollapse: boolean; onNavigate?: () => void; onLogout: () => void }) {
+  const theme = useTheme();
   const pathname = usePathname();
   const { data: me } = useQuery(meQuery);
   const { data: status } = useQuery(statusQuery);
@@ -110,7 +112,7 @@ function SidebarContent({ tip, onNavigate, onLogout }: { tip: boolean; onNavigat
             </span>
             <span className="sb-label min-w-0 pr-3 leading-tight whitespace-nowrap">
               <span className="block truncate text-sm font-medium">{me.name}</span>
-              <span className="block truncate text-xs text-sidebar-foreground/70 capitalize">{me.role}</span>
+              <span className="block truncate text-xs text-sidebar-foreground/80 capitalize">{me.role}</span>
             </span>
           </div>
         )}
@@ -124,6 +126,31 @@ function SidebarContent({ tip, onNavigate, onLogout }: { tip: boolean; onNavigat
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={10}>Sign out</TooltipContent>
         </Tooltip>
+        <Tooltip disabled={!tip}>
+          <TooltipTrigger render={
+            <button type="button" onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              className={cn(ROW, "text-sidebar-foreground/85 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground")} />
+          }>
+            <span className={SLOT}>{theme === "dark" ? <Sun className="h-[1.15rem] w-[1.15rem] shrink-0" /> : <Moon className="h-[1.15rem] w-[1.15rem] shrink-0" />}</span>
+            <span className="sb-label pr-3 whitespace-nowrap">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+          </TooltipTrigger>
+          <TooltipContent side="right" sideOffset={10}>{theme === "dark" ? "Light mode" : "Dark mode"}</TooltipContent>
+        </Tooltip>
+        {showCollapse && (
+          <Tooltip disabled={!tip}>
+            <TooltipTrigger render={
+              <button type="button" onClick={toggleCollapsed} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
+                className={cn(ROW, "text-sidebar-foreground/85 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground")} />
+            }>
+              <span className={SLOT}>
+                <PanelLeftClose className="sb-icon-expanded h-[1.15rem] w-[1.15rem] shrink-0" />
+                <PanelLeftOpen className="sb-icon-collapsed h-[1.15rem] w-[1.15rem] shrink-0" />
+              </span>
+              <span className="sb-label pr-3 whitespace-nowrap">Collapse</span>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={10}>Expand sidebar</TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </div>
   );
@@ -171,18 +198,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen">
       <aside aria-label="Sidebar" className="sb-aside sticky top-0 z-40 hidden h-screen shrink-0 lg:block">
         <div className="h-full overflow-hidden bg-sidebar">
-          <SidebarContent tip={collapsed} onLogout={() => setConfirm(true)} />
+          <SidebarContent tip={collapsed} collapsed={collapsed} showCollapse onLogout={() => setConfirm(true)} />
         </div>
-        <button type="button" onClick={toggleCollapsed} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
-          className="absolute top-5 -right-3 z-10 flex size-6 items-center justify-center rounded-full border bg-card text-muted-foreground shadow-sm transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
-          <ChevronLeft className="sb-chevron h-3.5 w-3.5" />
-        </button>
       </aside>
       <Sheet open={drawer} onOpenChange={setDrawer}>
         <SheetContent side="left" showCloseButton={false} className="w-72 gap-0 border-sidebar-border bg-sidebar p-0 lg:hidden">
           <SheetTitle className="sr-only">Navigation</SheetTitle>
           <SheetDescription className="sr-only">Main navigation</SheetDescription>
-          <SidebarContent tip={false} onNavigate={() => setDrawer(false)} onLogout={() => { setDrawer(false); setConfirm(true); }} />
+          <SidebarContent tip={false} collapsed={false} showCollapse={false} onNavigate={() => setDrawer(false)} onLogout={() => { setDrawer(false); setConfirm(true); }} />
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">

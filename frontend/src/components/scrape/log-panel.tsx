@@ -34,7 +34,7 @@ export function LogPanel({ mailbox, onClearMailbox }: { mailbox: string; onClear
         <CardTitle className="flex min-w-0 flex-wrap items-center gap-2 text-base font-medium text-muted-foreground">
           Log
           {mailbox && (
-            <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+            <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary-text">
               <span className="truncate">{mailbox}</span>
               <button type="button" aria-label="Show all mailboxes" onClick={onClearMailbox} className="rounded-full hover:bg-primary/20">
                 <X className="h-3 w-3 shrink-0" />

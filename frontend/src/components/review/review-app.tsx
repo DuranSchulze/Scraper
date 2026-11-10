@@ -18,7 +18,7 @@ import { RecordsTable } from "./records-table";
 
 // Filter pills (vault filter-pill-set): idle muted, active tinted primary.
 const PILL = "h-8 w-auto min-w-32 rounded-full bg-muted/40 text-sm";
-const PILL_ON = "border-primary bg-primary/10 text-primary";
+const PILL_ON = "border-primary bg-primary/10 text-primary-text";
 const STATE_OPTIONS = [
   { value: "pending", label: "Pending" }, { value: "approved", label: "Approved" },
   { value: "rejected", label: "Rejected" }, { value: "merged", label: "Merged" },
@@ -84,7 +84,7 @@ export function ReviewApp() {
                       className={cn("inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
                         active ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
                       {o.label}
-                      {n != null && <span className={cn("rounded-full px-1.5 text-xs tabular-nums", active ? "bg-primary/10 text-primary" : "bg-muted")}>{n.toLocaleString()}</span>}
+                      {n != null && <span className={cn("rounded-full px-1.5 text-xs tabular-nums", active ? "bg-primary/10 text-primary-text" : "bg-muted")}>{n.toLocaleString()}</span>}
                     </button>
                   );
                 })}

@@ -11,8 +11,8 @@ export const metadata: Metadata = {
   description: "Review scraped client records before publishing them to the official table.",
 };
 
-// Runs before first paint so a saved collapsed sidebar never flashes open (see globals.css, app-shell.tsx).
-const SIDEBAR_INIT = `try{document.documentElement.dataset.sidebar=localStorage.getItem("scraper.sidebar.collapsed")==="1"?"collapsed":"expanded"}catch(e){}`;
+// Runs before first paint so a saved collapsed sidebar or light theme never flashes the default (see globals.css, app-shell.tsx).
+const SIDEBAR_INIT = `try{var d=document.documentElement;d.dataset.sidebar=localStorage.getItem("scraper.sidebar.collapsed")==="1"?"collapsed":"expanded";d.dataset.theme=localStorage.getItem("scraper.theme")==="light"?"light":"dark"}catch(e){}`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
