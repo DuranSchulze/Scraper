@@ -32,19 +32,19 @@ Run every command below from the repository root; the npm scripts in `package.js
 ```bash
 cp backend/.env.example .env        # fill in every value
 npm run setup                       # installs backend and frontend dependencies
-npm run migrate                     # creates or updates the database tables
+npm run db push                     # creates or updates the database tables
 ```
 
 Use an absolute path for `GOOGLE_SERVICE_ACCOUNT_FILE` in `.env`.
 
 Set `JWT_SECRET` to a random secret of at least 32 characters (for example, generate one with
 `uv run --directory backend python -c "import secrets; print(secrets.token_urlsafe(32))"`).
-Set `ADMIN_EMAIL` and `ADMIN_PASSWORD` (at least 10 characters) to create the first admin.
+Set `ADMIN_EMAIL` and a non-empty `ADMIN_PASSWORD` (up to 1024 characters) to create the first admin.
 The API seeds it at startup only when the `users` table is empty; missing admin values log
 a warning. Keep these values private. Set `APP_URL` to your HTTPS application URL when
 using HTTPS behind a proxy so session cookies are always Secure.
 
-After updating, run migrations first (`npm run migrate`, including migration 007), then
+After updating, run migrations first (`npm run db push`, including migration 007), then
 start the API and GUI (`npm run dev`), then sign in with the admin account. Sessions last
 8 hours. Login is limited to 5 attempts per email and socket peer IP per 15 minutes, and
 30 per peer IP. Behind the Next.js rewrite, clients share the loopback IP; forwarded IP
@@ -84,7 +84,7 @@ the browser until you approve or reject. If the API stops during a scrape, the G
    edit the amount, remove a duplicate row, or add a missing payment before approving.
    Everything except the timeline is copied to `clients` on Publish.
 
-After upgrading: run `npm run migrate`, then **Re-run extraction**. Records already
+After upgrading: run `npm run db push`, then **Re-run extraction**. Records already
 approved keep their old details until you move them **Back to pending** and approve them again.
 
 `SCRAPE_PARALLEL_MAILBOXES` controls concurrent mailboxes (default 4, range 1–8);

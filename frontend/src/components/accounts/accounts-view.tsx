@@ -82,7 +82,7 @@ function NewAccountDialog({ onClose }: { onClose: () => void }) {
     onSuccess: (u) => { toast.success(`Account created for ${u.email}`); qc.invalidateQueries({ queryKey: keys.users }); onClose(); },
     onError: (e: Error) => setError(e.message),
   });
-  const valid = name.trim() && email.trim() && password.length >= 10;
+  const valid = name.trim() && email.trim() && password;
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !create.isPending) onClose(); }}>
@@ -102,8 +102,7 @@ function NewAccountDialog({ onClose }: { onClose: () => void }) {
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="acc-password">Password</Label>
-            <Input id="acc-password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} aria-describedby="acc-password-hint" />
-            <p id="acc-password-hint" className="text-xs text-muted-foreground">At least 10 characters.</p>
+            <Input id="acc-password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="acc-role">Role</Label>

@@ -152,13 +152,21 @@ def test_users_create_list_and_case_insensitive_duplicates(authenticated_client)
 
 @pytest.mark.parametrize("change", [{"email": "invalid"}, {"email": "a@b"}, {"email": "a@bad_domain.test"},
                                     {"email": "a@-bad.test"}, {"email": "a..b@example.test"}, {"name": " "},
-                                    {"password": "short"}, {"role": "owner"}])
+                                    {"password": ""}, {"password": "x" * 1025}, {"role": "owner"}])
 def test_user_validation(authenticated_client, change):
     body = {"email": "new@example.test", "name": "New", "password": PASSWORD, "role": "member", **change}
     response = authenticated_client.post("/api/users", json=body, headers=GUI)
     assert response.status_code == 422 and isinstance(response.json()["detail"], list)
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"] == 1
+
+
+@pytest.mark.parametrize("password", ["x", "x" * 1024])
+def test_created_user_can_log_in_with_password_length_boundaries(authenticated_client, password):
+    body = {"email": "new@example.test", "name": "New", "password": password, "role": "member"}
+    assert authenticated_client.post("/api/users", json=body, headers=GUI).status_code == 201
+    response = authenticated_client.post("/api/auth/login", json={"email": body["email"], "password": password}, headers=GUI)
+    assert response.status_code == 200 and response.json()["email"] == body["email"]
 
 
 def test_password_hash_is_salted_and_bad_hashes_do_not_raise():
@@ -273,19 +281,21 @@ def test_bad_secret_fails_before_database_access(monkeypatch, secret):
         jwt_secret()
 
 
-@pytest.mark.parametrize("configured", [True, False])
-def test_first_admin_seed_only_when_empty(authenticated_client, monkeypatch, caplog, configured):
-    monkeypatch.setenv("ADMIN_EMAIL", "seed@example.test" if configured else "")
-    monkeypatch.setenv("ADMIN_PASSWORD", PASSWORD if configured else "")
+@pytest.mark.parametrize("password", ["x", "x" * 1024, ""])
+def test_first_admin_seed_only_when_empty(authenticated_client, monkeypatch, caplog, password):
+    monkeypatch.setenv("ADMIN_EMAIL", "seed@example.test")
+    monkeypatch.setenv("ADMIN_PASSWORD", password)
     with db.connect() as conn:
         conn.execute("DELETE FROM users")
     with TestClient(app, base_url="http://localhost"):
         pass
     with db.connect() as conn:
         users = conn.execute("SELECT * FROM users").fetchall()
-    if configured:
+    if password:
         assert len(users) == 1 and users[0]["email"] == "seed@example.test" and users[0]["role"] == "admin"
-        assert auth.verify_password(PASSWORD, users[0]["password_hash"])
+        assert auth.verify_password(password, users[0]["password_hash"])
+        assert authenticated_client.post("/api/auth/login", json={
+            "email": "seed@example.test", "password": password}, headers=GUI).status_code == 200
         monkeypatch.setenv("ADMIN_EMAIL", "another@example.test")
         with TestClient(app, base_url="http://localhost"):
             pass
@@ -296,7 +306,7 @@ def test_first_admin_seed_only_when_empty(authenticated_client, monkeypatch, cap
 
 
 def test_invalid_bootstrap_password_is_not_in_startup_traceback(authenticated_client, monkeypatch, caplog):
-    password = "secret123"
+    password = "secret123" + "x" * 1016
     monkeypatch.setenv("ADMIN_EMAIL", "seed@example.test")
     monkeypatch.setenv("ADMIN_PASSWORD", password)
     with db.connect() as conn:
@@ -304,9 +314,11 @@ def test_invalid_bootstrap_password_is_not_in_startup_traceback(authenticated_cl
     with pytest.raises(ValidationError) as error:
         with TestClient(app, base_url="http://localhost"):
             pass
-    assert "password" in str(error.value) and "at least 10" in str(error.value)
-    assert password not in "".join(traceback.format_exception(error.value))
-    assert password not in caplog.text
+    assert "password" in str(error.value) and "at most 1024" in str(error.value)
+    assert "secret123" not in "".join(traceback.format_exception(error.value))
+    assert "secret123" not in caplog.text
+    with db.connect() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"] == 0
 
 
 @pytest.mark.parametrize("error", [RuntimeError, ValueError])

@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "setup": "uv sync --directory backend && npm --prefix frontend install && npm install",
-    "migrate": "uv run --directory backend python -m scraper.db migrate",
+    "db": "uv run --directory backend python -m scraper.db",
     "api": "uv run --directory backend python -m scraper.app",
     "web": "npm --prefix frontend run dev",
     "dev": "concurrently --kill-others --names api,web --prefix-colors blue,magenta \"npm:api\" \"npm:web\"",

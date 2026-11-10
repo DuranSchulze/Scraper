@@ -1,4 +1,4 @@
-"""Neon Postgres access. Run `uv run python -m scraper.db migrate` to apply migrations."""
+"""Neon Postgres access. Run `npm run db push` to apply migrations."""
 
 import sys
 
@@ -142,10 +142,10 @@ def reset(confirmed: bool = False) -> bool:
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["migrate"]:
+    if sys.argv[1:] == ["push"]:
         applied = migrate()
         print("applied: " + ", ".join(applied) if applied else "up to date")
     elif sys.argv[1:] in (["reset"], ["reset", "--yes"]):
         sys.exit(0 if reset(confirmed="--yes" in sys.argv[1:]) else 1)
     else:
-        sys.exit("usage: python -m scraper.db migrate | reset [--yes]")
+        sys.exit("usage: python -m scraper.db push | reset [--yes]")
