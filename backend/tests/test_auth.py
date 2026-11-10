@@ -1,12 +1,16 @@
 """Authentication uses fixture accounts and disposable local Postgres only."""
 
 import time
+import runpy
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import jwt
 import pytest
+from pydantic import ValidationError
+import uvicorn
 
 from scraper import auth, db
 from scraper.app import app
@@ -219,6 +223,24 @@ def test_login_limits_ignore_forwarded_ips_and_expire(authenticated_client, monk
     assert client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD}, headers=GUI).status_code == 429
 
 
+@pytest.mark.parametrize("same_email,limit", [(True, 5), (False, 30)])
+def test_entrypoint_limits_ignore_forwarded_ips(authenticated_client, monkeypatch, same_email, limit):
+    settings = {}
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "*")
+    monkeypatch.setattr(auth, "clock", lambda: 100.0)
+    monkeypatch.setattr(uvicorn, "run", lambda application, **kwargs: settings.update(app=application, **kwargs))
+    runpy.run_module("scraper.app", run_name="__main__")
+    config = uvicorn.Config(**settings)
+    config.load()
+    with TestClient(config.loaded_app, base_url="http://localhost", client=("127.0.0.1", 12345)) as client:
+        for i in range(limit + 1):
+            response = client.post("/api/auth/login", json={
+                "email": EMAIL if same_email else f"unknown{i}@example.test", "password": "wrong"},
+                headers={**GUI, "X-Forwarded-For": f"192.0.2.{i + 1}"})
+            assert response.status_code == (401 if i < limit else 429)
+        assert response.headers["Retry-After"] == "900"
+
+
 def test_user_and_api_limits_are_per_user(authenticated_client, monkeypatch):
     monkeypatch.setattr(auth, "clock", lambda: 100.0)
     auth.buckets[("create_user", 1)] = (auth.deque([100.0] * 10), 3600)
@@ -271,6 +293,20 @@ def test_first_admin_seed_only_when_empty(authenticated_client, monkeypatch, cap
             assert conn.execute("SELECT * FROM users").fetchall() == users
     else:
         assert users == [] and "Users table is empty" in caplog.text
+
+
+def test_invalid_bootstrap_password_is_not_in_startup_traceback(authenticated_client, monkeypatch, caplog):
+    password = "secret123"
+    monkeypatch.setenv("ADMIN_EMAIL", "seed@example.test")
+    monkeypatch.setenv("ADMIN_PASSWORD", password)
+    with db.connect() as conn:
+        conn.execute("DELETE FROM users")
+    with pytest.raises(ValidationError) as error:
+        with TestClient(app, base_url="http://localhost"):
+            pass
+    assert "password" in str(error.value) and "at least 10" in str(error.value)
+    assert password not in "".join(traceback.format_exception(error.value))
+    assert password not in caplog.text
 
 
 @pytest.mark.parametrize("error", [RuntimeError, ValueError])

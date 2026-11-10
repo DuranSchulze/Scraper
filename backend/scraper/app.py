@@ -640,4 +640,4 @@ def index():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=int(env("GUI_PORT", "8765")))
+    uvicorn.run(app, host="127.0.0.1", port=int(env("GUI_PORT", "8765")), proxy_headers=False)

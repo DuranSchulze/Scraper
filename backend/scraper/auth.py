@@ -15,7 +15,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 import jwt
 from psycopg.errors import UniqueViolation
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import db
 from .config import env, jwt_secret
@@ -136,6 +136,8 @@ class LoginIn(BaseModel):
 
 
 class UserIn(LoginIn):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     name: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=10, max_length=1024)
     role: Literal["admin", "member"]
