@@ -20,7 +20,7 @@ import { RecordsTable } from "./records-table";
 const PILL = "h-8 w-auto min-w-32 rounded-full bg-muted/40 text-sm";
 const PILL_ON = "border-primary bg-primary/10 text-primary-text";
 const STATE_OPTIONS = [
-  { value: "pending", label: "Pending" }, { value: "approved", label: "Approved" },
+  { value: "pending", label: "Pending" }, { value: "approved", label: "Confirmed" },
   { value: "rejected", label: "Rejected" }, { value: "merged", label: "Merged" },
 ];
 const STAGE_OPTIONS = [{ value: "", label: "Any stage" }, ...STAGES.map((s) => ({ value: s, label: s }))];
@@ -73,7 +73,7 @@ export function ReviewApp() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="Review" description="Check each scraped client, correct the details, then approve or reject." />
+      <PageHeader title="Review" description="Confirm each client's details, then approve or reject. Shortcuts in a record: A approve, R reject, J / K next / previous." />
             <div className="flex flex-wrap items-center gap-2">
               <div role="group" aria-label="Review state" className="inline-flex max-w-full overflow-x-auto rounded-full border bg-muted/40 p-0.5">
                 {STATE_OPTIONS.map((o) => {
@@ -122,7 +122,7 @@ export function ReviewApp() {
             <Sheet open={!!selectedId} onOpenChange={(open) => { if (!open) setParams({ id: null }); }}>
               <SheetContent showCloseButton={false} className="gap-0 p-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl data-[side=right]:xl:max-w-3xl">
                 {selectedId && (
-                  <RecordDetail key={selectedId} id={selectedId} onDone={() => setParams({ id: null })}
+                  <RecordDetail key={selectedId} id={selectedId} onDone={(next) => setParams({ id: next ? String(next) : null })}
                     prevId={ids[pos - 1] ?? null} nextId={pos >= 0 ? ids[pos + 1] ?? null : null}
                     onNav={(id) => setParams({ id: String(id) })} position={pos >= 0 && list ? `${((filters.page - 1) * PAGE_SIZE + pos + 1).toLocaleString()} of ${list.total.toLocaleString()}` : null} />
                 )}

@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, ExternalLink, X } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronUp, Mail, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -23,7 +23,8 @@ import { SourceDialog } from "./text-dialog";
 type Nav = { prevId: number | null; nextId: number | null; onNav: (id: number) => void; position: string | null };
 
 /** Drawer body: header with prev/next, tabs that scroll, and actions pinned at the bottom. */
-export function RecordDetail({ id, onDone, ...nav }: { id: number; onDone: () => void } & Nav) {
+/** onDone gets the record to open next (null closes the drawer). */
+export function RecordDetail({ id, onDone, ...nav }: { id: number; onDone: (next: number | null) => void } & Nav) {
   const { data, error } = useQuery(candidateQuery(id));
   if (data) return <DetailForm key={`${data.id}:${data.email_key}`} c={data} onDone={onDone} nav={nav} />;
   return (
@@ -44,10 +45,10 @@ function DrawerHeader({ title, subtitle, nav, children }: { title: string; subti
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {nav.position && <span className="mr-1 text-xs text-muted-foreground tabular-nums">{nav.position}</span>}
-          <Button size="icon-sm" variant="outline" aria-label="Previous record" disabled={!nav.prevId} onClick={() => nav.prevId && nav.onNav(nav.prevId)}>
+          <Button size="icon-sm" variant="outline" aria-label="Previous record" title="Previous record (K)" aria-keyshortcuts="K" disabled={!nav.prevId} onClick={() => nav.prevId && nav.onNav(nav.prevId)}>
             <ChevronUp className="h-4 w-4 shrink-0" />
           </Button>
-          <Button size="icon-sm" variant="outline" aria-label="Next record" disabled={!nav.nextId} onClick={() => nav.nextId && nav.onNav(nav.nextId)}>
+          <Button size="icon-sm" variant="outline" aria-label="Next record" title="Next record (J)" aria-keyshortcuts="J" disabled={!nav.nextId} onClick={() => nav.nextId && nav.onNav(nav.nextId)}>
             <ChevronDown className="h-4 w-4 shrink-0" />
           </Button>
           <SheetClose render={<Button size="icon-sm" variant="ghost" aria-label="Close record" />}>
@@ -58,6 +59,10 @@ function DrawerHeader({ title, subtitle, nav, children }: { title: string; subti
       {children}
     </div>
   );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return <kbd aria-hidden className="ml-1 hidden rounded border border-current/30 px-1 font-mono text-[10px] leading-4 opacity-70 sm:inline">{children}</kbd>;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -78,7 +83,7 @@ function Text({ id, label, value, onChange }: { id: string; label: string; value
   );
 }
 
-function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav: Nav }) {
+function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | null) => void; nav: Nav }) {
   const qc = useQueryClient();
   const f = c.fields;
   const fv = <K extends keyof CandidateFields>(k: K) =>
@@ -97,13 +102,14 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
   });
   const discard = () => { clearDraft(c.id); setDraft(initialDraft(c)); setRestored(null); };
 
-  const finish = (msg: string) => {
+  // Approve, reject and merge move on to the next record so the admin keeps working through the list.
+  const finish = (msg: string, advance = true) => {
     clearDraft(c.id);
     toast.success(msg);
     qc.invalidateQueries({ queryKey: ["candidates"] });
     qc.invalidateQueries({ queryKey: keys.status });
     qc.removeQueries({ queryKey: keys.candidate(c.id) });
-    onDone();
+    onDone(advance ? nav.nextId : null);
   };
   const fail = (e: Error) => toast.error(e.message);
   const approve = useMutation({
@@ -111,8 +117,8 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
     onSuccess: () => finish("Approved. It stays in staging until you publish."), onError: fail,
   });
   const action = useMutation({
-    mutationFn: ({ path, body }: { path: string; body?: unknown; msg: string }) => post(`/api/candidates/${c.id}/${path}`, body),
-    onSuccess: (_r, v) => finish(v.msg), onError: fail,
+    mutationFn: ({ path, body }: { path: string; body?: unknown; msg: string; advance?: boolean }) => post(`/api/candidates/${c.id}/${path}`, body),
+    onSuccess: (_r, v) => finish(v.msg, v.advance ?? true), onError: fail,
   });
   const busy = approve.isPending || action.isPending;
 
@@ -124,11 +130,29 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
     approve.mutate();
   };
 
-  const checks = fv("needs_check") ?? [];
   const amounts = (c.reviewed?.amounts ?? fv("amounts")) ?? [];
   const dates = fv("stage_dates") ?? {};
   const timeline = fv("timeline") ?? { items: [], truncated: false };
   const lastContact = (c.reviewed?.last_contact ?? fv("last_contact")) ?? null;
+
+  const reject = () => action.mutate({ path: "reject", msg: "Rejected." });
+  // Keyboard shortcuts; re-bound every render so they always see the current draft and nav.
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || busy || source) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("input, textarea, select, [contenteditable=true], [role=combobox], [role=listbox], [role=menu]")) return;
+      const k = e.key.toLowerCase();
+      if (k === "a") submit();
+      else if (k === "r") reject();
+      else if (k === "j" && nav.nextId) nav.onNav(nav.nextId);
+      else if (k === "k" && nav.prevId) nav.onNav(nav.prevId);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  });
 
   const stateTone = { pending: "warning", approved: "success", rejected: "danger", merged: "neutral" } as const;
   return (
@@ -138,12 +162,18 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
           : c.reviewed_at ? `Approved in staging ${stamp(c.reviewed_at)}, not yet published` : "Not in official table"}>
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <Pill tone="neutral" className="tabular-nums">#{c.id}</Pill>
-          <Pill tone={stateTone[c.review_state]} className="capitalize">{c.review_state}</Pill>
+          <Pill tone={stateTone[c.review_state]} className="capitalize">{c.review_state === "approved" ? "confirmed" : c.review_state}</Pill>
           {c.merged_into && <Pill>merged into #{c.merged_into}</Pill>}
           <StageBadge stage={draft.stage} />
           <span className="truncate text-muted-foreground">{c.email_key}</span>
         </div>
       </DrawerHeader>
+      {c.review_state === "approved" && (
+        <div role="status" className="flex items-center gap-2 border-b border-success/30 bg-success/10 px-5 py-2 text-sm font-medium text-success">
+          <CheckCircle2 aria-hidden className="h-4 w-4 shrink-0" />
+          {c.published_at ? `Confirmed client · published ${stamp(c.published_at)}` : "Confirmed client · in staging, not yet published"}
+        </div>
+      )}
 
       <Tabs defaultValue="details" className="min-h-0 flex-1 gap-0">
         <div className="border-b px-5 py-2">
@@ -160,12 +190,6 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
               <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-info/30 bg-info/10 px-3 py-2 text-sm">
                 Restored unsaved edits from {new Date(restored).toLocaleString()}.
                 <Button type="button" variant="ghost" size="sm" onClick={discard}>Discard edits</Button>
-              </div>
-            )}
-            {checks.length > 0 && (
-              <div role="alert" className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm">
-                <strong>Check before approving</strong>
-                <ul className="mt-1 list-disc pl-5">{checks.map((t) => <li key={t}>{t}</li>)}</ul>
               </div>
             )}
 
@@ -242,7 +266,7 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
                   <StageBadge stage={t.stage} evidence />
                   {t.amounts.length > 0 && <span className="font-medium text-foreground tabular-nums">{t.amounts.map(money).join(", ")}</span>}
                   <Button type="button" variant="ghost" size="xs" className="ml-auto" onClick={() => setSource(t.raw_item_id)}>
-                    <ExternalLink className="h-3 w-3 shrink-0" /> Source
+                    <Mail className="h-3 w-3 shrink-0" /> View email
                   </Button>
                 </div>
                 <span className="text-xs text-muted-foreground">{t.department || "No department"} · {t.mailbox || "—"}</span>
@@ -265,7 +289,7 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
                     {e.services?.length ? ` · ${e.services.join(", ")}` : ""}
                   </span>
                   <Button type="button" variant="ghost" size="xs" className="ml-auto" onClick={() => setSource(e.raw_item_id)}>
-                    <ExternalLink className="h-3 w-3 shrink-0" /> Open source
+                    <Mail className="h-3 w-3 shrink-0" /> View email
                   </Button>
                 </div>
                 {e.reasons?.length > 0 && <p className="text-muted-foreground">Why: {e.reasons.join("; ")}</p>}
@@ -277,11 +301,12 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: () => void; nav:
       </Tabs>
 
       <div className="flex flex-wrap items-center gap-2 border-t bg-card px-5 py-3">
-        <Button type="button" disabled={busy} onClick={() => submit()}>{approve.isPending ? "Saving…" : "Approve (staging)"}</Button>
-        <Button type="button" variant="destructive" disabled={busy}
-          onClick={() => action.mutate({ path: "reject", msg: "Rejected." })}>Reject</Button>
+        <Button type="button" disabled={busy} onClick={() => submit()} aria-keyshortcuts="A">
+          <CheckCircle2 className="h-4 w-4 shrink-0" />{approve.isPending ? "Saving…" : "Confirm client"}<Kbd>A</Kbd>
+        </Button>
+        <Button type="button" variant="destructive" disabled={busy} onClick={reject} aria-keyshortcuts="R">Reject<Kbd>R</Kbd></Button>
         <Button type="button" variant="outline" disabled={busy}
-          onClick={() => action.mutate({ path: "reopen", msg: "Moved back to pending." })}>Back to pending</Button>
+          onClick={() => action.mutate({ path: "reopen", msg: "Moved back to pending.", advance: false })}>Back to pending</Button>
         <div className="ml-auto flex items-center gap-1">
           <Input type="number" min="1" aria-label="Merge into candidate ID" placeholder="Merge into ID" className="w-32"
             value={mergeId} onChange={(e) => setMergeId(e.target.value)} />

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, CheckCircle2, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import {
@@ -76,7 +76,7 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         </div>
         {toolbar}
       </div>
-      <Table ref={tableRef} className="min-w-[1300px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
+      <Table ref={tableRef} className="min-w-[1120px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
               <TableHead className="sticky left-0 z-10 w-72 bg-muted pl-4">Client</TableHead>
@@ -85,18 +85,16 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
               <TableHead className="w-28">Stage</TableHead>
               <TableHead className="w-24">Status</TableHead>
               <TableHead className="w-36 text-right">Latest amount</TableHead>
-              <TableHead className="w-20">Paid</TableHead>
               <TableHead className="w-40" title="Scraped emails, contacts and sheet rows behind this record">Scraped</TableHead>
               {sortHead("first_contact", "First contact")}
               {sortHead("last_contact", "Last contact")}
-              <TableHead className="w-24">Checks</TableHead>
               <TableHead className="w-8 pr-4"><span className="sr-only">Open</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody className={cn("transition-opacity [&_td]:px-3 [&_td]:py-2.5", ((isPending && !rows) || (isFetching && isPlaceholderData)) && "opacity-60")}>
-            {error && <TableRow><TableCell colSpan={12} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
-            {isPending && !error && <TableRow><TableCell colSpan={12} className="py-10 text-center text-muted-foreground">Loading records…</TableCell></TableRow>}
-            {rows?.length === 0 && <TableRow><TableCell colSpan={12} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
+            {error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
+            {isPending && !error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">Loading records…</TableCell></TableRow>}
+            {rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
             {rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
           </TableBody>
       </Table>
@@ -159,14 +157,22 @@ function TipBadge({ variant = "outline", label, tip, className, children }: {
 
 function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; onSelect: (id: number) => void }) {
   const more = r.services.slice(2);
+  const confirmed = r.review_state === "approved";
   return (
     <TableRow tabIndex={0} aria-selected={selected} aria-label={`Open record ${r.id}: ${r.name || r.email_key}`}
       onClick={() => onSelect(r.id)} onKeyDown={(e) => e.key === "Enter" && onSelect(r.id)}
       className={cn("group cursor-pointer border-border/50 align-top hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
         selected && "bg-accent hover:bg-accent")}>
-      <TableCell className={cn(PINNED, "max-w-72 pl-4")}>
+      <TableCell className={cn(PINNED, "max-w-72 pl-4", confirmed && "shadow-[inset_3px_0_0_var(--success)]")}>
         <div className="flex min-w-0 flex-col">
-          <span className="truncate font-medium" title={r.name || undefined}>{r.name || "Unnamed"}</span>
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate font-medium" title={r.name || undefined}>{r.name || "Unnamed"}</span>
+            {confirmed && (
+              <Pill tone="success" className="shrink-0 gap-1 px-1.5">
+                <CheckCircle2 aria-hidden className="h-3 w-3 shrink-0" /> Confirmed
+              </Pill>
+            )}
+          </span>
           <span className="truncate text-xs text-muted-foreground" title={r.email_key}>{r.email_key}</span>
           {r.company && <span className="truncate text-xs text-muted-foreground" title={r.company}>{r.company}</span>}
         </div>
@@ -212,7 +218,6 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
           </div>
         ) : DASH}
       </TableCell>
-      <TableCell>{r.paid ? <Pill tone="success">Paid</Pill> : <span className="text-xs text-muted-foreground">No</span>}</TableCell>
       <TableCell>
         <div className="flex flex-col gap-1">
           <span className="font-medium tabular-nums">{r.items.toLocaleString()} <span className="text-xs font-normal text-muted-foreground">{r.items === 1 ? "item" : "items"}</span></span>
@@ -228,7 +233,6 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
       </TableCell>
       <TableCell className="text-sm tabular-nums">{day(r.first_contact) || DASH}</TableCell>
       <TableCell className="text-sm tabular-nums">{day(r.last_contact) || DASH}</TableCell>
-      <TableCell>{r.needs_check ? <Pill tone="warning">{r.needs_check} to check</Pill> : DASH}</TableCell>
       <TableCell className="pr-4 text-muted-foreground"><ChevronRight aria-hidden className="h-4 w-4 shrink-0 transition-transform group-hover:translate-x-0.5" /></TableCell>
     </TableRow>
   );
