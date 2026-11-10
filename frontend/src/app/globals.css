@@ -51,42 +51,44 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/* Theme from DESIGN.md "Metric Slate Gold": dark slate surfaces in tonal tiers, gold as the one accent. */
 :root {
-  --background: oklch(0.985 0.003 155);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.45 0.11 155);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.6 0.1 155);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-  --success: oklch(0.55 0.13 155);
-  --warning: oklch(0.7 0.15 70);
-  --info: oklch(0.55 0.12 250);
+  color-scheme: dark;
+  --background: #1a1f24;
+  --foreground: #dee3ea;
+  --card: #232930;
+  --card-foreground: #dee3ea;
+  --popover: #2d353e;
+  --popover-foreground: #dee3ea;
+  --primary: #ffc513;
+  --primary-foreground: #1a1f24;
+  --secondary: #293138;
+  --secondary-foreground: #dee3ea;
+  --muted: #293138;
+  --muted-foreground: #98a3b0;
+  --accent: #2d353e;
+  --accent-foreground: #dee3ea;
+  --destructive: #ffb4ab;
+  --border: #2d353e;
+  --input: #3a434d;
+  --ring: #ffc513;
+  --chart-1: #ffc513;
+  --chart-2: #bfc7d0;
+  --chart-3: #8fa3bd;
+  --chart-4: #64748b;
+  --chart-5: #475569;
+  --radius: 0.5rem;
+  --sidebar: #12171c;
+  --sidebar-foreground: #bfc7d0;
+  --sidebar-primary: #ffc513;
+  --sidebar-primary-foreground: #1a1f24;
+  --sidebar-accent: #232930;
+  --sidebar-accent-foreground: #f1f4f8;
+  --sidebar-border: #2d353e;
+  --sidebar-ring: #ffc513;
+  --success: #6fd3a6;
+  --warning: #ffc513;
+  --info: #8db4ff;
 }
 
 .dark {
@@ -133,4 +135,20 @@
   html {
     @apply font-sans;
   }
+}
+/* Sidebar collapse is driven by <html data-sidebar>, set by an inline script before paint, so a reload never flashes.
+   Desktop only: the mobile drawer is always expanded. Transitions start after the first frame (data-sidebar-ready). */
+.sb-aside { width: 16rem; }
+.sb-label { opacity: 1; }
+.sb-chevron { transform: rotate(0deg); }
+html[data-sidebar-ready] .sb-aside { transition: width 0.2s ease; }
+html[data-sidebar-ready] .sb-label { transition: opacity 0.15s ease 0.05s; }
+html[data-sidebar-ready] .sb-chevron { transition: transform 0.2s ease; }
+@media (min-width: 1024px) {
+  html[data-sidebar="collapsed"] .sb-aside { width: 4rem; }
+  html[data-sidebar="collapsed"] .sb-label { opacity: 0; transition-delay: 0s; }
+  html[data-sidebar="collapsed"] .sb-chevron { transform: rotate(180deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sb-aside, .sb-label, .sb-chevron { transition: none !important; }
 }

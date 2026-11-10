@@ -96,12 +96,12 @@ function LogView({ lines, error, empty, heightClass }: { lines: string[]; error?
         <span className="tabular-nums">{lines.length.toLocaleString()} lines</span>
         {error && <span role="alert" className="text-destructive">{error}</span>}
       </div>
-      <ScrollArea className="min-h-0 flex-1 rounded-lg bg-foreground" viewportRef={viewport} onViewportScroll={onScroll}
+      <ScrollArea className="min-h-0 flex-1 rounded-lg bg-sidebar ring-1 ring-border" viewportRef={viewport} onViewportScroll={onScroll}
         viewportProps={{ tabIndex: 0, "aria-label": "Job log", role: "log" } as React.HTMLAttributes<HTMLDivElement>}>
-        <pre className="p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-background">
+        <pre className="p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words text-foreground">
           {lines.length ? lines.map((line, i) => (
-            <span key={i} className={cn("block", PROBLEM.test(line) && "-mx-3 bg-destructive/40 px-3 font-medium")}>{line}</span>
-          )) : <span className="text-background/60">{empty}</span>}
+            <span key={i} className={cn("block", PROBLEM.test(line) && "-mx-3 bg-destructive/20 px-3 font-medium")}>{line}</span>
+          )) : <span className="text-muted-foreground">{empty}</span>}
         </pre>
       </ScrollArea>
       {!follow && lines.length > 0 && (

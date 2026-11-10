@@ -12,12 +12,15 @@ export function announceSessionChange() {
   try { const ch = new BroadcastChannel("scraper-session"); ch.postMessage("changed"); ch.close(); } catch { /* unsupported */ }
 }
 
+let signingOut = false;
+/** An intentional sign-out: the 401 that follows must not add a "next" page to the login URL. */
+export const markSigningOut = (on = true) => { signingOut = on; };
+
 /** Session lost: a full navigation drops every cached record, so the next account never sees stale data. */
 function sessionLost() {
   if (typeof window === "undefined" || window.location.pathname === "/login") return;
-  const next = window.location.pathname + window.location.search;
-  // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full load is the point: it empties the query cache
-  window.location.href = `/login?next=${encodeURIComponent(next)}`;
+  const next = signingOut ? "" : window.location.pathname + window.location.search;
+  window.location.href = next ? `/login?next=${encodeURIComponent(next)}` : "/login";
 }
 
 /** Calls the FastAPI server through the Next.js /api rewrite. */

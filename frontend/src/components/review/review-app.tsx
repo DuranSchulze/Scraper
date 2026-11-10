@@ -11,6 +11,7 @@ import { candidatesQuery, statusQuery } from "@/lib/api";
 import { PAGE_SIZE, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/shell/page-header";
 import { Pick } from "./pick";
 import { RecordDetail } from "./record-detail";
 import { RecordsTable } from "./records-table";
@@ -72,7 +73,7 @@ export function ReviewApp() {
 
   return (
     <div className="flex flex-col gap-4">
-      <h1 className="text-xl font-semibold tracking-tight">Review</h1>
+      <PageHeader title="Review" description="Check each scraped client, correct the details, then approve or reject." />
             <div className="flex flex-wrap items-center gap-2">
               <div role="group" aria-label="Review state" className="inline-flex max-w-full overflow-x-auto rounded-full border bg-muted/40 p-0.5">
                 {STATE_OPTIONS.map((o) => {

@@ -2,9 +2,8 @@
 
 import { useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { ScanSearch } from "lucide-react";
+import { CircleAlert, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, announceSessionChange, post } from "@/lib/api";
@@ -27,6 +26,7 @@ export function LoginForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [show, setShow] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -47,30 +47,34 @@ export function LoginForm() {
   }
 
   return (
-    <Card className="w-full max-w-sm">
-      <CardHeader>
-        <div className="mb-2 flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <ScanSearch className="h-4 w-4 shrink-0" />
+    <div className="w-full max-w-sm">
+      <h1 className="text-2xl font-semibold tracking-tight">Sign in</h1>
+      <p className="mt-1.5 text-sm text-muted-foreground">Use the account an administrator created for you.</p>
+      <form onSubmit={submit} className="mt-8 flex flex-col gap-5" noValidate>
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="email">Email</Label>
+          <Input id="email" type="email" autoComplete="username" autoFocus required value={email} className="h-10"
+            onChange={(e) => setEmail(e.target.value)} aria-invalid={!!error} />
         </div>
-        <CardTitle className="text-xl font-semibold tracking-tight">Workspace Scraper</CardTitle>
-        <p className="text-sm text-muted-foreground">Sign in to review and publish client records.</p>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={submit} className="flex flex-col gap-4" noValidate>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="email">Email</Label>
-            <Input id="email" type="email" autoComplete="username" autoFocus required value={email}
-              onChange={(e) => setEmail(e.target.value)} aria-invalid={!!error} />
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="password">Password</Label>
+          <div className="relative">
+            <Input id="password" type={show ? "text" : "password"} autoComplete="current-password" required value={password}
+              className="h-10 pr-10" onChange={(e) => setPassword(e.target.value)} aria-invalid={!!error} />
+            <button type="button" onClick={() => setShow((v) => !v)} aria-label={show ? "Hide password" : "Show password"} aria-pressed={show}
+              className="absolute top-1/2 right-1 flex size-8 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+              {show ? <EyeOff className="h-4 w-4 shrink-0" /> : <Eye className="h-4 w-4 shrink-0" />}
+            </button>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="password">Password</Label>
-            <Input id="password" type="password" autoComplete="current-password" required value={password}
-              onChange={(e) => setPassword(e.target.value)} aria-invalid={!!error} />
-          </div>
-          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-          <Button type="submit" disabled={pending || !email || !password}>{pending ? "Signing in…" : "Sign in"}</Button>
-        </form>
-      </CardContent>
-    </Card>
+        </div>
+        {error && (
+          <p role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />{error}
+          </p>
+        )}
+        <Button type="submit" size="lg" className="h-10 w-full" disabled={pending || !email || !password}>{pending ? "Signing in…" : "Sign in"}</Button>
+      </form>
+      <p className="mt-6 text-center text-xs text-muted-foreground">No account yet? Ask an administrator to create one.</p>
+    </div>
   );
 }

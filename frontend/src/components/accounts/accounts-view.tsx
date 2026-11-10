@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Pill } from "@/components/review/badges";
+import { PageHeader } from "@/components/shell/page-header";
 import { Pick } from "@/components/review/pick";
 import { keys, meQuery, post, usersQuery } from "@/lib/api";
 import { stamp } from "@/lib/format";
@@ -27,7 +28,7 @@ export function AccountsView() {
   if (!meLoading && !isAdmin) {
     return (
       <div className="flex flex-col gap-2">
-        <h1 className="text-xl font-semibold tracking-tight">Accounts</h1>
+        <PageHeader title="Accounts" />
         <p role="alert" className="py-8 text-center text-sm text-muted-foreground">Only administrators can manage accounts.</p>
       </div>
     );
@@ -35,10 +36,8 @@ export function AccountsView() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-semibold tracking-tight">Accounts</h1>
-        <Button size="sm" onClick={() => setOpen(true)} disabled={!isAdmin}><Plus className="h-4 w-4 shrink-0" /> New account</Button>
-      </div>
+      <PageHeader title="Accounts" description="People who can sign in. Only administrators can add accounts."
+        actions={<Button size="sm" onClick={() => setOpen(true)} disabled={!isAdmin}><Plus className="h-4 w-4 shrink-0" /> New account</Button>} />
       <Card className="gap-0 overflow-hidden p-0">
         <Table>
           <TableHeader>
