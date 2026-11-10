@@ -53,10 +53,10 @@ export type CandidateRow = {
 export type MailboxState = "pending" | "running" | "done" | "failed" | "skipped";
 export type MailboxProgress = {
   mailbox: string; status: MailboxState; fetched: number; total: number; rate_limited: number;
-  error: string | null; started_at: string | null; finished_at: string | null;
+  error: string | null; started_at: string | null; finished_at: string | null; last_synced: string | null;
 };
 export type MailboxBoard = {
-  job_id: number | null; items: MailboxProgress[]; counts: Record<MailboxState, number>;
+  job_id: number | null; items: MailboxProgress[]; counts: Record<MailboxState, number>; synced_before: number;
 };
 
 export type Field<T> = { value: T; source: string; confidence: number };

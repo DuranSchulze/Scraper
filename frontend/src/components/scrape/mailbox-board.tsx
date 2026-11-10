@@ -10,6 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { boardQuery, statusQuery } from "@/lib/api";
+import { ago } from "@/lib/format";
 import type { MailboxProgress, MailboxState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -70,6 +71,9 @@ export function MailboxBoard({ selected, onSelect }: { selected: string; onSelec
   for (const m of all) count[groupOf(m.status)]++;
   const total = all.length;
   const pct = total ? Math.round((count.finished / total) * 100) : 0;
+  // Waiting mailboxes that an earlier run already scraped: their data is in the database, they are only due a re-check.
+  const waitingSynced = all.filter((m) => m.status === "pending" && m.last_synced).length;
+  const overall = board?.synced_before ?? count.finished;
   // Message totals are known only once a mailbox has listed its mail, so waiting mailboxes add nothing yet.
   const msgDone = all.reduce((a, m) => a + Math.min(m.fetched, m.total), 0);
   const msgKnown = all.reduce((a, m) => a + m.total, 0);
@@ -98,14 +102,24 @@ export function MailboxBoard({ selected, onSelect }: { selected: string; onSelec
           <section aria-label="Overall progress" className="flex flex-col gap-2">
             <div className="flex flex-wrap items-baseline justify-between gap-x-3">
               <p className="text-sm"><span className="text-2xl font-semibold tabular-nums">{pct}%</span>
-                <span className="ml-2 text-muted-foreground tabular-nums">{count.finished} of {total} mailboxes scraped</span></p>
+                <span className="ml-2 text-muted-foreground tabular-nums">This run: {count.finished} of {total} mailboxes</span></p>
               {count.running > 0 && <p className="text-xs text-info tabular-nums">{count.running} scraping now</p>}
             </div>
             <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-muted" aria-hidden>
-              {GROUPS.map((g) => count[g.key] > 0 && (
-                <div key={g.key} className={cn("h-full transition-[width] duration-500", g.bar)} style={{ width: `${(count[g.key] / total) * 100}%` }} />
-              ))}
+              {GROUPS.map((g) => {
+                // Waiting is split in two: already scraped by an earlier run (light green) and never scraped.
+                const parts = g.key === "pending"
+                  ? [{ w: waitingSynced, bar: "bg-success/30" }, { w: count.pending - waitingSynced, bar: g.bar }]
+                  : [{ w: count[g.key], bar: g.bar }];
+                return parts.map((part, i) => part.w > 0 && (
+                  <div key={`${g.key}-${i}`} className={cn("h-full transition-[width] duration-500", part.bar)} style={{ width: `${(part.w / total) * 100}%` }} />
+                ));
+              })}
             </div>
+            <p className="text-xs text-muted-foreground tabular-nums">
+              Overall: <span className="font-medium text-foreground">{overall} of {total}</span> mailboxes scraped at least once
+              {waitingSynced > 0 && ` · ${waitingSynced} waiting for a re-check`}
+            </p>
             <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4" role="group" aria-label="Show mailboxes by state">
               {GROUPS.map((g) => (
                 <button key={g.key} type="button" aria-pressed={only === g.key} disabled={!count[g.key] && only !== g.key}
@@ -188,8 +202,10 @@ function Row({ m, now, queue, active, onClick }: { m: MailboxProgress; now: numb
     sub = isFinite(took) ? `took ${duration(took)}` : null;
   } else if (m.status === "pending") {
     detail = queue ? `#${queue} in queue` : st.label;
+    sub = m.last_synced ? `Last synced ${ago(m.last_synced, now)}` : "Never scraped";
   } else if (m.status === "skipped") {
     detail = "Earlier run";
+    sub = m.last_synced ? `Last synced ${ago(m.last_synced, now)}` : null;
   } else {
     detail = m.total ? `stopped at ${pct}%` : "Error";
     sub = m.error ? m.error.split("\n")[0] : null;

@@ -26,19 +26,27 @@ export function ScrapeForm() {
   const [full, setFull] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [rules, setRules] = useState(false);
-  // The interrupted scrape is captured when the dialog opens, so a status refresh can never retarget Resume.
+  // The interrupted scrape is captured when the dialog opens, so a status refresh (or another tab) can never retarget Continue.
   const [resumeAsk, setResumeAsk] = useState<{ id: number; done: number } | null>(null);
 
   const started = () => { qc.invalidateQueries({ queryKey: keys.status }); qc.invalidateQueries({ queryKey: keys.board }); };
   const fail = (e: Error) => toast.error(e.message);
+  // The server carries over mailboxes finished by unfinished earlier scrapes with the same settings, unless `fresh` or a full rescan.
   const scrape = useMutation({
-    mutationFn: () => post("/api/scrape", { sources, mailboxes: list(mailboxes), since, full }),
-    onSuccess: () => { toast.success("Scrape started"); started(); }, onError: fail,
+    mutationFn: (v: { fresh?: boolean } = {}) => post<{ started: boolean; carried: number }>("/api/scrape", {
+      sources, mailboxes: list(mailboxes), since, full, fresh: !!v.fresh }),
+    onSuccess: (r) => {
+      setResumeAsk(null);
+      toast.success(r.carried > 0 ? `Continuing: ${r.carried} mailbox${r.carried === 1 ? "" : "es"} already scraped` : "Scrape started");
+      started();
+    },
+    onError: fail,
   });
   const resume = useMutation({
     mutationFn: (id: number) => post(`/api/jobs/${id}/resume`),
     onSuccess: () => { setResumeAsk(null); toast.success("Resumed the interrupted scrape"); started(); },
-    onError: fail,
+    // Resumed elsewhere in the meantime: show the server's reason, close the dialog and refresh; never start another scrape.
+    onError: (e: Error) => { setResumeAsk(null); fail(e); started(); },
   });
   // An interrupted scrape with finished mailboxes is worth keeping: starting a new one would begin again at 0.
   const doneMailboxes = Array.isArray(s?.job_params?.done_mailboxes) ? s.job_params.done_mailboxes.length : 0;
@@ -73,7 +81,7 @@ export function ScrapeForm() {
           <Label className="mb-2 gap-2 font-normal"><Checkbox checked={full} onCheckedChange={(v) => setFull(!!v)} /> Full rescan</Label>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button disabled={!s || running || scrape.isPending || !sources.length} onClick={() => (interrupted && s?.job_id ? setResumeAsk({ id: s.job_id, done: doneMailboxes }) : scrape.mutate())}>
+          <Button disabled={!s || running || scrape.isPending || !sources.length} onClick={() => (interrupted && !full && s?.job_id ? setResumeAsk({ id: s.job_id, done: doneMailboxes }) : scrape.mutate({}))}>
             {scrape.isPending ? "Starting…" : "Run scrape"}
           </Button>
           <Button variant="outline" disabled={running} onClick={() => setConfirm(true)}>Re-run extraction</Button>
@@ -92,24 +100,24 @@ export function ScrapeForm() {
         title="Re-run extraction?" confirmLabel="Re-run extraction" pending={extract.isPending}
         description="Re-reads every stored item with the current rules. Pending records are rebuilt; approved and rejected ones are kept. Nothing is downloaded from Google."
         onConfirm={() => extract.mutate()} />
-      <Dialog open={!!resumeAsk} onOpenChange={(o) => { if (!o && !resume.isPending && !scrape.isPending) setResumeAsk(null); }}>
+      <Dialog open={!!resumeAsk} onOpenChange={(o) => { if (!o && !scrape.isPending && !resume.isPending) setResumeAsk(null); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Resume the interrupted scrape?</DialogTitle>
+            <DialogTitle>Continue the interrupted scrape?</DialogTitle>
             <DialogDescription>
-              The last scrape stopped with {resumeAsk?.done ?? 0} mailbox{resumeAsk?.done === 1 ? "" : "es"} already finished. Resume keeps them and
-              continues with the original settings. A new scrape starts again from the first mailbox: only new mail is downloaded, but
-              contacts and sheets are fetched again.
+              The last scrape stopped with {resumeAsk?.done ?? 0} mailbox{resumeAsk?.done === 1 ? "" : "es"} finished; mailboxes finished by earlier
+              unfinished runs count too. Continue keeps them and uses that scrape&apos;s original settings. Start from zero uses the settings above and
+              checks every mailbox again: only new mail is downloaded, but contacts and sheets are fetched again.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setResumeAsk(null)} disabled={resume.isPending || scrape.isPending}>Cancel</Button>
-            <Button variant="outline" disabled={resume.isPending || scrape.isPending}
-              onClick={() => scrape.mutate(undefined, { onSettled: () => setResumeAsk(null) })}>
-              {scrape.isPending ? "Starting…" : "Start new scrape"}
+            <Button variant="ghost" onClick={() => setResumeAsk(null)} disabled={scrape.isPending || resume.isPending}>Cancel</Button>
+            <Button variant="outline" disabled={scrape.isPending || resume.isPending} onClick={() => scrape.mutate({ fresh: true })}>
+              {scrape.isPending ? "Starting…" : "Start from zero"}
             </Button>
-            <Button disabled={resume.isPending || scrape.isPending} onClick={() => resumeAsk && resume.mutate(resumeAsk.id)}>
-              {resume.isPending ? "Resuming…" : "Resume"}
+            <Button disabled={scrape.isPending || resume.isPending}
+              onClick={() => resumeAsk && resume.mutate(resumeAsk.id)}>
+              {scrape.isPending || resume.isPending ? "Starting…" : "Continue"}
             </Button>
           </DialogFooter>
         </DialogContent>
