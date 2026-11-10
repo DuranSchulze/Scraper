@@ -98,10 +98,20 @@ It refuses while a job is running. Tables and migrations stay in place.
 
 ## Tests
 
-Database tests run against a throwaway local Postgres (never Neon). Install it once:
+Database tests run against a throwaway local Postgres on `127.0.0.1` with a random TCP port
+(never the configured `DATABASE_URL` or Neon). Install PostgreSQL 17 once:
 
 ```bash
 brew install postgresql@17
+```
+
+On Windows, run `choco install postgresql17` in an administrator shell. On Linux, install
+the `postgresql-17` package. Set `PG_BIN` to the PostgreSQL `bin` folder if it differs from
+the default (`C:\Program Files\PostgreSQL\17\bin`, `/opt/homebrew/opt/postgresql@17/bin`,
+or `/usr/lib/postgresql/17/bin`). For example, in PowerShell:
+
+```powershell
+$env:PG_BIN = 'C:\Program Files\PostgreSQL\17\bin'
 ```
 
 ```bash
