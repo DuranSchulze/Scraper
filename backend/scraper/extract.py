@@ -72,6 +72,13 @@ def norm_phone(p: str) -> str:
             return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
     except phonenumbers.NumberParseException:
         pass
+    if not p.strip().startswith("+"):
+        try:
+            number = phonenumbers.parse("+" + re.sub(r"\D", "", p), "PH")
+            if phonenumbers.is_valid_number(number):
+                return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
+        except phonenumbers.NumberParseException:
+            pass
     return re.sub(r"[^\d+]", "", p)
 
 
@@ -83,7 +90,8 @@ def strict_phone(p: str) -> bool:
 
 
 def valid_phone(p: str) -> bool:
-    return 9 <= len(re.sub(r"\D", "", p)) <= 15
+    return strict_phone(p) or (
+        not p.strip().startswith("+") and strict_phone("+" + re.sub(r"\D", "", p)))
 
 
 def own_text(body: str) -> str:

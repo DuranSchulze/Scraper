@@ -26,6 +26,12 @@ def test_phone_formats_merge_into_one_e164_number():
     assert f["phones"]["value"] == ["+639171234567"]
 
 
+def test_foreign_phone_with_and_without_plus_merge_into_one_e164_number():
+    f = fields([sig("inquiry", phones=["14155550123"]),
+                sig("inquiry", phones=["+1 415 555 0123"])])
+    assert f["phones"]["value"] == ["+14155550123"]
+
+
 @pytest.mark.parametrize("signals", [
     [sig("payment_confirmed")],
     [sig("payment_claim", has_proof=True)],

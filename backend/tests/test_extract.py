@@ -87,9 +87,13 @@ def test_signature_phones_stay_on_their_line_and_ignore_quotes():
 
 
 @pytest.mark.parametrize("path", ["contacts", "sheets", "form"])
-def test_explicit_phone_fields_keep_lenient_validation_through_merge(path):
-    phone = "4155550123"
-    assert not strict_phone(phone)
+@pytest.mark.parametrize("phone,expected", [
+    ("121374805409", None), ("152502080908", None), ("2069331928", None),
+    ("6760396320000", None), ("4155550123", None),
+    ("0917 555 1234", "+639175551234"), ("+63 917 123 4567", "+639171234567"),
+    ("14155550123", "+14155550123"), ("+1 470 705 3865", "+14707053865"),
+])
+def test_explicit_phone_fields_require_strict_validation_through_merge(path, phone, expected):
     if path == "contacts":
         signals = extract_contact(1, {"name": "Bob", "emails": ["bob@client.test"],
                                       "phones": [phone], "company": ""}, INTERNAL)
@@ -101,8 +105,16 @@ def test_explicit_phone_fields_keep_lenient_validation_through_merge(path):
     else:
         signals = extract_gmail(1, mail("wordpress@acme.test", "sales@acme.test", "New form",
                                        f"Email: bob@client.test\nPhone: {phone}"), RULES, INTERNAL)
-    assert signals[0]["phones"] == [phone]
-    assert build_candidates(signals, RULES, NOW)["bob@client.test"]["fields"]["phones"]["value"] == [phone]
+    assert signals[0]["phones"] == ([phone] if expected else [])
+    assert build_candidates(signals, RULES, NOW)["bob@client.test"]["fields"]["phones"]["value"] == (
+        [expected] if expected else [])
+
+
+@pytest.mark.parametrize("phone,expected", [
+    ("14155550123", "+14155550123"), ("0917 555 1234", "+639175551234"),
+])
+def test_explicit_phone_normalization(phone, expected):
+    assert norm_phone(phone) == expected
 
 
 @pytest.mark.parametrize("phone,expected", [("", ""), ("abc", ""), ("++12", "++12")])
