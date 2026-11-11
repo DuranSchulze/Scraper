@@ -60,7 +60,7 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
   const from = (filters.page - 1) * PAGE_SIZE;
   // Real links (middle-click opens a new tab); a plain click pages in place without a reload.
   const pageLink = (p: number, disabled: boolean) => disabled
-    ? { "aria-disabled": true, tabIndex: -1, className: "pointer-events-none opacity-50" }
+    ? { "aria-disabled": true, tabIndex: -1, className: "cursor-not-allowed opacity-50" }
     : { href: pageHref(p), onClick: (e: React.MouseEvent) => {
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
         e.preventDefault(); onPage(p);
@@ -147,7 +147,7 @@ function TipBadge({ variant = "outline", label, tip, className, children }: {
   return (
     <Tooltip>
       <TooltipTrigger type="button" aria-label={label} onClick={stop} onKeyDown={stop}
-        className={cn(badgeVariants({ variant }), "cursor-default tabular-nums", className)}>
+        className={cn(badgeVariants({ variant }), "cursor-pointer tabular-nums", className)}>
         {children}
       </TooltipTrigger>
       <TooltipContent className="items-start">{tip}</TooltipContent>

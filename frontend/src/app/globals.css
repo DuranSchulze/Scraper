@@ -185,6 +185,14 @@ html[data-theme="light"] {
   html {
     @apply font-sans;
   }
+  /* Tailwind v4 dropped the hand cursor on buttons; restore it on everything clickable. Utilities still override. */
+  button:not(:disabled), a[href], summary, select:not(:disabled), label[for],
+  [role="button"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [role="radio"] {
+    cursor: pointer;
+  }
+  button:disabled, select:disabled, [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
 /* Sidebar collapse is driven by <html data-sidebar>, set by an inline script before paint, so a reload never flashes.
    Desktop only: the mobile drawer is always expanded. Transitions start after the first frame (data-sidebar-ready).

@@ -57,7 +57,7 @@ const ROW = "group/row relative flex h-9 w-full items-center rounded-md text-sm 
 const SLOT = "flex w-12 shrink-0 items-center justify-center";
 const ICON = "size-[1.125rem] shrink-0";
 const IDLE = "text-sidebar-foreground/80 hover:bg-sidebar-accent/70 hover:text-sidebar-accent-foreground";
-const ITEM = "flex h-8 cursor-default items-center gap-2 rounded-md px-2 text-sm outline-none select-none data-highlighted:bg-accent data-highlighted:text-accent-foreground [&_svg]:size-4 [&_svg]:shrink-0";
+const ITEM = "flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm outline-none select-none data-highlighted:bg-accent data-highlighted:text-accent-foreground [&_svg]:size-4 [&_svg]:shrink-0";
 
 function NavRow({ href, label, icon: Icon, active, count, tip, onNavigate }: {
   href: string; label: string; icon: React.ElementType; active: boolean; count?: number; tip: boolean; onNavigate?: () => void;
