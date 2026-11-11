@@ -19,6 +19,7 @@ import { ClientDetails } from "./client-details";
 import { clearDraft, initialDraft, loadDraft, saveDraft, toClientIn, validate, type Draft } from "./draft";
 import { Pick } from "./pick";
 import { SourceDialog } from "./text-dialog";
+import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
 type Nav = { prevId: number | null; nextId: number | null; onNav: (id: number) => void; position: string | null };
 
@@ -30,7 +31,24 @@ export function RecordDetail({ id, onDone, ...nav }: { id: number; onDone: (next
   return (
     <div className="flex h-full flex-col">
       <DrawerHeader title={`Record #${id}`} subtitle={error ? "" : "Loading…"} nav={nav} />
-      {error && <p role="alert" className="p-4 text-sm text-destructive">Could not load record #{id}: {error.message}</p>}
+      {error ? <p role="alert" className="p-4 text-sm text-destructive">Could not load record #{id}: {error.message}</p>
+        : <DetailSkeleton />}
+    </div>
+  );
+}
+
+/** Drawer placeholder: tab strip, labelled fields and the pinned action bar. */
+function DetailSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <LoadingLabel>Loading record…</LoadingLabel>
+      <div className="flex gap-2 border-b px-5 py-2">{[16, 20, 18].map((w, i) => <Skeleton key={i} className="h-7" style={{ width: `${w * 4}px` }} />)}</div>
+      <div className="flex flex-1 flex-col gap-4 overflow-hidden p-5">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="flex flex-col gap-1.5"><Skeleton className="h-3 w-24" /><Skeleton className="h-9 w-full" /></div>
+        ))}
+      </div>
+      <div className="flex justify-end gap-2 border-t px-5 py-3"><Skeleton className="h-8 w-20" /><Skeleton className="h-8 w-32" /></div>
     </div>
   );
 }

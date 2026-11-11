@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 import { Pill } from "@/components/review/badges";
 import { PageHeader } from "@/components/shell/page-header";
 import { Pick } from "@/components/review/pick";
@@ -65,7 +66,15 @@ export function AccountsView() {
             ))}
             {error && <TableRow><TableCell colSpan={5} role="alert" className="py-8 text-center text-destructive">{error.message}</TableCell></TableRow>}
             {!error && !isPending && !users?.length && <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">No accounts yet.</TableCell></TableRow>}
-            {!error && isPending && isAdmin && <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">Loading accounts…</TableCell></TableRow>}
+            {!error && isPending && (isAdmin || meLoading) && Array.from({ length: 3 }, (_, i) => (
+              <TableRow key={`sk-${i}`} className="hover:bg-transparent">
+                <TableCell>{i === 0 && <LoadingLabel>Loading accounts…</LoadingLabel>}<Skeleton className="h-4 w-28" /></TableCell>
+                <TableCell><Skeleton className="h-4 w-44" /></TableCell>
+                <TableCell><Skeleton className="h-5 w-16 rounded-full" /></TableCell>
+                <TableCell><div className="flex gap-4"><Skeleton className="h-4 w-20" /><Skeleton className="h-4 w-20" /></div></TableCell>
+                <TableCell><Skeleton className="h-4 w-28" /></TableCell>
+              </TableRow>
+            ))}
           </TableBody>
         </Table>
       </Card>

@@ -13,6 +13,7 @@ import { boardQuery, statusQuery } from "@/lib/api";
 import { ago } from "@/lib/format";
 import type { MailboxProgress, MailboxState } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
 const STATE: Record<MailboxState, { label: string; icon: typeof Check; color: string }> = {
   running: { label: "Scraping", icon: Loader, color: "text-info" },
@@ -98,6 +99,16 @@ export function MailboxBoard({ selected, onSelect }: { selected: string; onSelec
           <p className="py-6 text-center text-sm text-muted-foreground">Run a scrape to see each mailbox&apos;s progress here.</p>
         )}
 
+        {!board && !error && (
+          <div className="flex flex-col gap-3">
+            <LoadingLabel>Loading mailboxes…</LoadingLabel>
+            <Skeleton className="h-8 w-56" />
+            <Skeleton className="h-2.5 w-full rounded-full" />
+            <Skeleton className="h-3 w-64" />
+            <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">{Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-14" />)}</div>
+            {Array.from({ length: 4 }, (_, i) => <Skeleton key={i} className="h-10 w-full" />)}
+          </div>
+        )}
         {total > 0 && (
           <section aria-label="Overall progress" className="flex flex-col gap-2">
             <div className="flex flex-wrap items-baseline justify-between gap-x-3">

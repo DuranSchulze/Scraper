@@ -5,6 +5,7 @@ import { ChevronRight, Paperclip } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { rawQuery, rulesQuery } from "@/lib/api";
 import type { RawItem } from "@/lib/types";
+import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
 const PRE = "max-h-[65vh] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-3 font-mono text-xs";
 const HEADERS = ["from", "to", "cc", "date"] as const;
@@ -94,7 +95,8 @@ export function SourceDialog({ id, onClose }: { id: number; onClose: () => void 
   const title = data ? `${data.source} · ${data.mailbox || "—"} · ${data.source_id}` : `Source #${id}`;
   return (
     <Shell title={title} onClose={onClose}>
-      <pre className={PRE}>{error ? `Could not load: ${error.message}` : data ? JSON.stringify(data.payload, null, 2) : "Loading…"}</pre>
+      {!data && !error ? <TextSkeleton label="Loading source…" />
+        : <pre className={PRE}>{error ? `Could not load: ${error.message}` : JSON.stringify(data!.payload, null, 2)}</pre>}
     </Shell>
   );
 }
@@ -103,7 +105,18 @@ export function RulesDialog({ onClose }: { onClose: () => void }) {
   const { data, error } = useQuery(rulesQuery);
   return (
     <Shell title={data ? `${data.path} (edit the file, then Re-run extraction)` : "Rules"} onClose={onClose}>
-      <pre className={PRE}>{error ? `Could not load: ${error.message}` : data?.text ?? "Loading…"}</pre>
+      {!data && !error ? <TextSkeleton label="Loading rules…" />
+        : <pre className={PRE}>{error ? `Could not load: ${error.message}` : data!.text}</pre>}
     </Shell>
+  );
+}
+
+/** Lines of uneven width standing in for a text/JSON body while it loads. */
+function TextSkeleton({ label }: { label: string }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-md border bg-muted/30 p-3">
+      <LoadingLabel>{label}</LoadingLabel>
+      {[92, 70, 84, 60, 88, 45, 76, 66].map((w, i) => <Skeleton key={i} className="h-3.5" style={{ width: `${w}%` }} />)}
+    </div>
   );
 }

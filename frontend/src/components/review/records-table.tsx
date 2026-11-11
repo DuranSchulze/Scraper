@@ -16,6 +16,7 @@ import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
 import { PhoneNumber } from "./phone";
+import { Skeleton, LoadingLabel } from "@/components/ui/skeleton";
 
 const DASH = <span className="text-muted-foreground">—</span>;
 // The pinned Client cell needs an opaque background, or scrolled cells show through it.
@@ -91,9 +92,9 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
               <TableHead className="w-8 pr-4"><span className="sr-only">Open</span></TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody className={cn("transition-opacity [&_td]:px-3 [&_td]:py-2.5", ((isPending && !rows) || (isFetching && isPlaceholderData)) && "opacity-60")}>
+          <TableBody className={cn("transition-opacity [&_td]:px-3 [&_td]:py-2.5", isFetching && isPlaceholderData && "opacity-60")}>
             {error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
-            {isPending && !error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">Loading records…</TableCell></TableRow>}
+            {isPending && !error && <SkeletonRows />}
             {rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
             {rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
           </TableBody>
@@ -235,5 +236,30 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
       <TableCell className="text-sm tabular-nums">{day(r.last_contact) || DASH}</TableCell>
       <TableCell className="pr-4 text-muted-foreground"><ChevronRight aria-hidden className="h-4 w-4 shrink-0 transition-transform group-hover:translate-x-0.5" /></TableCell>
     </TableRow>
+  );
+}
+
+/** First-load placeholder: rows shaped like real ones (name + email, phone, chips, pills, amount, dates). */
+function SkeletonRows() {
+  return (
+    <>
+      {Array.from({ length: 8 }, (_, i) => (
+        <TableRow key={i} className="hover:bg-transparent">
+          <TableCell className="sticky left-0 bg-card pl-4">
+            {i === 0 && <LoadingLabel>Loading records…</LoadingLabel>}
+            <Skeleton className="h-4 w-40" /><Skeleton className="mt-1.5 h-3 w-52" />
+          </TableCell>
+          <TableCell><Skeleton className="h-4 w-32" /></TableCell>
+          <TableCell><div className="flex gap-1.5"><Skeleton className="h-5 w-28 rounded-full" /><Skeleton className="h-5 w-10 rounded-full" /></div></TableCell>
+          <TableCell><Skeleton className="h-5 w-14 rounded-full" /></TableCell>
+          <TableCell><Skeleton className="h-4 w-12" /></TableCell>
+          <TableCell><Skeleton className="ml-auto h-4 w-20" /></TableCell>
+          <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+          <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+          <TableCell className="pr-4" />
+        </TableRow>
+      ))}
+    </>
   );
 }

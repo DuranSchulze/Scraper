@@ -11,6 +11,7 @@ import { stamp } from "@/lib/format";
 import type { RouteKey, Status, User } from "@/lib/types";
 import { Pill } from "@/components/review/badges";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
+import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
 const JOB_STATE = {
   running: { label: "Running", tone: "info" },
@@ -86,7 +87,8 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
         {leading}
 
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-          {s?.job ? <span className="text-muted-foreground">Last job: <span className="font-medium text-foreground">{s.job}</span></span>
+          {!s && !error ? <><LoadingLabel>Loading job status…</LoadingLabel><Skeleton className="h-4 w-32" /><Skeleton className="h-5 w-20 rounded-full" /></>
+            : s?.job ? <span className="text-muted-foreground">Last job: <span className="font-medium text-foreground">{s.job}</span></span>
             : <span className="text-muted-foreground">No job has run yet</span>}
           {state && <Pill tone={state.tone}>{state.label}{s?.job_failures ? ` · ${s.job_failures} failure(s)` : ""}</Pill>}
           {s?.job_started_at && <span className="text-xs text-muted-foreground tabular-nums">started {stamp(s.job_started_at)}</span>}

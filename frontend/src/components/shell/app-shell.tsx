@@ -15,6 +15,7 @@ import { StatusBar } from "@/components/scrape/status-bar";
 import { announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
 import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
 // Nav stays plain data, grouped like modern app shells. Items with a `route` need that page grant; admin-only groups
 // are hidden for members (pages and the API check again).
@@ -111,6 +112,18 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
         <span className="sb-label min-w-0 flex-1 truncate pr-2 text-sm font-semibold tracking-tight whitespace-nowrap">Workspace Scraper</span>
       </div>
       <nav aria-label="Main" className="flex flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto px-2 py-2">
+        {!me && (
+          <div className="flex flex-col gap-0.5">
+            <LoadingLabel>Loading navigation…</LoadingLabel>
+            <div className="h-7" />
+            {[20, 24].map((w, i) => (
+              <div key={i} className="flex h-9 items-center">
+                <span className={SLOT}><Skeleton className="size-[1.125rem] bg-sidebar-accent" /></span>
+                <Skeleton className="sb-label h-3.5 bg-sidebar-accent" style={{ width: `${w * 4}px` }} />
+              </div>
+            ))}
+          </div>
+        )}
         {groups.map((g) => (
           <div key={g.label} role="group" aria-label={g.label} className="flex flex-col gap-0.5">
             <div className="relative h-7">
