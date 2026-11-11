@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from getpass import getuser
 from typing import Literal
 
@@ -32,7 +32,84 @@ async def lifespan(app):
             auth.seed_admin(conn)
     except (RuntimeError, PostgresError):
         pass  # Keep the GUI available; status reports the error and retries the check.
-    yield
+    stopped = threading.Event()
+    at = _daily_time()
+    scheduler = threading.Thread(target=_daily_scrape, args=(at, stopped), daemon=True) if at is not None else None
+    if scheduler:
+        scheduler.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        if scheduler:
+            scheduler.join(timeout=1)
+
+
+def _daily_time():
+    value = env("DAILY_SCRAPE_AT")
+    if not value:
+        return None
+    try:
+        at = datetime.strptime(value, "%H:%M").time()
+        if value != at.strftime("%H:%M"):
+            raise ValueError("Expected HH:MM")
+        return at
+    except ValueError:
+        logging.getLogger(__name__).warning("Invalid DAILY_SCRAPE_AT %r; daily scrape disabled (expected HH:MM)", value)
+        return None
+
+
+def _daily_due(now, last_run_date, last_done_scrape_at, running, at, *, boot=False, pending=False):
+    if running or last_run_date == now.date():
+        return False
+    catch_up = boot and (last_done_scrape_at is None or now - last_done_scrape_at > timedelta(days=1))
+    return pending or now.time() >= at or catch_up
+
+
+def _daily_scrape(at, stopped):
+    logger = logging.getLogger(__name__)
+    boot = True
+    last_run_date = None
+    pending = False
+    while not stopped.is_set():
+        try:
+            now = datetime.now().astimezone()
+            # A blocked scheduled run remains due even if the next minute is on the following date.
+            pending = pending or (now.time() >= at and last_run_date != now.date())
+            with db.connect() as conn:
+                # Serialize scheduler checks across API workers; start_job still arbitrates against manual jobs.
+                locked = conn.execute("SELECT pg_try_advisory_xact_lock(783214901) AS locked").fetchone()["locked"]
+                if locked:
+                    running = conn.execute("SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('running','paused')) AS running").fetchone()["running"]
+                    last_done = conn.execute(
+                        "SELECT max(finished_at) AS finished_at FROM jobs WHERE name='scrape'"
+                        " AND status IN ('done','done_with_errors') AND error IS NULL").fetchone()["finished_at"]
+                    ran_today = conn.execute(
+                        "SELECT 1 FROM jobs WHERE name='scrape' AND params->>'daily_date'=%s LIMIT 1",
+                        (now.date().isoformat(),)).fetchone()
+                    if ran_today:
+                        last_run_date, pending = now.date(), False
+                    if not stopped.is_set() and _daily_due(now, last_run_date, last_done, running, at, boot=boot, pending=pending):
+                        params = {"sources": ["gmail", "contacts", "sheets"], "mailboxes": [],
+                                  "since": env("SCRAPE_SINCE", "2018-01-01"), "full": False,
+                                  "daily_date": now.date().isoformat()}
+                        datetime.strptime(params["since"], "%Y-%m-%d")
+                        job_id = start_job("scrape", params, carry=True)
+                        last_run_date, pending = now.date(), False
+                        logger.info("Daily scrape started: job %s (incremental extraction is included)", job_id)
+                    elif running:
+                        logger.info("Daily scrape skipped: another job is running; retrying in 60 seconds")
+                    else:
+                        logger.debug("Daily scrape skipped: not due or already started today")
+                    if not running:
+                        boot = False
+                else:
+                    logger.debug("Daily scrape skipped: another scheduler is checking")
+        except HTTPException as exc:
+            logger.info("Daily scrape skipped: %s; retrying in 60 seconds", exc.detail)
+        except (PostgresError, RuntimeError, ValueError):
+            logger.exception("Daily scrape check failed; retrying in 60 seconds")
+        stopped.wait(60)
 
 
 app = FastAPI(title="Workspace Scraper", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan,
