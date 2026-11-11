@@ -83,6 +83,7 @@ def test_api_bind_settings(monkeypatch, host, port, gui_port, expected):
 def conn(pg_url, monkeypatch, authenticated_client):
     monkeypatch.setitem(globals(), "local", authenticated_client)
     monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setenv("DAILY_SCRAPE_AT", "")  # TestClient lifespans must not launch scheduled scrapes.
     db.migrate()
     with db.connect() as conn:
         yield conn
@@ -121,6 +122,8 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
     requests = {
         "review": [
             ("GET", "/api/candidates", None), ("GET", f"/api/candidates/{cid}", None),
+            ("GET", "/api/candidates/facets", None),
+            ("POST", "/api/candidates/bulk", {"ids": [cid], "action": "approve"}),
             ("POST", f"/api/candidates/{cid}/approve", edited()),
             ("POST", f"/api/candidates/{cid}/reject", None),
             ("POST", f"/api/candidates/{cid}/reopen", None),
@@ -396,6 +399,136 @@ def details_body():
             "first": "2026-01-01T00:00:00Z", "last": "2026-10-05T00:00:00Z", "messages": 3}],
         client_since="1900-01-01T00:00:00Z", timeline={"items": [{"snippet": "PRIVATE EMAIL"}]})
     return body
+
+
+def insert_review_candidate(conn, email, values=None, state="pending"):
+    return conn.execute(
+        "INSERT INTO candidates(email_key,fields,review_state) VALUES (%s,%s,%s) RETURNING id",
+        (email, Jsonb({key: {"value": value} for key, value in (values or {}).items()}), state)).fetchone()["id"]
+
+
+def test_review_filters_each_and_combined_with_paging(conn):
+    values = {"name": "Target", "department": "Sales", "status": "active", "stage": "paid",
+              "handlers": [{"mailbox": "staff@acme.test"}], "services_availed": ["SEO"],
+              "services": ["Legacy"], "phones": ["123"], "amounts": [{"amount": 10}],
+              "last_contact": "2026-10-05T23:59:59Z"}
+    a = insert_review_candidate(conn, "a@Example.TEST", values)
+    b = insert_review_candidate(conn, "b@example.test", values)
+    other = insert_review_candidate(conn, "other@notexample.test", {"phones": None, "amounts": None,
+                                                                   "last_contact": "2026-10-06T00:00:00Z"})
+    empty = insert_review_candidate(conn, "empty@example.test")
+    insert_review_candidate(conn, "approved@example.test", values, "approved")
+    conn.commit()
+    filters = {"mailbox": "staff@acme.test", "service": "SEO", "domain": "@EXAMPLE.test",
+               "has_phone": "true", "has_amount": "true", "date_from": "2026-10-05", "date_to": "2026-10-05"}
+    for key, value in filters.items():
+        response = local.get("/api/candidates", params={key: value})
+        expected = {a, b, empty} if key == "domain" else {a, b, other} if key == "date_from" else {a, b}
+        assert {row["id"] for row in response.json()} == expected
+        assert int(response.headers["X-Total-Count"]) == len(expected)
+    assert {r["id"] for r in local.get("/api/candidates?service=Legacy").json()} == {a, b}
+    combined = {**filters, "q": "Target", "department": "Sales", "status": "active", "stage": "paid",
+                "size": 1, "page": 2}
+    response = local.get("/api/candidates", params=combined)
+    assert response.status_code == 200 and response.headers["X-Total-Count"] == "2"
+    assert [r["id"] for r in response.json()] == [b]
+    assert local.get("/api/candidates", params={key: "" for key in filters}).headers["X-Total-Count"] == "4"
+    assert local.get("/api/candidates?has_phone=false&has_amount=false").headers["X-Total-Count"] == "4"
+    for params in ({"service": "SEO' OR 1=1 --"}, {"domain": "ample.test"}, {"mailbox": "unknown"},
+                   {"date_from": "2026-10-07"}, {"date_to": "2026-10-04"}):
+        assert local.get("/api/candidates", params=params).headers["X-Total-Count"] == "0"
+
+
+@pytest.mark.parametrize("value", ["2026-02-30", "bad", "20261005", "2026-W41-1"])
+@pytest.mark.parametrize("key", ["date_from", "date_to"])
+def test_review_date_filter_rejects_invalid_date(conn, key, value):
+    assert local.get("/api/candidates", params={key: value}).status_code == 400
+
+
+def test_review_facets_distinct_sorted_nonempty_and_state_scoped(conn):
+    for email, values, state in [
+        ("a@test", {"department": "Sales", "handlers": [{"mailbox": "z@test"}, {"mailbox": "a@test"}],
+                    "services": ["SEO", "Legacy", ""], "services_availed": ["SEO", "Design"]}, "pending"),
+        ("b@test", {"department": "Accounts", "handlers": [{"mailbox": "a@test"}, {"mailbox": ""}],
+                    "services": None, "services_availed": None}, "pending"),
+        ("c@test", {"department": " ", "handlers": None}, "pending"),
+        ("d@test", {"department": "Private", "services": ["Other"]}, "approved"),
+    ]:
+        insert_review_candidate(conn, email, values, state)
+    conn.commit()
+    assert local.get("/api/candidates/facets").json() == {
+        "departments": ["Accounts", "Sales"], "mailboxes": ["a@test", "z@test"],
+        "services": ["Design", "Legacy", "SEO"]}
+    assert local.get("/api/candidates/facets?state=approved").json() == {
+        "departments": ["Private"], "mailboxes": [], "services": ["Other"]}
+    assert local.get("/api/candidates/facets?state=rejected").json() == {
+        "departments": [], "mailboxes": [], "services": []}
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_bulk_approve_matches_single_untouched_draft(conn, full):
+    body = details_body() if full else {}
+    body.pop("notes", None)
+    body.update(name="  Client  ", company="  Co  ", department="  Sales  ",
+                emails=[" first@test ", "second@test"], services=[" SEO ", "Design"])
+    a = insert_review_candidate(conn, "a@test", body)
+    b = insert_review_candidate(conn, "b@test", body)
+    conn.commit()
+    untouched = {**body, "name": "Client", "company": "Co", "department": "Sales", "notes": None,
+                 "emails": ["first@test", "second@test"], "services": ["SEO", "Design"],
+                 "status": body.get("status", "inquiry")}
+    assert approve(a, untouched).status_code == 200
+    assert local.post("/api/candidates/bulk", headers=GUI,
+                      json={"ids": [b], "action": "approve"}).json() == {"done": [b], "failed": []}
+    single = local.get(f"/api/candidates/{a}").json()
+    bulk = local.get(f"/api/candidates/{b}").json()
+    assert bulk["reviewed"] == single["reviewed"]
+    assert bulk["reviewed_by"] == single["reviewed_by"] and bulk["reviewed_at"]
+
+
+def test_bulk_mixed_batch_failures_do_not_stop_later_records(conn):
+    approved = insert_review_candidate(conn, "approved@test", state="approved")
+    merged = insert_review_candidate(conn, "merged@test", state="merged")
+    rejected = insert_review_candidate(conn, "rejected@test", state="rejected")
+    invalid = insert_review_candidate(conn, "invalid@test", {"payments": details_body()["payments"]})
+    db_failure = insert_review_candidate(conn, "dbfail@test")
+    good = insert_review_candidate(conn, "good@test")
+    conn.execute("ALTER TABLE candidates ADD CONSTRAINT injected_bulk_failure CHECK "
+                 "(email_key <> 'dbfail@test' OR review_state <> 'approved')")
+    conn.commit()
+    bad = [approved, merged, rejected, 999999, invalid, db_failure]
+    result = local.post("/api/candidates/bulk", headers=GUI,
+                        json={"ids": [*bad, good], "action": "approve"})
+    assert result.status_code == 200
+    result = result.json()
+    assert result["done"] == [good] and [f["id"] for f in result["failed"]] == bad
+    assert all(f["error"] for f in result["failed"])
+    for cid in (invalid, db_failure):
+        row = local.get(f"/api/candidates/{cid}").json()
+        assert row["review_state"] == "pending" and row["reviewed"] is None
+    assert conn.execute("SELECT count(*) AS n FROM clients").fetchone()["n"] == 0
+
+
+def test_bulk_reject_matches_single_and_requires_gui_header(conn):
+    a = insert_review_candidate(conn, "a@test")
+    b = insert_review_candidate(conn, "b@test")
+    conn.commit()
+    body = {"ids": [b], "action": "reject"}
+    assert local.post("/api/candidates/bulk", json=body).status_code == 403
+    assert local.post(f"/api/candidates/{a}/reject", headers=GUI).status_code == 200
+    assert local.post("/api/candidates/bulk", headers=GUI, json=body).json() == {"done": [b], "failed": []}
+    for cid in (a, b):
+        row = local.get(f"/api/candidates/{cid}").json()
+        assert row["review_state"] == "rejected" and row["reviewed"] is None
+
+
+@pytest.mark.parametrize("body", [
+    {"ids": [], "action": "approve"}, {"ids": [1, 1], "action": "approve"},
+    {"ids": list(range(501)), "action": "reject"}, {"ids": [1], "action": "publish"},
+    {"ids": ["bad"], "action": "reject"},
+])
+def test_bulk_validates_body_before_processing(conn, body):
+    assert local.post("/api/candidates/bulk", headers=GUI, json=body).status_code == 422
 
 
 def test_publish_client_details_insert_and_update_computes_since_and_excludes_timeline(conn):

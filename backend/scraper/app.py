@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from getpass import getuser
 from typing import Literal
 
@@ -506,6 +506,9 @@ def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=
 @app.get("/api/candidates", dependencies=[Depends(auth.require_route("review"))])
 def list_candidates(response: Response, state: str = "pending", q: str = "", status: str = "",
                     department: str = "", stage: str = "", sort: str = "last_contact", order: str = "desc",
+                    mailbox: str = "", service: str = "", domain: str = "",
+                    has_phone: Literal["", "true", "false"] = "",
+                    has_amount: Literal["", "true", "false"] = "", date_from: str = "", date_to: str = "",
                     page: int = Query(default=1, ge=1), size: int = Query(default=500, ge=1, le=500)):
     if sort not in {"last_contact", "first_contact"} or order not in {"asc", "desc"}:
         raise HTTPException(400, "sort must be last_contact or first_contact; order must be asc or desc")
@@ -524,6 +527,27 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
     if department:
         sql += " AND fields->'department'->>'value' = %s"
         args.append(department)
+    if mailbox:
+        sql += " AND jsonb_path_exists(fields, '$.handlers.value[*] ? (@.mailbox == $mailbox)', jsonb_build_object('mailbox', %s::text))"
+        args.append(mailbox)
+    if service:
+        sql += " AND (fields->'services_availed'->'value' ? %s OR fields->'services'->'value' ? %s)"
+        args.extend([service, service])
+    if domain:
+        sql += " AND lower(split_part(email_key,'@',2)) = %s"
+        args.append(domain.lstrip('@').lower())
+    for key, enabled in (("phones", has_phone), ("amounts", has_amount)):
+        if enabled == "true":
+            sql += f" AND jsonb_typeof(fields->'{key}'->'value')='array' AND fields->'{key}'->'value' <> '[]'::jsonb"
+    for key, value, operator in (("date_from", date_from, ">="), ("date_to", date_to, "<=")):
+        if value:
+            try:
+                if date.fromisoformat(value).isoformat() != value:
+                    raise ValueError()
+            except ValueError:
+                raise HTTPException(400, f"{key} must be YYYY-MM-DD") from None
+            sql += f" AND left(fields->'last_contact'->>'value',10) {operator} %s"
+            args.append(value)
     with db.connect() as conn:
         response.headers["X-Total-Count"] = str(conn.execute("SELECT count(*) AS n" + sql, args).fetchone()["n"])
         return conn.execute(
@@ -555,6 +579,23 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
             " 'sheets',coalesce(i.sheets,0)) AS item_sources,"
             " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
             + order_by, [*args, size, (page - 1) * size]).fetchall()
+
+
+@app.get("/api/candidates/facets", dependencies=[Depends(auth.require_route("review"))])
+def candidate_facets(state: str = "pending"):
+    with db.connect() as conn:
+        rows = conn.execute(
+            "WITH selected AS (SELECT fields FROM candidates WHERE review_state=%s),"
+            " facets AS (SELECT 'departments' AS kind, fields->'department'->>'value' AS value FROM selected"
+            " UNION ALL SELECT 'mailboxes', value #>> '{}' FROM selected,"
+            " LATERAL jsonb_path_query(fields, '$.handlers.value[*].mailbox') AS value"
+            " UNION ALL SELECT 'services', value #>> '{}' FROM selected,"
+            " LATERAL jsonb_path_query(fields, '$.services_availed.value[*]') AS value"
+            " UNION ALL SELECT 'services', value #>> '{}' FROM selected,"
+            " LATERAL jsonb_path_query(fields, '$.services.value[*]') AS value)"
+            " SELECT DISTINCT kind,value FROM facets WHERE btrim(value) <> '' ORDER BY kind,value", (state,)).fetchall()
+    return {kind: [row['value'] for row in rows if row['kind'] == kind]
+            for kind in ("departments", "mailboxes", "services")}
 
 
 def _get(conn, cid: int, lock: bool = False) -> dict:
@@ -637,24 +678,28 @@ class ClientIn(BaseModel):
 def approve(cid: int, c: ClientIn):
     with db.connect() as conn:
         cand = _get(conn, cid, lock=True)
-        if cand["review_state"] == "merged":
-            raise HTTPException(409, "reopen the merged record before approving it")
-        values = c.model_dump(mode="json")
-        for name in ("payments", "services_availed", "handlers"):
-            if name not in c.model_fields_set:
-                values[name] = (cand["fields"].get(name) or {}).get("value", [])
-        try:
-            reviewed = ClientIn.model_validate(values)
-        except ValidationError as exc:
-            raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
-        values = reviewed.model_dump(mode="json")
-        since = min((p.date for p in reviewed.payments if p.date), default=None)
-        values["client_since"] = since.isoformat() if since else None
-        conn.execute(
-            "UPDATE candidates SET review_state='approved', reviewed=%s, reviewed_by=%s,"
-            " reviewed_at=clock_timestamp(), updated_at=now() WHERE id=%s",
-            (Jsonb(values), getuser(), cid))
+        _approve(conn, cand, c)
     return {"ok": True}
+
+
+def _approve(conn, cand: dict, c: ClientIn):
+    if cand["review_state"] == "merged":
+        raise HTTPException(409, "reopen the merged record before approving it")
+    values = c.model_dump(mode="json")
+    for name in ("payments", "services_availed", "handlers"):
+        if name not in c.model_fields_set:
+            values[name] = (cand["fields"].get(name) or {}).get("value", [])
+    try:
+        reviewed = ClientIn.model_validate(values)
+    except ValidationError as exc:
+        raise HTTPException(422, detail=exc.errors(include_context=False)) from exc
+    values = reviewed.model_dump(mode="json")
+    since = min((p.date for p in reviewed.payments if p.date), default=None)
+    values["client_since"] = since.isoformat() if since else None
+    conn.execute(
+        "UPDATE candidates SET review_state='approved', reviewed=%s, reviewed_by=%s,"
+        " reviewed_at=clock_timestamp(), updated_at=now() WHERE id=%s",
+        (Jsonb(values), getuser(), cand["id"]))
 
 
 @app.post("/api/publish", dependencies=[Depends(auth.require_route("review"))])
@@ -701,8 +746,64 @@ def publish():
 def reject(cid: int):
     with db.connect() as conn:
         _get(conn, cid)
-        conn.execute("UPDATE candidates SET review_state='rejected', updated_at=now() WHERE id=%s", (cid,))
+        _reject(conn, cid)
     return {"ok": True}
+
+
+def _reject(conn, cid: int):
+    conn.execute("UPDATE candidates SET review_state='rejected', updated_at=now() WHERE id=%s", (cid,))
+
+
+class BulkIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+    action: Literal["approve", "reject"]
+
+    @field_validator("ids")
+    @classmethod
+    def unique_ids(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("ids must be unique")
+        return value
+
+
+def _extracted_client(fields: dict) -> ClientIn:
+    values = {key: (fields.get(key) or {}).get("value") for key in ClientIn.model_fields}
+    for key in ("name", "company", "department"):
+        values[key] = (values[key] or "").strip() or None
+    for key in ("emails", "phones", "services", "services_availed"):
+        values[key] = [part.strip() for part in ", ".join(values[key] or []).split(",") if part.strip()]
+    for key in ("amounts", "handlers", "payments"):
+        values[key] = values[key] or []
+    values["payments"] = [dict(
+        date=p.get("date") or None, amount=p.get("amount"),
+        currency=(p.get("currency") or "").strip().upper() or None,
+        basis="unknown" if p.get("amount") is None else
+              "manual" if p.get("basis", "manual") == "unknown" else p.get("basis", "manual"),
+        raw_item_id=p.get("raw_item_id")) for p in values["payments"]]
+    values.update(stage=values["stage"] or "inquiry", status=values["status"] or "inquiry",
+                  engagement_paid=bool(values["engagement_paid"]), notes=None)
+    return ClientIn.model_validate(values)
+
+
+@app.post("/api/candidates/bulk", dependencies=[Depends(auth.require_route("review"))])
+def bulk_candidates(body: BulkIn):
+    done, failed = [], []
+    for cid in body.ids:
+        try:
+            with db.connect() as conn:
+                cand = _get(conn, cid, lock=True)
+                if cand["review_state"] != "pending":
+                    raise HTTPException(409, "only pending records can be bulk reviewed")
+                if body.action == "approve":
+                    _approve(conn, cand, _extracted_client(cand["fields"]))
+                else:
+                    _reject(conn, cid)
+            done.append(cid)
+        except (HTTPException, ValidationError, PostgresError) as exc:
+            error = str(exc.detail) if isinstance(exc, HTTPException) else (
+                str(exc) if isinstance(exc, ValidationError) else "database operation failed")
+            failed.append({"id": cid, "error": error})
+    return {"done": done, "failed": failed}
 
 
 def _previous_target(conn, cand: dict) -> set[str]:
