@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, CheckCircle2, ChevronRight, FileSpreadsheet, Mail } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, CheckCircle2, ChevronRight, FileSpreadsheet, Loader2, Mail } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import {
@@ -16,7 +16,7 @@ import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
 import { PhoneNumber } from "./phone";
-import { Skeleton, LoadingLabel } from "@/components/ui/skeleton";
+import { Skeleton } from "@/components/ui/skeleton";
 
 const DASH = <span className="text-muted-foreground">—</span>;
 // The pinned Client cell needs an opaque background, or scrolled cells show through it.
@@ -55,7 +55,10 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
       </TableHead>
     );
   };
-  const { data, error, isPending, isFetching, isPlaceholderData } = useQuery(candidatesQuery(filters));
+  const { data, error, isPending, isPlaceholderData } = useQuery(candidatesQuery(filters));
+  // A new page or filter is loading over the previous result: show skeletons, not the old rows (they looked frozen).
+  // Same-page background refreshes are not placeholder data, so they never flash.
+  const turning = isPlaceholderData;
   const rows = data?.rows;
   const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
   const from = (filters.page - 1) * PAGE_SIZE;
@@ -77,6 +80,10 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         </div>
         {toolbar}
       </div>
+      {/* One persistent live region outside the busy table body, so the announcement is never held back by aria-busy. */}
+      <span role="status" className="sr-only">
+        {error ? "" : turning ? `Loading page ${filters.page.toLocaleString()}…` : isPending ? "Loading records…" : ""}
+      </span>
       <Table ref={tableRef} className="min-w-[1120px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
@@ -92,11 +99,11 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
               <TableHead className="w-8 pr-4"><span className="sr-only">Open</span></TableHead>
             </TableRow>
           </TableHeader>
-          <TableBody className={cn("transition-opacity [&_td]:px-3 [&_td]:py-2.5", isFetching && isPlaceholderData && "opacity-60")}>
+          <TableBody aria-busy={isPending || turning} className="[&_td]:px-3 [&_td]:py-2.5">
             {error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
-            {isPending && !error && <SkeletonRows />}
-            {rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
-            {rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
+            {(isPending || turning) && !error && <SkeletonRows />}
+            {!turning && rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
+            {!turning && rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
           </TableBody>
       </Table>
       {data && data.total > PAGE_SIZE && (
@@ -104,6 +111,7 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
           <p className="text-sm text-muted-foreground tabular-nums" aria-live="polite">
             Showing <span className="font-medium text-foreground">{(from + 1).toLocaleString()}–{Math.min(from + PAGE_SIZE, data.total).toLocaleString()}</span> of{" "}
             <span className="font-medium text-foreground">{data.total.toLocaleString()}</span> records
+            <span className="hidden sm:inline"> · Page {filters.page.toLocaleString()} of {pages.toLocaleString()}</span>
           </p>
           <Pagination aria-label="Records pages" className="mx-0 w-auto justify-end">
             <PaginationContent>
@@ -113,7 +121,10 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
               {pageList(filters.page, pages).map((p, i) => (
                 <PaginationItem key={p === "…" ? `gap${i}` : p}>
                   {p === "…" ? <PaginationEllipsis /> : (
-                    <PaginationLink isActive={p === filters.page} className="tabular-nums" {...pageLink(p, false)}>{p.toLocaleString()}</PaginationLink>
+                    <PaginationLink isActive={p === filters.page} className="tabular-nums" {...pageLink(p, false)}>
+                      {turning && p === filters.page ? <Loader2 aria-hidden className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" /> : p.toLocaleString()}
+                      {turning && p === filters.page && <span className="sr-only">{`Page ${p.toLocaleString()}, loading`}</span>}
+                    </PaginationLink>
                   )}
                 </PaginationItem>
               ))}
@@ -246,7 +257,6 @@ function SkeletonRows() {
       {Array.from({ length: 8 }, (_, i) => (
         <TableRow key={i} className="hover:bg-transparent">
           <TableCell className="sticky left-0 bg-card pl-4">
-            {i === 0 && <LoadingLabel>Loading records…</LoadingLabel>}
             <Skeleton className="h-4 w-40" /><Skeleton className="mt-1.5 h-3 w-52" />
           </TableCell>
           <TableCell><Skeleton className="h-4 w-32" /></TableCell>
