@@ -58,13 +58,19 @@ export const post = <T = { ok: boolean }>(path: string, body?: unknown) =>
 export type SortKey = "last_contact" | "first_contact";
 export type Filters = {
   state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc"; page: number;
+  mailbox: string; service: string; domain: string; has_phone: string; has_amount: string; date_from: string; date_to: string;
 };
+/** Filter keys kept in the URL; empty means "no filter" (the API ignores empty values). */
+export const FILTER_KEYS = ["stage", "status", "department", "mailbox", "service", "domain", "has_phone", "has_amount", "date_from", "date_to", "q"] as const;
+export type Facets = { departments: string[]; mailboxes: string[]; services: string[] };
+export type BulkResult = { done: number[]; failed: { id: number; error: string }[] };
 export const PAGE_SIZE = 50;
 
 export const keys = {
   status: ["status"] as const,
   candidates: (f: Filters) => ["candidates", f] as const,
   candidate: (id: number) => ["candidate", id] as const,
+  facets: (state: string) => ["facets", state] as const,
   board: ["board"] as const,
   log: (jobId: number | null, mailbox: string) => ["log", jobId, mailbox] as const,
   raw: (id: number) => ["raw", id] as const,
@@ -101,6 +107,12 @@ export const logQuery = (jobId: number | null, mailbox: string, running: boolean
   enabled: jobId != null,
   refetchInterval: running ? 2000 : false,
   placeholderData: (prev) => prev,
+});
+
+export const facetsQuery = (state: string) => queryOptions({
+  queryKey: keys.facets(state),
+  queryFn: () => request<Facets>("/api/candidates/facets?" + new URLSearchParams({ state })),
+  staleTime: 60_000,
 });
 
 export const candidateQuery = (id: number) => queryOptions({

@@ -1,20 +1,24 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, CheckCircle2, ChevronRight, FileSpreadsheet, Loader2, Mail } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, CheckCircle2, ChevronRight, FileSpreadsheet, Loader2, Mail, X } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card } from "@/components/ui/card";
 import {
   Pagination, PaginationContent, PaginationEllipsis, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious,
 } from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { candidatesQuery, PAGE_SIZE, type Filters, type SortKey } from "@/lib/api";
+import { candidatesQuery, keys, PAGE_SIZE, post, type BulkResult, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
+import { ConfirmDialog } from "./confirm-dialog";
 import { PhoneNumber } from "./phone";
 import { Skeleton, LoadingLabel } from "@/components/ui/skeleton";
 
@@ -26,6 +30,20 @@ const SOURCES = [
   { key: "contacts", label: "contacts", icon: BookUser },
   { key: "sheets", label: "sheet rows", icon: FileSpreadsheet },
 ] as const;
+
+const EMPTY = new Set<number>();
+// Each id is its own transaction on the server; small chunks keep every request short.
+const CHUNK = 50;
+
+/** Sends ids to the bulk endpoint in chunks and merges the results. */
+async function bulk(ids: number[], action: "approve" | "reject"): Promise<BulkResult> {
+  const out: BulkResult = { done: [], failed: [] };
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const r = await post<BulkResult>("/api/candidates/bulk", { ids: ids.slice(i, i + CHUNK), action });
+    out.done.push(...r.done); out.failed.push(...r.failed);
+  }
+  return out;
+}
 
 /** Page numbers to show: first, last, and the current page with one neighbour each side; gaps become "…". */
 export function pageList(page: number, pages: number): (number | "…")[] {
@@ -61,6 +79,43 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
   const turning = isPlaceholderData;
   const rows = data?.rows;
   const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
+
+  // Ticked records (pending tab only). Any filter, sort, page or tab change starts a fresh selection.
+  const selectable = filters.state === "pending";
+  const selKey = JSON.stringify(filters);
+  const [sel, setSel] = useState<{ key: string; ids: Set<number>; failed: BulkResult["failed"] }>({ key: selKey, ids: EMPTY, failed: [] });
+  if (sel.key !== selKey) setSel({ key: selKey, ids: EMPTY, failed: [] }); // drop it for good, so going back doesn't restore it
+  const ticked = sel.key === selKey ? sel.ids : EMPTY;
+  const failed = sel.key === selKey ? sel.failed : [];
+  const setTicked = (ids: Set<number>) => setSel({ key: selKey, ids, failed });
+  const pageIds = turning ? [] : rows?.map((r) => r.id) ?? [];
+  const tickedHere = pageIds.filter((id) => ticked.has(id)).length;
+  const tick = (id: number, on: boolean) => {
+    const next = new Set(ticked);
+    if (on) next.add(id); else next.delete(id);
+    setTicked(next);
+  };
+  const qc = useQueryClient();
+  const [ask, setAsk] = useState<"approve" | "reject" | null>(null);
+  const act = useMutation({
+    mutationFn: (action: "approve" | "reject") => bulk([...ticked], action),
+    onSuccess: (r, action) => {
+      const verb = action === "approve" ? "Approved" : "Rejected";
+      if (r.done.length) toast.success(`${verb} ${r.done.length.toLocaleString()} record${r.done.length === 1 ? "" : "s"}.`);
+      if (r.failed.length) {
+        toast.error(`${r.failed.length.toLocaleString()} could not be ${action === "approve" ? "approved" : "rejected"}.`,
+          { description: "They stay ticked; every reason is listed above the table." });
+      }
+      // Done records leave the list; failed ones stay ticked with their reasons so nothing gets lost.
+      setSel({ key: selKey, ids: new Set(r.failed.map((f) => f.id)), failed: r.failed });
+    },
+    onError: (e: Error) => toast.error(e.message),
+    onSettled: () => {
+      setAsk(null);
+      qc.invalidateQueries({ queryKey: ["candidates"] });
+      qc.invalidateQueries({ queryKey: keys.status });
+    },
+  });
   const from = (filters.page - 1) * PAGE_SIZE;
   // Real links (middle-click opens a new tab); a plain click pages in place without a reload.
   const pageLink = (p: number, disabled: boolean) => disabled
@@ -80,10 +135,53 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         </div>
         {toolbar}
       </div>
+      {selectable && ticked.size > 0 && (
+        <div role="region" aria-label="Selected records" className="flex flex-wrap items-center gap-2 border-b border-primary/30 bg-primary/10 px-4 py-2">
+          <span className="text-sm font-medium tabular-nums" aria-live="polite">{ticked.size.toLocaleString()} selected</span>
+          <Button size="sm" disabled={act.isPending} onClick={() => setAsk("approve")}>
+            <CheckCircle2 className="h-4 w-4 shrink-0" /> Approve selected
+          </Button>
+          <Button size="sm" variant="destructive" disabled={act.isPending} onClick={() => setAsk("reject")}>Reject selected</Button>
+          <Button size="sm" variant="ghost" disabled={act.isPending} onClick={() => setTicked(EMPTY)} className="ml-auto">
+            <X className="h-4 w-4 shrink-0" /> Clear selection
+          </Button>
+        </div>
+      )}
+      {failed.length > 0 && (
+        <div role="alert" className="flex flex-col gap-1.5 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm">
+          <div className="flex items-center gap-2">
+            <strong className="font-medium">{failed.length.toLocaleString()} record{failed.length === 1 ? "" : "s"} could not be updated</strong>
+            <Button size="sm" variant="ghost" className="ml-auto h-7" onClick={() => setSel({ key: selKey, ids: ticked, failed: [] })}>
+              <X className="h-3.5 w-3.5 shrink-0" /> Dismiss
+            </Button>
+          </div>
+          <ul className="max-h-40 overflow-y-auto text-xs">
+            {failed.map((f) => <li key={f.id}><span className="font-medium tabular-nums">#{f.id}</span>: {f.error}</li>)}
+          </ul>
+        </div>
+      )}
+      <ConfirmDialog open={!!ask} onOpenChange={(o) => !o && !act.isPending && setAsk(null)} pending={act.isPending}
+        title={`${ask === "reject" ? "Reject" : "Approve"} ${ticked.size.toLocaleString()} record${ticked.size === 1 ? "" : "s"}?`}
+        description={ask === "reject" ? "They move to Rejected. You can move any of them back to pending later."
+          : "Each record is approved with its scraped details as they are and stays in staging until you publish. Records that fail validation are skipped and listed."}
+        confirmLabel={ask === "reject" ? "Reject" : "Approve"} onConfirm={() => ask && act.mutate(ask)} />
       <Table ref={tableRef} className="min-w-[1120px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
-              <TableHead className="sticky left-0 z-10 w-72 bg-muted pl-4">Client</TableHead>
+              <TableHead className="sticky left-0 z-10 w-72 bg-muted pl-4">
+                <span className="flex items-center gap-3">
+                  {selectable && (
+                    <Checkbox aria-label="Select all records on this page" disabled={!pageIds.length}
+                      checked={pageIds.length > 0 && tickedHere === pageIds.length} indeterminate={tickedHere > 0 && tickedHere < pageIds.length}
+                      onCheckedChange={(on) => {
+                        const next = new Set(ticked);
+                        for (const id of pageIds) if (on) next.add(id); else next.delete(id);
+                        setTicked(next);
+                      }} />
+                  )}
+                  Client
+                </span>
+              </TableHead>
               <TableHead className="w-48">Phone</TableHead>
               <TableHead className="w-72">Services</TableHead>
               <TableHead className="w-28">Stage</TableHead>
@@ -99,7 +197,8 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
             {error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
             {(isPending || turning) && !error && <SkeletonRows label={turning ? `Loading page ${filters.page.toLocaleString()}…` : "Loading records…"} />}
             {!turning && rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
-            {!turning && rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
+            {!turning && rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect}
+              ticked={selectable ? ticked.has(r.id) : null} onTick={tick} />)}
           </TableBody>
       </Table>
       {data && data.total > PAGE_SIZE && (
@@ -162,7 +261,10 @@ function TipBadge({ variant = "outline", label, tip, className, children }: {
   );
 }
 
-function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; onSelect: (id: number) => void }) {
+function Row({ r, selected, onSelect, ticked, onTick }: {
+  r: CandidateRow; selected: boolean; onSelect: (id: number) => void; ticked: boolean | null; onTick: (id: number, on: boolean) => void;
+}) {
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
   const more = r.services.slice(2);
   const confirmed = r.review_state === "approved";
   return (
@@ -171,6 +273,12 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
       className={cn("group cursor-pointer border-border/50 align-top hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
         selected && "bg-accent hover:bg-accent")}>
       <TableCell className={cn(PINNED, "max-w-72 pl-4", confirmed && "shadow-[inset_3px_0_0_var(--success)]")}>
+        <div className="flex min-w-0 items-start gap-3">
+        {ticked !== null && (
+          <span onClick={stop} onKeyDown={stop} className="pt-0.5">
+            <Checkbox aria-label={`Select ${r.name || r.email_key}`} checked={ticked} onCheckedChange={(on) => onTick(r.id, on)} />
+          </span>
+        )}
         <div className="flex min-w-0 flex-col">
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="truncate font-medium" title={r.name || undefined}>{r.name || "Unnamed"}</span>
@@ -182,6 +290,7 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
           </span>
           <span className="truncate text-xs text-muted-foreground" title={r.email_key}>{r.email_key}</span>
           {r.company && <span className="truncate text-xs text-muted-foreground" title={r.company}>{r.company}</span>}
+        </div>
         </div>
       </TableCell>
       <TableCell className="text-sm">

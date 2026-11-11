@@ -768,12 +768,18 @@ class BulkIn(BaseModel):
 
 def _extracted_client(fields: dict) -> ClientIn:
     values = {key: (fields.get(key) or {}).get("value") for key in ClientIn.model_fields}
+    for keys, item_type in ((("emails", "phones", "services", "services_availed"), str),
+                            (("amounts", "handlers", "payments"), dict)):
+        for key in keys:
+            value = values[key]
+            if value is not None and (not isinstance(value, list) or
+                                      any(not isinstance(item, item_type) for item in value)):
+                raise HTTPException(422, "invalid extracted field shapes")
+            values[key] = value if value is not None else []
     for key in ("name", "company", "department"):
         values[key] = (values[key] or "").strip() or None
     for key in ("emails", "phones", "services", "services_availed"):
-        values[key] = [part.strip() for part in ", ".join(values[key] or []).split(",") if part.strip()]
-    for key in ("amounts", "handlers", "payments"):
-        values[key] = values[key] or []
+        values[key] = [part.strip() for part in ", ".join(values[key]).split(",") if part.strip()]
     values["payments"] = [dict(
         date=p.get("date") or None, amount=p.get("amount"),
         currency=(p.get("currency") or "").strip().upper() or None,
@@ -795,7 +801,11 @@ def bulk_candidates(body: BulkIn):
                 if cand["review_state"] != "pending":
                     raise HTTPException(409, "only pending records can be bulk reviewed")
                 if body.action == "approve":
-                    _approve(conn, cand, _extracted_client(cand["fields"]))
+                    try:
+                        client = _extracted_client(cand["fields"])
+                    except (TypeError, AttributeError) as exc:
+                        raise HTTPException(422, "invalid extracted field shapes") from exc
+                    _approve(conn, cand, client)
                 else:
                     _reject(conn, cid)
             done.append(cid)

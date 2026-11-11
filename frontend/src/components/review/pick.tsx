@@ -17,8 +17,9 @@ export function Pick({ value, onChange, options, label, id, className }: {
         <SelectValue />
       </SelectTrigger>
       {/* Open below the trigger, not over it, so neighbouring filters stay visible. */}
-      <SelectContent alignItemWithTrigger={false} align="start">
-        {items.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+      {/* Size the list to its options (at least the trigger, at most ~30rem) so long values stay readable; longer ones wrap. */}
+      <SelectContent alignItemWithTrigger={false} align="start" className="w-max min-w-(--anchor-width) max-w-[min(30rem,calc(100vw-2rem))]">
+        {items.map((o) => <SelectItem key={o.value} value={o.value} className="*:break-words *:whitespace-normal">{o.label}</SelectItem>)}
       </SelectContent>
     </Select>
   );

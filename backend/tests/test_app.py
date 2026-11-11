@@ -509,6 +509,29 @@ def test_bulk_mixed_batch_failures_do_not_stop_later_records(conn):
     assert conn.execute("SELECT count(*) AS n FROM clients").fetchone()["n"] == 0
 
 
+@pytest.mark.parametrize("malformed", [
+    {"emails": [123]}, {"payments": [None]}, {"name": 123},
+    {"payments": [{"amount": 10, "currency": 123}]},
+    {"emails": False},
+] + [{key: value} for key in ("emails", "phones", "services", "services_availed", "amounts", "handlers", "payments")
+     for value in ("alice@example.test", {})])
+def test_bulk_malformed_extracted_values_fail_only_that_record(conn, malformed):
+    first = insert_review_candidate(conn, "first@test")
+    invalid = insert_review_candidate(conn, "invalid@test", malformed)
+    last = insert_review_candidate(conn, "last@test")
+    conn.commit()
+    response = local.post("/api/candidates/bulk", headers=GUI,
+                          json={"ids": [first, invalid, last], "action": "approve"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["done"] == [first, last]
+    assert result["failed"] == [{"id": invalid, "error": "invalid extracted field shapes"}]
+    for cid, state in ((first, "approved"), (invalid, "pending"), (last, "approved")):
+        row = local.get(f"/api/candidates/{cid}").json()
+        assert row["review_state"] == state
+        assert (row["reviewed"] is None) == (cid == invalid)
+
+
 def test_bulk_reject_matches_single_and_requires_gui_header(conn):
     a = insert_review_candidate(conn, "a@test")
     b = insert_review_candidate(conn, "b@test")
