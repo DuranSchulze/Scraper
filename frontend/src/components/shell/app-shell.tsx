@@ -12,18 +12,19 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
-import { announceSessionChange, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
+import { announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
 import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-// Nav stays plain data, grouped like modern app shells; admin-only groups are hidden for members (pages and the API check again).
+// Nav stays plain data, grouped like modern app shells. Items with a `route` need that page grant; admin-only groups
+// are hidden for members (pages and the API check again).
 const NAV = [
   { label: "Workspace", admin: false, items: [
-    { href: "/", label: "Review", icon: ListChecks },
-    { href: "/scraping", label: "Scraping", icon: ScanSearch },
+    { href: "/", label: "Review", icon: ListChecks, route: "review" },
+    { href: "/scraping", label: "Scraping", icon: ScanSearch, route: "scraping" },
   ] },
   { label: "Admin", admin: true, items: [
-    { href: "/accounts", label: "Accounts", icon: Users },
+    { href: "/accounts", label: "Accounts", icon: Users, route: null },
   ] },
 ] as const;
 
@@ -93,7 +94,10 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
   const { data: me } = useQuery(meQuery);
   const { data: status } = useQuery(statusQuery);
   const pending = status?.candidates.pending;
-  const groups = NAV.filter((g) => !g.admin || me?.role === "admin");
+  // Until the account loads nothing is listed, so a page the member can't use never flashes in.
+  const groups = NAV.filter((g) => !g.admin || me?.role === "admin")
+    .map((g) => ({ ...g, items: g.items.filter((i) => (i.route ? canUse(me, i.route) : !!me)) }))
+    .filter((g) => g.items.length);
   const name = me?.name ?? "Account";
   const logo = (
     <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">

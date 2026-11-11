@@ -6,9 +6,9 @@ import { Pause, Play, Square, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { boardQuery, keys, post, statusQuery } from "@/lib/api";
+import { boardQuery, canUse, keys, meQuery, post, statusQuery } from "@/lib/api";
 import { stamp } from "@/lib/format";
-import type { Status } from "@/lib/types";
+import type { RouteKey, Status, User } from "@/lib/types";
 import { Pill } from "@/components/review/badges";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 
@@ -26,8 +26,12 @@ const JOB_STATE = {
 export function StatusBar({ leading }: { leading?: React.ReactNode }) {
   const qc = useQueryClient();
   const { data: s, error } = useQuery(statusQuery);
+  const { data: me } = useQuery(meQuery);
+  // Scrape controls/progress need the Scraping page, Publish needs Review; unknown grants show (and fetch) neither.
+  const canScrape = canUse(me, "scraping");
+  const canReview = canUse(me, "review");
   const running = !!s?.running;
-  const { data: board } = useQuery(boardQuery(running));
+  const { data: board } = useQuery({ ...boardQuery(running), enabled: canScrape });
   const [confirm, setConfirm] = useState<null | "stop" | "publish">(null);
 
   // Records, the board and the log change while a job runs; refresh them on each poll and once when it ends.
@@ -35,8 +39,13 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
     qc.invalidateQueries({ queryKey: ["candidates"] });
     qc.invalidateQueries({ queryKey: keys.board });
     qc.invalidateQueries({ queryKey: ["log"] });
-  }, [running, s?.job_status, s?.log.length, qc]);
+  }, [running, s?.job_status, s?.log?.length, qc]);
 
+  // Drop a pending confirmation whose page grant was just revoked, so it can't reopen later (adjusting state while rendering).
+  if ((confirm === "stop" && !canScrape) || (confirm === "publish" && !canReview)) setConfirm(null);
+
+  // Confirm handlers check the freshest grants in the cache, not this render's (a revoke may not have painted yet).
+  const allowedNow = (route: RouteKey) => canUse(qc.getQueryData<User>(keys.me), route);
   const refresh = () => qc.invalidateQueries({ queryKey: keys.status });
   const fail = (e: Error) => toast.error(e.message);
   const jobId = s?.job_id ?? null;
@@ -64,7 +73,7 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
   const counts = board?.counts;
   const total = board ? board.items.length : 0;
   const finished = counts ? counts.done + counts.skipped : 0;
-  const note = s?.job_control === "stop" ? "Stopping after the current batch is saved…"
+  const note = !canScrape ? null : s?.job_control === "stop" ? "Stopping after the current batch is saved…"
     : s?.job_control === "pause" && s.job_status === "running" ? "Pausing after the current batch is saved…"
     : s?.job_status === "paused" && !s.job_control ? "Continuing…"
     : s?.job_status === "interrupted" ? "The server stopped while this job ran. Resume continues it; fetched mail is skipped."
@@ -81,7 +90,7 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
             : <span className="text-muted-foreground">No job has run yet</span>}
           {state && <Pill tone={state.tone}>{state.label}{s?.job_failures ? ` · ${s.job_failures} failure(s)` : ""}</Pill>}
           {s?.job_started_at && <span className="text-xs text-muted-foreground tabular-nums">started {stamp(s.job_started_at)}</span>}
-          {jobId && <JobControls status={s!.job_status} control={s!.job_control} busy={control.isPending || resume.isPending}
+          {jobId && canScrape && <JobControls status={s!.job_status} control={s!.job_control} busy={control.isPending || resume.isPending}
             resuming={resume.isPending}
             onPause={() => control.mutate({ id: jobId, action: "pause" })}
             onContinue={() => control.mutate({ id: jobId, action: "continue" })}
@@ -89,7 +98,7 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
             onResume={() => resume.mutate(jobId)} />}
         </div>
 
-        {total > 0 && (
+        {canScrape && total > 0 && (
           <div className="flex min-w-[12rem] flex-1 items-center gap-2 sm:max-w-xs" title="Mailboxes finished in the latest scrape">
             <Progress value={(finished / total) * 100} aria-label="Mailboxes finished" className="flex-1" />
             <span className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">
@@ -98,27 +107,30 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
           </div>
         )}
 
-        <Button size="sm" className="ml-auto" disabled={!ready || publish.isPending} onClick={() => setConfirm("publish")}>
-          <Upload className="h-4 w-4 shrink-0" /> Publish {ready} approved
-        </Button>
+        {canReview && (
+          <Button size="sm" className="ml-auto" disabled={!ready || publish.isPending} onClick={() => setConfirm("publish")}>
+            <Upload className="h-4 w-4 shrink-0" /> Publish {ready} approved
+          </Button>
+        )}
       </div>
 
-      {(note || error || !!s?.extract_failed) && (
+      {(note || error || (canScrape && !!s?.extract_failed)) && (
         <div className="flex flex-col gap-1 border-t px-4 py-2 text-xs lg:px-6">
           {error && <p role="alert" className="text-destructive">{error.message} Retrying every few seconds…</p>}
           {note && <p role="status" className={s?.job_status === "failed" ? "break-words text-destructive" : "text-muted-foreground"}>{note}</p>}
-          {!!s?.extract_failed && <p className="font-medium text-warning">{s.extract_failed} item(s) failed extraction and will be retried on the next run.</p>}
+          {canScrape && !!s?.extract_failed && <p className="font-medium text-warning">{s.extract_failed} item(s) failed extraction and will be retried on the next run.</p>}
         </div>
       )}
 
-      <ConfirmDialog open={confirm === "stop"} onOpenChange={(o) => !o && setConfirm(null)}
+      {/* Each dialog is tied to its grant too: a revoked page closes it and its confirm does nothing. */}
+      <ConfirmDialog open={confirm === "stop" && canScrape} onOpenChange={(o) => !o && setConfirm(null)}
         title={`Stop the ${s?.job || "job"}?`} confirmLabel="Stop" pending={control.isPending}
         description="It stops after the current batch is saved. Everything saved so far is kept, and Resume continues from where it stopped."
-        onConfirm={() => jobId && control.mutate({ id: jobId, action: "stop" })} />
-      <ConfirmDialog open={confirm === "publish"} onOpenChange={(o) => !o && setConfirm(null)}
+        onConfirm={() => allowedNow("scraping") && jobId && control.mutate({ id: jobId, action: "stop" })} />
+      <ConfirmDialog open={confirm === "publish" && canReview} onOpenChange={(o) => !o && setConfirm(null)}
         title="Publish to the official table?" confirmLabel={`Publish ${ready}`} pending={publish.isPending}
         description={`Copies ${ready} approved record(s) from staging to the official clients table.`}
-        onConfirm={() => publish.mutate()} />
+        onConfirm={() => allowedNow("review") && publish.mutate()} />
     </header>
   );
 }

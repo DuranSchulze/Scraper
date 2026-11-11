@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import type { Account, Candidate, CandidateRow, MailboxBoard, RawItem, Status, User } from "./types";
+import { ROUTES, type Account, type Candidate, type CandidateRow, type MailboxBoard, type RawItem, type RouteKey, type Status, type User } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public retryAfter: number | null = null) {
@@ -118,8 +118,18 @@ export const meQuery = queryOptions({
   queryKey: keys.me,
   queryFn: () => request<User>("/api/auth/me"),
   staleTime: 60_000,
+  // Page grants can change while signed in; re-read them whenever the tab regains focus.
+  refetchOnWindowFocus: "always",
   retry: false,
 });
+
+/** Where each grantable page lives; the first granted one (ROUTES order) is a member's home. */
+export const ROUTE_PATH: Record<RouteKey, string> = { review: "/", scraping: "/scraping" };
+export const canUse = (me: User | undefined, route: RouteKey) => !!me && (me.role === "admin" || me.routes.includes(route));
+export const homeFor = (me: User) => ROUTE_PATH[ROUTES.find((r) => canUse(me, r)) ?? "review"];
+
+export const updateRoutes = (id: number, routes: RouteKey[]) =>
+  request<Account>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify({ routes }) });
 
 export const usersQuery = queryOptions({
   queryKey: keys.users,

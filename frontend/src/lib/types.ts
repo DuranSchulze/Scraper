@@ -12,8 +12,9 @@ export type JobStatus = "running" | "paused" | "done" | "done_with_errors" | "fa
 export type Status = {
   running: boolean;
   job: string;
-  error: string | null;
-  log: string[];
+  /** Omitted for members without the Scraping page (scrape details are restricted). */
+  error?: string | null;
+  log?: string[];
   candidates: Partial<Record<ReviewState, number>>;
   raw_items: Partial<Record<"gmail" | "contacts" | "sheets", number>>;
   ready_to_publish: number;
@@ -22,7 +23,7 @@ export type Status = {
   job_status: JobStatus | null;
   /** A pause/stop request the job has not reacted to yet (it acts after the current batch). */
   job_control: "pause" | "stop" | null;
-  job_params: Record<string, unknown>;
+  job_params?: Record<string, unknown>;
   job_failures: number;
   job_started_at: string | null;
   job_finished_at: string | null;
@@ -114,5 +115,9 @@ export type RawItem = {
 };
 
 export type Role = "admin" | "member";
-export type User = { id: number; email: string; name: string; role: Role };
+/** Pages a member can be granted, in the API's canonical order (admins always have every one). */
+export const ROUTES = ["review", "scraping"] as const;
+export type RouteKey = (typeof ROUTES)[number];
+/** `routes` are effective on /auth/me (admins: all) and stored on account rows. */
+export type User = { id: number; email: string; name: string; role: Role; routes: RouteKey[] };
 export type Account = User & { active: boolean; created_at: string };
