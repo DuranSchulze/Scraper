@@ -139,7 +139,7 @@ html[data-theme="light"] {
   --info: #1f55b8;
 }
 
-/* Theme switching is tweened with GSAP in lib/theme.ts (custom properties on <html>); no CSS transition is used. */
+/* Theme switching flips <html data-theme> instantly (lib/theme.ts); no page-wide transition, so it never lags. */
 
 .dark {
   --background: oklch(0.145 0 0);
@@ -187,13 +187,15 @@ html[data-theme="light"] {
   }
 }
 /* Sidebar collapse is driven by <html data-sidebar>, set by an inline script before paint, so a reload never flashes.
-   Desktop only: the mobile drawer is always expanded. Transitions start after the first frame (data-sidebar-ready). */
-.sb-aside { width: 16rem; }
+   Desktop only: the mobile drawer is always expanded. Transitions start after the first frame (data-sidebar-ready).
+   The spacer holds the page's room and snaps; only the fixed, contained sidebar animates, so the page is laid out once per toggle. */
+.sb-aside, .sb-spacer { width: 16rem; }
+.sb-aside { contain: strict; }
 .sb-label { opacity: 1; }
-html[data-sidebar-ready] .sb-aside { transition: width 0.2s ease; }
+html[data-sidebar-ready] .sb-aside { transition: width 0.2s cubic-bezier(0.2, 0, 0, 1); }
 html[data-sidebar-ready] .sb-label { transition: opacity 0.15s ease 0.05s; }
 @media (min-width: 1024px) {
-  html[data-sidebar="collapsed"] .sb-aside { width: 4rem; }
+  html[data-sidebar="collapsed"] .sb-aside, html[data-sidebar="collapsed"] .sb-spacer { width: 4rem; }
   html[data-sidebar="collapsed"] .sb-label { opacity: 0; transition-delay: 0s; }
 }
 @media (prefers-reduced-motion: reduce) {

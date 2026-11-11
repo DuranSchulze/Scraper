@@ -4,7 +4,8 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, ScanSearch, Sun, Users } from "lucide-react";
+import { Menu as MenuPrimitive } from "@base-ui/react/menu";
+import { ChevronsUpDown, ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, ScanSearch, Sun, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
@@ -12,14 +13,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
 import { announceSessionChange, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
-import { prewarmTheme, toggleTheme, useTheme } from "@/lib/theme";
+import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-// Nav stays plain data; admin-only items are hidden for members (pages and the API check again).
+// Nav stays plain data, grouped like modern app shells; admin-only groups are hidden for members (pages and the API check again).
 const NAV = [
-  { href: "/", label: "Review", icon: ListChecks, admin: false },
-  { href: "/scraping", label: "Scraping", icon: ScanSearch, admin: false },
-  { href: "/accounts", label: "Accounts", icon: Users, admin: true },
+  { label: "Workspace", admin: false, items: [
+    { href: "/", label: "Review", icon: ListChecks },
+    { href: "/scraping", label: "Scraping", icon: ScanSearch },
+  ] },
+  { label: "Admin", admin: true, items: [
+    { href: "/accounts", label: "Accounts", icon: Users },
+  ] },
 ] as const;
 
 // The saved choice lives on <html data-sidebar> (set before paint by the inline script in the root layout);
@@ -48,8 +53,11 @@ const isActive = (pathname: string, href: string) =>
   href === "/" ? pathname === "/" : pathname === href || pathname.startsWith(href + "/");
 
 // Every row keeps its icon in a fixed 3rem slot, so icons never move while the width animates and labels are only clipped.
-const ROW = "group/row flex h-11 w-full items-center rounded-lg text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring";
+const ROW = "group/row relative flex h-9 w-full items-center rounded-md text-sm font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring";
 const SLOT = "flex w-12 shrink-0 items-center justify-center";
+const ICON = "size-[1.125rem] shrink-0";
+const IDLE = "text-sidebar-foreground/80 hover:bg-sidebar-accent/70 hover:text-sidebar-accent-foreground";
+const ITEM = "flex h-8 cursor-default items-center gap-2 rounded-md px-2 text-sm outline-none select-none data-highlighted:bg-accent data-highlighted:text-accent-foreground [&_svg]:size-4 [&_svg]:shrink-0";
 
 function NavRow({ href, label, icon: Icon, active, count, tip, onNavigate }: {
   href: string; label: string; icon: React.ElementType; active: boolean; count?: number; tip: boolean; onNavigate?: () => void;
@@ -58,19 +66,17 @@ function NavRow({ href, label, icon: Icon, active, count, tip, onNavigate }: {
     <Tooltip disabled={!tip}>
       <TooltipTrigger render={
         <Link href={href} onClick={onNavigate} aria-label={label} aria-current={active ? "page" : undefined}
-          className={cn(ROW, active
-            ? "bg-sidebar-primary font-semibold text-sidebar-primary-foreground shadow-sm"
-            : "text-sidebar-foreground/85 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground")} />
+          className={cn(ROW, active ? "bg-sidebar-accent font-semibold text-sidebar-accent-foreground" : IDLE)} />
       }>
+        {active && <span aria-hidden className="absolute top-1/2 left-0 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-sidebar-primary" />}
         <span className={cn(SLOT, "relative")}>
-          <Icon className="h-[1.15rem] w-[1.15rem] shrink-0" />
-          {!!count && <span aria-hidden className={cn("absolute top-1 right-1.5 h-2.5 w-2.5 rounded-full bg-notify ring-2 not-in-data-[sidebar=collapsed]:hidden max-lg:hidden", active ? "ring-sidebar-primary" : "ring-sidebar")} />}
+          <Icon className={ICON} />
+          {!!count && <span aria-hidden className={cn("absolute top-0.5 right-2 size-2.5 rounded-full bg-notify ring-2 not-in-data-[sidebar=collapsed]:hidden max-lg:hidden", active ? "ring-sidebar-accent" : "ring-sidebar")} />}
         </span>
-        <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-3 whitespace-nowrap">
+        <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-2 whitespace-nowrap">
           <span className="truncate">{label}</span>
           {!!count && (
-            <span className={cn("ml-auto rounded-full px-1.5 py-px text-xs font-semibold tabular-nums",
-              active ? "bg-sidebar-primary-foreground text-sidebar-primary" : "bg-sidebar-primary text-sidebar-primary-foreground")}>
+            <span className="ml-auto rounded-full bg-sidebar-primary px-1.5 py-px text-xs font-semibold text-sidebar-primary-foreground tabular-nums">
               {count > 99 ? "99+" : count}
             </span>
           )}
@@ -87,70 +93,105 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
   const { data: me } = useQuery(meQuery);
   const { data: status } = useQuery(statusQuery);
   const pending = status?.candidates.pending;
-  const items = NAV.filter((n) => !n.admin || me?.role === "admin");
+  const groups = NAV.filter((g) => !g.admin || me?.role === "admin");
+  const name = me?.name ?? "Account";
+  const logo = (
+    <span className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
+      <ScanSearch className="size-4 shrink-0" />
+    </span>
+  );
   return (
     <div className="flex h-full flex-col text-sidebar-foreground">
-      <div className="flex h-16 shrink-0 items-center border-b border-sidebar-border">
-        <span className={SLOT}>
-          <span className="flex size-9 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
-            <ScanSearch className="h-[1.15rem] w-[1.15rem] shrink-0" />
-          </span>
-        </span>
-        <span className="sb-label truncate pr-3 text-[0.95rem] font-semibold tracking-tight whitespace-nowrap">Workspace Scraper</span>
+      <div className="flex h-14 shrink-0 items-center px-2">
+        <span className={SLOT}>{logo}</span>
+        <span className="sb-label min-w-0 flex-1 truncate pr-2 text-sm font-semibold tracking-tight whitespace-nowrap">Workspace Scraper</span>
       </div>
-      <nav aria-label="Main" className="flex flex-1 flex-col gap-1 p-2">
-        {items.map(({ href, label, icon }) => (
-          <NavRow key={href} href={href} label={label} icon={icon} active={isActive(pathname, href)} tip={tip}
-            count={href === "/" ? pending : undefined} onNavigate={onNavigate} />
+      <nav aria-label="Main" className="flex flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto px-2 py-2">
+        {groups.map((g) => (
+          <div key={g.label} role="group" aria-label={g.label} className="flex flex-col gap-0.5">
+            <div className="relative h-7">
+              <span aria-hidden className="sb-label absolute inset-y-0 left-3 flex items-center text-xs font-medium whitespace-nowrap text-sidebar-foreground/70">{g.label}</span>
+              <span aria-hidden className="sb-icon-collapsed absolute top-1/2 left-4 h-px w-4 bg-sidebar-border" />
+            </div>
+            {g.items.map(({ href, label, icon }) => (
+              <NavRow key={href} href={href} label={label} icon={icon} active={isActive(pathname, href)} tip={tip}
+                count={href === "/" ? pending : undefined} onNavigate={onNavigate} />
+            ))}
+          </div>
         ))}
       </nav>
       <div className="flex flex-col gap-1 border-t border-sidebar-border p-2">
+        {/* The whole row is the switch, so the icon alone still toggles it while the sidebar is collapsed. */}
         <Tooltip disabled={!tip}>
           <TooltipTrigger render={
-            <button type="button" onClick={toggleTheme} aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-              className={cn(ROW, "text-sidebar-foreground/85 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground")} />
+            <button type="button" role="switch" aria-checked={theme === "dark"} aria-label="Dark mode" onClick={toggleTheme}
+              className={cn(ROW, IDLE)} />
           }>
-            <span className={SLOT}>{theme === "dark" ? <Sun className="h-[1.15rem] w-[1.15rem] shrink-0" /> : <Moon className="h-[1.15rem] w-[1.15rem] shrink-0" />}</span>
-            <span className="sb-label pr-3 whitespace-nowrap">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+            <span className={SLOT}>{theme === "dark" ? <Moon className={ICON} /> : <Sun className={ICON} />}</span>
+            <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-2 whitespace-nowrap">
+              <span className="truncate">Dark mode</span>
+              <span aria-hidden className={cn("ml-auto flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
+                theme === "dark" ? "bg-sidebar-primary" : "bg-sidebar-foreground/55")}>
+                <span className={cn("size-4 rounded-full bg-white shadow-sm transition-transform", theme === "dark" && "translate-x-4")} />
+              </span>
+            </span>
           </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={10}>{theme === "dark" ? "Light mode" : "Dark mode"}</TooltipContent>
+          <TooltipContent side="right" sideOffset={10}>{theme === "dark" ? "Dark mode on" : "Dark mode off"}</TooltipContent>
         </Tooltip>
+        {/* A labelled row (not a header icon), so the collapse control is easy to find. */}
         {showCollapse && (
           <Tooltip disabled={!tip}>
             <TooltipTrigger render={
               <button type="button" onClick={toggleCollapsed} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
-                className={cn(ROW, "text-sidebar-foreground/85 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground")} />
+                className={cn(ROW, IDLE)} />
             }>
               <span className={SLOT}>
-                <PanelLeftClose className="sb-icon-expanded h-[1.15rem] w-[1.15rem] shrink-0" />
-                <PanelLeftOpen className="sb-icon-collapsed h-[1.15rem] w-[1.15rem] shrink-0" />
+                <PanelLeftClose className={cn("sb-icon-expanded", ICON)} />
+                <PanelLeftOpen className={cn("sb-icon-collapsed", ICON)} />
               </span>
-              <span className="sb-label pr-3 whitespace-nowrap">Collapse</span>
+              <span className="sb-label pr-2 whitespace-nowrap">Collapse sidebar</span>
             </TooltipTrigger>
             <TooltipContent side="right" sideOffset={10}>Expand sidebar</TooltipContent>
           </Tooltip>
         )}
-        {me && (
-          <div className="flex h-12 items-center rounded-lg">
-            <span className={SLOT}>
-              <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold uppercase">{me.name.slice(0, 1)}</span>
-            </span>
-            <span className="sb-label min-w-0 pr-3 leading-tight whitespace-nowrap">
-              <span className="block truncate text-sm font-medium">{me.name}</span>
-              <span className="block truncate text-xs text-sidebar-foreground/80 capitalize">{me.role}</span>
-            </span>
-          </div>
-        )}
-        <Tooltip disabled={!tip}>
+        <MenuPrimitive.Root>
+          {/* Tooltip and menu share one button: the tooltip trigger renders the menu trigger. */}
+          <Tooltip disabled={!tip}>
           <TooltipTrigger render={
-            <button type="button" onClick={onLogout} aria-label="Sign out"
-              className={cn(ROW, "text-sidebar-foreground/85 hover:bg-destructive/15 hover:text-destructive")} />
+            <MenuPrimitive.Trigger aria-label={`Account menu for ${name}`}
+              className={cn(ROW, "h-12 text-left text-sidebar-foreground hover:bg-sidebar-accent/70 data-popup-open:bg-sidebar-accent")} />
           }>
-            <span className={SLOT}><LogOut className="h-[1.15rem] w-[1.15rem] shrink-0" /></span>
-            <span className="sb-label pr-3 whitespace-nowrap">Sign out</span>
+            <span className={SLOT}>
+              <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-accent-foreground uppercase ring-1 ring-sidebar-border">{name.slice(0, 1)}</span>
+            </span>
+            <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-2 whitespace-nowrap">
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate text-sm font-medium">{name}</span>
+                {me && <span className="block truncate text-xs text-sidebar-foreground/70 capitalize">{me.role}</span>}
+              </span>
+              <ChevronsUpDown aria-hidden className="size-4 shrink-0 opacity-60" />
+            </span>
           </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={10}>Sign out</TooltipContent>
-        </Tooltip>
+          <TooltipContent side="right" sideOffset={10}>{`${name} · account`}</TooltipContent>
+          </Tooltip>
+          <MenuPrimitive.Portal>
+            <MenuPrimitive.Positioner side={collapsed ? "right" : "top"} align={collapsed ? "end" : "start"} sideOffset={8} className="isolate z-50">
+              <MenuPrimitive.Popup className="w-(--anchor-width) min-w-56 origin-(--transform-origin) rounded-lg bg-popover p-1 text-popover-foreground shadow-lg ring-1 ring-foreground/10 outline-none duration-100 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95">
+                {me && (
+                  <div className="px-2 py-1.5 leading-tight">
+                    <div className="truncate text-sm font-medium">{me.name}</div>
+                    <div className="truncate text-xs text-muted-foreground capitalize">{me.role}</div>
+                  </div>
+                )}
+                {me && <MenuPrimitive.Separator className="-mx-1 my-1 h-px bg-border" />}
+                <MenuPrimitive.Item onClick={onLogout} className={cn(ITEM, "text-destructive data-highlighted:bg-destructive/10 data-highlighted:text-destructive")}>
+                  <LogOut aria-hidden />
+                  Sign out
+                </MenuPrimitive.Item>
+              </MenuPrimitive.Popup>
+            </MenuPrimitive.Positioner>
+          </MenuPrimitive.Portal>
+        </MenuPrimitive.Root>
       </div>
     </div>
   );
@@ -166,13 +207,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const id = requestAnimationFrame(() => requestAnimationFrame(() => { document.documentElement.dataset.sidebarReady = ""; }));
     return () => cancelAnimationFrame(id);
-  }, []);
-
-  // Read both themes' colours while idle, so the first switch costs no extra style recalculation.
-  useEffect(() => {
-    const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 300));
-    const id = idle(prewarmTheme);
-    return () => { if (window.cancelIdleCallback) window.cancelIdleCallback(id as number); else window.clearTimeout(id as number); };
   }, []);
 
   // Another tab signed in or out: reload so this one never shows the previous account's cached data.
@@ -203,7 +237,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen">
-      <aside aria-label="Sidebar" className="sb-aside sticky top-0 z-40 hidden h-screen shrink-0 lg:block">
+      {/* The spacer snaps to the new width (one page layout); only the fixed sidebar animates, so the page never re-lays out per frame. */}
+      <div aria-hidden className="sb-spacer hidden shrink-0 lg:block" />
+      <aside aria-label="Sidebar" className="sb-aside fixed inset-y-0 left-0 z-40 hidden lg:block">
         <div className="h-full overflow-hidden bg-sidebar">
           <SidebarContent tip={collapsed} collapsed={collapsed} showCollapse onLogout={() => setConfirm(true)} />
         </div>
