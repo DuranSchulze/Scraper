@@ -4,6 +4,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 import logging
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -159,6 +161,45 @@ def test_future_time_waits_then_uses_configured_since_and_carry(scheduled, monke
     assert len(launched) == 1
     assert launched[0][2]["since"] == "2020-01-01" and launched[0][2]["full"] is False
     assert launched[0][2]["done_mailboxes"] == ["a@test"]
+
+
+@pytest.mark.parametrize("since", [None, "", " \t "])
+def test_default_since_when_unset_or_blank(scheduled, monkeypatch, since):
+    _, launched = scheduled
+    if since is None:
+        monkeypatch.delenv("SCRAPE_SINCE", raising=False)
+    else:
+        monkeypatch.setenv("SCRAPE_SINCE", since)
+    api._daily_scrape(time(9), Checks())
+    assert len(launched) == 1 and launched[0][2]["since"] == "2018-01-01"
+
+
+def test_start_and_skip_reach_default_uvicorn_console(scheduled):
+    # A subprocess keeps production logging separate from pytest's capture configuration.
+    script = """
+import logging
+from datetime import time
+import uvicorn
+from scraper import app as api
+
+uvicorn.Config(api.app)
+assert logging.getLogger().getEffectiveLevel() == logging.WARNING
+api._launch_job = lambda *args: None
+
+class Checks:
+    remaining = 2
+    def is_set(self):
+        return self.remaining == 0
+    def wait(self, seconds):
+        assert seconds == 60
+        self.remaining -= 1
+
+api._daily_scrape(time(0), Checks())
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "Daily scrape started: job" in result.stderr
+    assert "Daily scrape skipped: another job is running" in result.stderr
 
 
 def test_two_scheduler_workers_only_start_once(scheduled, monkeypatch):

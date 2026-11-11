@@ -67,7 +67,7 @@ def _daily_due(now, last_run_date, last_done_scrape_at, running, at, *, boot=Fal
 
 
 def _daily_scrape(at, stopped):
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("uvicorn.error")
     boot = True
     last_run_date = None
     pending = False
@@ -91,7 +91,7 @@ def _daily_scrape(at, stopped):
                         last_run_date, pending = now.date(), False
                     if not stopped.is_set() and _daily_due(now, last_run_date, last_done, running, at, boot=boot, pending=pending):
                         params = {"sources": ["gmail", "contacts", "sheets"], "mailboxes": [],
-                                  "since": env("SCRAPE_SINCE", "2018-01-01"), "full": False,
+                                  "since": env("SCRAPE_SINCE") or "2018-01-01", "full": False,
                                   "daily_date": now.date().isoformat()}
                         datetime.strptime(params["since"], "%Y-%m-%d")
                         job_id = start_job("scrape", params, carry=True)

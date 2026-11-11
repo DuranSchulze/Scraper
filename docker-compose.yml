@@ -1,0 +1,21 @@
+# Local deploy: API + scraper (daily run at DAILY_SCRAPE_AT) and the web UI. Database stays on Neon.
+services:
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      GUI_PORT: "8765"
+      PORT: "8765"  # PORT wins over GUI_PORT; must match web's SCRAPER_API_URL
+      GOOGLE_SERVICE_ACCOUNT_FILE: /secrets/sa-key.json
+      ALLOWED_HOSTS: api,localhost,127.0.0.1
+      APP_URL: http://localhost:3000
+    volumes:
+      - ${SA_KEY_PATH:?set SA_KEY_PATH in .env to the service account JSON on this PC}:/secrets/sa-key.json:ro
+    restart: unless-stopped
+  web:
+    build: ./frontend
+    depends_on: [api]
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped

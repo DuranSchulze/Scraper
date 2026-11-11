@@ -95,6 +95,30 @@ If progress lines show frequent rate-limit retries, lower `SCRAPE_MESSAGE_WORKER
 Reruns are incremental: Gmail continues from the last sync point. Tick **Full rescan** to ignore it.
 Approved, rejected and merged records are never overwritten by a rerun.
 
+## Run on this PC with Docker (daily scrape)
+
+The scraper and GUI run in Docker on this PC; the database stays on Neon.
+The API scrapes new email once a day at `DAILY_SCRAPE_AT`, then extracts.
+If the PC was off at that time, it catches up when the containers start.
+
+1. Install Docker Desktop for Windows (WSL 2 backend). In its Settings, turn on
+   "Start Docker Desktop when you sign in".
+2. In the root `.env` add:
+   ```
+   SA_KEY_PATH=C:/path/to/sa-key.json   # service account key on this PC
+   DAILY_SCRAPE_AT=03:00                # local time, HH:MM
+   TZ=Asia/Manila                       # your time zone
+   ```
+   Keep `DATABASE_URL`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` and the Google values as they are.
+3. From the project folder, build and start (first time takes a few minutes):
+   `docker compose up -d --build`
+4. Open http://localhost:3000. Daily jobs show on the Scraping page.
+5. Logs: `docker compose logs -f api`. Stop: `docker compose down`.
+   After a code change: `docker compose up -d --build`.
+
+The containers restart by themselves when Docker Desktop starts. The PC must be on
+(not asleep) for a run to happen at the set time.
+
 ## Deploy the backend on Render
 
 Create a Render Blueprint from the root `render.yaml` (Python 3.12, paid Starter,

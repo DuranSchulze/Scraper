@@ -500,21 +500,20 @@ def parallel_job(conn, monkeypatch):
 
 
 def test_four_mailboxes_overlap_and_use_distinct_closed_connections(conn, monkeypatch, parallel_job):
-    import time
+    import threading
 
+    overlap = threading.Barrier(4, timeout=10)
     connections, finished = [], []
     def fetch(connection, mailbox, *args, **kwargs):
         connections.append(connection)
-        time.sleep(.3)
+        overlap.wait()
         db.set_cursor(connection, "gmail", mailbox, "cursor")
         connection.commit()
         finished.append(mailbox)
     monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
     monkeypatch.setattr(pipeline, "run_extract", lambda *args, **kwargs: None)
-    start = time.perf_counter()
     parallel_job.start_job("scrape", {"sources": ["gmail"], "mailboxes": ["a", "b", "c", "d"], "since": "2020-01-01", "full": False})
-    elapsed = time.perf_counter() - start
-    assert elapsed < .8, elapsed
+    assert not overlap.broken
     assert set(finished) == {"a", "b", "c", "d"}
     assert len({id(c) for c in connections}) == 4 and all(c.closed for c in connections)
     row = conn.execute("SELECT status,params,failures FROM jobs").fetchone()
