@@ -16,7 +16,7 @@ import type { CandidateRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
 import { PhoneNumber } from "./phone";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton, LoadingLabel } from "@/components/ui/skeleton";
 
 const DASH = <span className="text-muted-foreground">—</span>;
 // The pinned Client cell needs an opaque background, or scrolled cells show through it.
@@ -80,10 +80,6 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         </div>
         {toolbar}
       </div>
-      {/* One persistent live region outside the busy table body, so the announcement is never held back by aria-busy. */}
-      <span role="status" className="sr-only">
-        {error ? "" : turning ? `Loading page ${filters.page.toLocaleString()}…` : isPending ? "Loading records…" : ""}
-      </span>
       <Table ref={tableRef} className="min-w-[1120px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
@@ -101,7 +97,7 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
           </TableHeader>
           <TableBody aria-busy={isPending || turning} className="[&_td]:px-3 [&_td]:py-2.5">
             {error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
-            {(isPending || turning) && !error && <SkeletonRows />}
+            {(isPending || turning) && !error && <SkeletonRows label={turning ? `Loading page ${filters.page.toLocaleString()}…` : "Loading records…"} />}
             {!turning && rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
             {!turning && rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect} />)}
           </TableBody>
@@ -111,7 +107,6 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
           <p className="text-sm text-muted-foreground tabular-nums" aria-live="polite">
             Showing <span className="font-medium text-foreground">{(from + 1).toLocaleString()}–{Math.min(from + PAGE_SIZE, data.total).toLocaleString()}</span> of{" "}
             <span className="font-medium text-foreground">{data.total.toLocaleString()}</span> records
-            <span className="hidden sm:inline"> · Page {filters.page.toLocaleString()} of {pages.toLocaleString()}</span>
           </p>
           <Pagination aria-label="Records pages" className="mx-0 w-auto justify-end">
             <PaginationContent>
@@ -251,12 +246,13 @@ function Row({ r, selected, onSelect }: { r: CandidateRow; selected: boolean; on
 }
 
 /** First-load placeholder: rows shaped like real ones (name + email, phone, chips, pills, amount, dates). */
-function SkeletonRows() {
+function SkeletonRows({ label }: { label: string }) {
   return (
     <>
       {Array.from({ length: 8 }, (_, i) => (
         <TableRow key={i} className="hover:bg-transparent">
           <TableCell className="sticky left-0 bg-card pl-4">
+            {i === 0 && <LoadingLabel>{label}</LoadingLabel>}
             <Skeleton className="h-4 w-40" /><Skeleton className="mt-1.5 h-3 w-52" />
           </TableCell>
           <TableCell><Skeleton className="h-4 w-32" /></TableCell>
