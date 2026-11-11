@@ -21,6 +21,7 @@ from . import db
 from .config import env, jwt_secret
 
 COOKIE = "scraper_session"
+ROUTES = ("review", "scraping")
 SESSION_SECONDS = 8 * 60 * 60
 MAX_BUCKETS = 10_000
 buckets = {}
@@ -102,7 +103,7 @@ def current_user(request: Request):
     if not claims:
         raise HTTPException(401, "Sign in required")
     with db.connect() as conn:
-        user = conn.execute("SELECT id,email,name,role FROM users WHERE id=%s AND active", (int(claims["sub"]),)).fetchone()
+        user = conn.execute("SELECT id,email,name,role,routes FROM users WHERE id=%s AND active", (int(claims["sub"]),)).fetchone()
     if not user:
         raise HTTPException(401, "Sign in required")
     if request.method == "POST" and request.url.path == "/api/users":
@@ -116,6 +117,18 @@ def require_admin(user=Depends(current_user)):
     if user["role"] != "admin":
         raise HTTPException(403, "Admin access required")
     return user
+
+
+def require_route(key):
+    if key not in ROUTES:
+        raise ValueError("Unknown route")
+
+    def permitted(user=Depends(current_user)):
+        if user["role"] != "admin" and key not in user["routes"]:
+            raise HTTPException(403, "You don't have access to this page")
+        return user
+
+    return permitted
 
 
 class LoginIn(BaseModel):
@@ -135,12 +148,24 @@ class LoginIn(BaseModel):
         return value
 
 
-class UserIn(LoginIn):
+class RoutesIn(BaseModel):
+    routes: list[str] = Field(min_length=1)
+
+    @field_validator("routes")
+    @classmethod
+    def allowed_routes(cls, value):
+        if any(key not in ROUTES for key in value):
+            raise ValueError("Unknown route")
+        return [key for key in ROUTES if key in value]
+
+
+class UserIn(LoginIn, RoutesIn):
     model_config = ConfigDict(hide_input_in_errors=True)
 
     name: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=1, max_length=1024)
     role: Literal["admin", "member"]
+    routes: list[str] = Field(default_factory=lambda: list(ROUTES), min_length=1)
 
     @field_validator("name")
     @classmethod
@@ -155,6 +180,12 @@ class User(BaseModel):
     email: str
     name: str
     role: Literal["admin", "member"]
+    routes: list[str]
+
+    @field_validator("routes")
+    @classmethod
+    def ordered_routes(cls, value):
+        return [key for key in ROUTES if key in value]
 
 
 class Account(User):
@@ -176,7 +207,7 @@ def login(body: LoginIn, request: Request, response: Response):
     hit("login_ip", peer, 30, 900)
     hit("login_email", (peer, body.email), 5, 900)
     with db.connect() as conn:
-        user = conn.execute("SELECT id,email,name,role,password_hash,active FROM users WHERE lower(email)=%s",
+        user = conn.execute("SELECT id,email,name,role,routes,password_hash,active FROM users WHERE lower(email)=%s",
                             (body.email,)).fetchone()
     valid = verify_password(body.password, user["password_hash"] if user else DUMMY_HASH)
     if not valid or not user or not user["active"]:
@@ -185,7 +216,7 @@ def login(body: LoginIn, request: Request, response: Response):
     response.set_cookie(COOKIE, sign_token(user), max_age=SESSION_SECONDS, httponly=True,
                         secure=samesite == "none" or request.url.scheme == "https" or env("APP_URL").startswith("https://"),
                         samesite=samesite, path="/")
-    return user
+    return {**user, "routes": list(ROUTES) if user["role"] == "admin" else user["routes"]}
 
 
 @router.post("/auth/logout")
@@ -198,13 +229,13 @@ def logout(request: Request, response: Response):
 
 @router.get("/auth/me", response_model=User)
 def me(user=Depends(current_user)):
-    return user
+    return {**user, "routes": list(ROUTES) if user["role"] == "admin" else user["routes"]}
 
 
 @router.get("/users", response_model=list[Account])
 def users(admin=Depends(require_admin)):
     with db.connect() as conn:
-        return conn.execute("SELECT id,email,name,role,active,created_at FROM users ORDER BY id").fetchall()
+        return conn.execute("SELECT id,email,name,role,routes,active,created_at FROM users ORDER BY id").fetchall()
 
 
 @router.post("/users", response_model=Account, status_code=201)
@@ -212,11 +243,24 @@ def create_user(body: UserIn, admin=Depends(require_admin)):
     try:
         with db.connect() as conn:
             return conn.execute(
-                "INSERT INTO users(email,name,password_hash,role) VALUES (%s,%s,%s,%s)"
-                " RETURNING id,email,name,role,active,created_at",
-                (body.email, body.name, hash_password(body.password), body.role)).fetchone()
+                "INSERT INTO users(email,name,password_hash,role,routes) VALUES (%s,%s,%s,%s,%s)"
+                " RETURNING id,email,name,role,routes,active,created_at",
+                (body.email, body.name, hash_password(body.password), body.role, body.routes)).fetchone()
     except UniqueViolation as exc:
         raise HTTPException(409, "Email already exists") from exc
+
+
+@router.patch("/users/{user_id}", response_model=Account)
+def update_routes(user_id: int, body: RoutesIn, admin=Depends(require_admin)):
+    with db.connect() as conn:
+        target = conn.execute("SELECT role FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(404, "User not found")
+        if target["role"] == "admin":
+            raise HTTPException(400, "Cannot change an admin's routes")
+        return conn.execute(
+            "UPDATE users SET routes=%s WHERE id=%s RETURNING id,email,name,role,routes,active,created_at",
+            (body.routes, user_id)).fetchone()
 
 
 def seed_admin(conn):

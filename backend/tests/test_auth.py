@@ -48,7 +48,7 @@ def test_login_cookie_me_and_logout(authenticated_client):
     client = authenticated_client
     response = client.post("/api/auth/login", json={"email": EMAIL.upper(), "password": PASSWORD}, headers=GUI)
     user = response.json()
-    assert user == {"id": 1, "email": EMAIL, "name": "Admin", "role": "admin"}
+    assert user == {"id": 1, "email": EMAIL, "name": "Admin", "role": "admin", "routes": list(auth.ROUTES)}
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie and "Path=/" in cookie
     assert "Max-Age=28800" in cookie and "Secure" not in cookie
@@ -158,13 +158,81 @@ def test_users_create_list_and_case_insensitive_duplicates(authenticated_client)
     assert response.status_code == 201
     created = response.json()
     assert created["email"] == "member@example.test" and created["name"] == "Member" and created["active"] is True
-    assert set(created) == {"id", "email", "name", "role", "active", "created_at"}
+    assert set(created) == {"id", "email", "name", "role", "routes", "active", "created_at"}
+    assert created["routes"] == list(auth.ROUTES)
     users = authenticated_client.get("/api/users").json()
     assert len(users) == 2 and all("password_hash" not in user for user in users)
     assert authenticated_client.post("/api/users", json=body, headers=GUI).status_code == 409
     with db.connect() as conn:
         stored = conn.execute("SELECT password_hash FROM users WHERE id=%s", (created["id"],)).fetchone()["password_hash"]
     assert stored != PASSWORD and auth.verify_password(PASSWORD, stored)
+
+
+@pytest.mark.parametrize("role,routes", [
+    ("member", ["review"]), ("member", ["scraping"]),
+    ("member", ["scraping", "review", "scraping"]), ("admin", ["scraping"]),
+])
+def test_stored_and_effective_routes_are_canonical(authenticated_client, role, routes):
+    admin = authenticated_client
+    created = admin.post("/api/users", headers=GUI, json={
+        "email": "routes@example.test", "name": "Routes", "password": PASSWORD, "role": role, "routes": routes,
+    })
+    assert created.status_code == 201
+    expected = [key for key in auth.ROUTES if key in routes]
+    assert created.json()["routes"] == expected
+    assert admin.get("/api/users").json()[-1]["routes"] == expected
+    # Also exercise response ordering when stored arrays were written in a different order.
+    with db.connect() as conn:
+        conn.execute("UPDATE users SET routes=%s WHERE id=%s", (routes, created.json()["id"]))
+    assert admin.get("/api/users").json()[-1]["routes"] == expected
+    with TestClient(app, base_url="http://localhost") as member:
+        login = member.post("/api/auth/login", headers=GUI,
+                            json={"email": "routes@example.test", "password": PASSWORD})
+        assert login.status_code == 200
+        assert set(login.json()) == {"id", "email", "name", "role", "routes"}
+        assert login.json()["routes"] == (list(auth.ROUTES) if role == "admin" else expected)
+        assert member.get("/api/auth/me").json() == login.json()
+        claims = jwt.decode(member.cookies.get(auth.COOKIE), SECRET, algorithms=["HS256"])
+        assert set(claims) == {"sub", "role", "iat", "exp"}
+
+
+@pytest.mark.parametrize("routes", [[], ["unknown"], ["review", "unknown"], [None], None, "review"])
+def test_create_and_patch_reject_invalid_routes(authenticated_client, routes):
+    admin = authenticated_client
+    body = {"email": "routes@example.test", "name": "Routes", "password": PASSWORD, "role": "member"}
+    assert admin.post("/api/users", headers=GUI, json={**body, "routes": routes}).status_code == 422
+    created = admin.post("/api/users", headers=GUI, json=body).json()
+    response = admin.patch(f"/api/users/{created['id']}", headers=GUI, json={"routes": routes})
+    assert response.status_code == 422
+    assert admin.get("/api/users").json()[-1] == created
+
+
+@pytest.mark.parametrize("revoked", auth.ROUTES)
+def test_patch_routes_revokes_same_session_immediately(authenticated_client, revoked):
+    admin = authenticated_client
+    created = admin.post("/api/users", headers=GUI, json={
+        "email": "routes@example.test", "name": "Routes", "password": PASSWORD, "role": "member",
+    }).json()
+    with TestClient(app, base_url="http://localhost") as member:
+        assert member.post("/api/auth/login", headers=GUI, json={
+            "email": created["email"], "password": PASSWORD}).status_code == 200
+        cookie = member.cookies.get(auth.COOKIE)
+        endpoint = "/api/candidates" if revoked == "review" else "/api/jobs/latest/mailboxes"
+        assert member.get(endpoint).status_code == 200
+        url = f"/api/users/{created['id']}"
+        assert member.patch(url, headers=GUI, json={"routes": [revoked]}).status_code == 403
+        assert admin.patch("/api/users/999999", headers=GUI, json={"routes": [revoked]}).status_code == 404
+        assert admin.patch("/api/users/1", headers=GUI, json={"routes": [revoked]}).status_code == 400
+        assert admin.patch(url, headers=GUI, json={}).status_code == 422
+        kept = [key for key in auth.ROUTES if key != revoked]
+        response = admin.patch(url, headers=GUI, json={"routes": kept * 2})
+        assert response.status_code == 200
+        assert response.json() == {**created, "routes": kept}
+        assert member.cookies.get(auth.COOKIE) == cookie
+        denied = member.get(endpoint)
+        assert denied.status_code == 403 and denied.json() == {"detail": "You don't have access to this page"}
+        assert member.get("/api/auth/me").json()["routes"] == kept
+        assert admin.get("/api/users").json()[-1]["routes"] == kept
 
 
 @pytest.mark.parametrize("change", [{"email": "invalid"}, {"email": "a@b"}, {"email": "a@bad_domain.test"},

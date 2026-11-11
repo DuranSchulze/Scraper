@@ -23,6 +23,12 @@ def pg_server():
                         else "/usr/lib/postgresql/17/bin"))
     bin_dir = Path(os.environ.get("PG_BIN", str(default_bin)))
     suffix = ".exe" if sys.platform == "win32" else ""
+    if "PG_BIN" not in os.environ and not all(
+            (bin_dir / (name + suffix)).is_file() for name in ("initdb", "pg_ctl")) and sys.platform == "win32":
+        versions = sorted((path for path in default_bin.parent.parent.iterdir() if path.name.isdigit()),
+                          key=lambda path: int(path.name), reverse=True) if default_bin.parent.parent.is_dir() else []
+        bin_dir = next((path / "bin" for path in versions if all(
+            (path / "bin" / (name + suffix)).is_file() for name in ("initdb", "pg_ctl"))), bin_dir)
     if not all((bin_dir / (name + suffix)).is_file() for name in ("initdb", "pg_ctl")):
         pytest.fail("Postgres binaries missing: install PostgreSQL 17 (Windows: choco install postgresql17; "
                     "macOS: brew install postgresql@17; Linux: install postgresql-17) "

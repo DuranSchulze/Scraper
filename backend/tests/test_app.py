@@ -28,7 +28,7 @@ import pytest
 from psycopg import OperationalError
 from psycopg.types.json import Jsonb
 
-from scraper import db, pipeline
+from scraper import auth, db, pipeline
 from scraper import app as app_module
 
 GUI = {"X-Local-GUI": "1"}
@@ -102,6 +102,82 @@ def edited(name="Reviewer edits"):
             "department": "Sales", "engagement_paid": True, "first_contact": "2026-01-01T00:00:00Z",
             "last_contact": "2026-11-01T00:00:00Z", "notes": "Checked manually", "amounts": [
                 {"stage": "invoiced", "amount": 25000, "currency": "PHP", "date": None, "raw_item_id": 1}]}
+
+
+def permission_client(conn, routes, role="member"):
+    user = conn.execute(
+        "INSERT INTO users(email,name,password_hash,role,routes) VALUES ('routes@test','Routes','unused',%s,%s)"
+        " RETURNING id,role", (role, routes)).fetchone()
+    conn.commit()
+    return TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(user)})
+
+
+@pytest.mark.parametrize("denied", auth.ROUTES)
+def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, denied):
+    cid = candidate(conn)
+    jid = job_row(conn)
+    item = conn.execute("SELECT id FROM raw_items LIMIT 1").fetchone()["id"]
+    monkeypatch.setattr(app_module, "_launch_job", lambda *args: pytest.fail("Denied request launched a job"))
+    requests = {
+        "review": [
+            ("GET", "/api/candidates", None), ("GET", f"/api/candidates/{cid}", None),
+            ("POST", f"/api/candidates/{cid}/approve", edited()),
+            ("POST", f"/api/candidates/{cid}/reject", None),
+            ("POST", f"/api/candidates/{cid}/reopen", None),
+            ("POST", f"/api/candidates/{cid}/merge", {"target_id": cid}),
+            ("POST", "/api/publish", None), ("GET", f"/api/raw/{item}", None),
+            ("GET", "/api/rules", None),
+        ],
+        "scraping": [
+            ("POST", "/api/scrape", {"sources": ["gmail"]}), ("POST", "/api/extract", {}),
+            *[("POST", f"/api/jobs/{jid}/{action}", None) for action in ("resume", "pause", "continue", "stop")],
+            ("GET", "/api/jobs/latest/mailboxes", None), ("GET", f"/api/jobs/{jid}/mailboxes", None),
+            ("GET", f"/api/jobs/{jid}/log", None),
+        ],
+    }
+    tables = ("candidates", "clients", "raw_items", "signals", "jobs", "job_log", "job_mailboxes")
+    before = {table: conn.execute(f"SELECT * FROM {table} ORDER BY 1,2").fetchall() for table in tables}
+    with permission_client(conn, [key for key in auth.ROUTES if key != denied]) as member:
+        for method, path, body in requests[denied]:
+            response = member.request(method, path, headers=GUI, json=body)
+            assert response.status_code == 403, path
+            assert response.json() == {"detail": "You don't have access to this page"}, path
+    for table, rows in before.items():
+        assert conn.execute(f"SELECT * FROM {table} ORDER BY 1,2").fetchall() == rows
+
+
+@pytest.mark.parametrize("role,routes", [
+    ("member", ["review"]), ("member", ["scraping"]),
+    ("member", ["scraping", "review"]), ("admin", ["review"]), ("admin", ["scraping"]),
+])
+def test_route_grants_admin_bypass_and_status_redaction(conn, monkeypatch, role, routes):
+    cid = candidate(conn)
+    jid = job_row(conn, status="failed", name="scrape", params={"mailboxes": ["private@test"]})
+    conn.execute("UPDATE jobs SET error='private failure' WHERE id=%s", (jid,))
+    conn.execute("INSERT INTO job_log(job_id,line) VALUES (%s,'private log')", (jid,))
+    conn.commit()
+    launched = []
+    monkeypatch.setattr(app_module, "_launch_job", lambda *args: launched.append(args))
+    with permission_client(conn, routes, role) as client:
+        status = client.get("/api/status")
+        assert status.status_code == 200
+        status = status.json()
+        assert status["candidates"]["pending"] == 1 and status["job_status"] == "failed"
+        assert status["job_id"] == jid and status["running"] is False
+        if role == "admin" or "scraping" in routes:
+            assert status["log"] == ["private log"]
+            assert status["job_params"] == {"mailboxes": ["private@test"]}
+            assert status["error"] == "private failure"
+            assert client.get("/api/jobs/latest/mailboxes").status_code == 200
+            assert client.post("/api/extract", headers=GUI, json={}).status_code == 200
+            assert len(launched) == 1
+        else:
+            assert not {"log", "job_params", "error"} & status.keys()
+        if role == "admin" or "review" in routes:
+            assert client.get("/api/candidates").status_code == 200
+            assert client.post(f"/api/candidates/{cid}/reject", headers=GUI).status_code == 200
+            assert conn.execute("SELECT review_state FROM candidates WHERE id=%s", (cid,)).fetchone()["review_state"] == "rejected"
+        assert client.get("/api/users").status_code == (200 if role == "admin" else 403)
 
 
 def approve(cid, body=None):

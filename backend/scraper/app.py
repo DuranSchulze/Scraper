@@ -293,7 +293,7 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
     return job_id
 
 
-@app.post("/api/jobs/{job_id}/resume")
+@app.post("/api/jobs/{job_id}/resume", dependencies=[Depends(auth.require_route("scraping"))])
 def resume(job_id: int):
     successor = start_job("", {}, resume_id=job_id)
     return {"started": True, "job_id": successor}
@@ -314,17 +314,17 @@ def _control(job_id: int, action: str) -> dict:
     return {"ok": True}
 
 
-@app.post("/api/jobs/{job_id}/pause")
+@app.post("/api/jobs/{job_id}/pause", dependencies=[Depends(auth.require_route("scraping"))])
 def pause(job_id: int):
     return _control(job_id, "pause")
 
 
-@app.post("/api/jobs/{job_id}/continue")
+@app.post("/api/jobs/{job_id}/continue", dependencies=[Depends(auth.require_route("scraping"))])
 def continue_job(job_id: int):
     return _control(job_id, "continue")
 
 
-@app.post("/api/jobs/{job_id}/stop")
+@app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(auth.require_route("scraping"))])
 def stop(job_id: int):
     return _control(job_id, "stop")
 
@@ -337,7 +337,7 @@ class ScrapeIn(BaseModel):
     fresh: bool = False
 
 
-@app.post("/api/scrape")
+@app.post("/api/scrape", dependencies=[Depends(auth.require_route("scraping"))])
 def scrape(body: ScrapeIn):
     since = body.since or env("SCRAPE_SINCE", "2018-01-01")
     datetime.strptime(since, "%Y-%m-%d")  # validate before starting
@@ -351,19 +351,20 @@ class ExtractIn(BaseModel):
     full: bool = False
 
 
-@app.post("/api/extract")
+@app.post("/api/extract", dependencies=[Depends(auth.require_route("scraping"))])
 def extract(body: ExtractIn):
     start_job("extract", {"full": body.full})
     return {"started": True}
 
 
 @app.get("/api/status")
-def status():
+def status(user=Depends(auth.current_user)):
+    scraping = user["role"] == "admin" or "scraping" in user["routes"]
     with db.connect() as conn:
         db.interrupt_stale(conn)
         job = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
         lines = conn.execute("SELECT line FROM job_log WHERE job_id=%s ORDER BY id DESC LIMIT 500",
-                             (job["id"],)).fetchall() if job else []
+                             (job["id"],)).fetchall() if job and scraping else []
         counts = {r["review_state"]: r["n"] for r in conn.execute(
             "SELECT review_state, count(*) AS n FROM candidates GROUP BY review_state")}
         raw = {r["source"]: r["n"] for r in conn.execute(
@@ -372,13 +373,17 @@ def status():
             "SELECT count(*) AS n FROM candidates WHERE review_state='approved'"
             " AND (published_at IS NULL OR reviewed_at>published_at)").fetchone()["n"]
         failed = conn.execute("SELECT count(*) AS n FROM raw_items WHERE extract_error IS NOT NULL").fetchone()["n"]
-    return {"running": bool(job and job["status"] in ("running", "paused")), "job": job["name"] if job else "",
+    result = {"running": bool(job and job["status"] in ("running", "paused")), "job": job["name"] if job else "",
             "error": job["error"] if job else None, "log": [r["line"] for r in reversed(lines)],
             "candidates": counts, "raw_items": raw, "ready_to_publish": ready, "extract_failed": failed,
             "job_control": job["control"] if job else None,
             "job_id": job["id"] if job else None, "job_status": job["status"] if job else None,
             "job_params": job["params"] if job else {}, "job_failures": job["failures"] if job else 0,
             "job_started_at": job["started_at"] if job else None, "job_finished_at": job["finished_at"] if job else None}
+    if not scraping:
+        for key in ("log", "job_params", "error"):
+            del result[key]
+    return result
 
 
 # --- Review ---
@@ -398,7 +403,7 @@ def _mailboxes(conn, job_id):
     return {"job_id": job_id, "items": items, "counts": counts, "synced_before": synced_before}
 
 
-@app.get("/api/jobs/latest/mailboxes")
+@app.get("/api/jobs/latest/mailboxes", dependencies=[Depends(auth.require_route("scraping"))])
 def latest_mailboxes():
     with db.connect() as conn:
         job = conn.execute("SELECT id FROM jobs WHERE name='scrape' ORDER BY id DESC LIMIT 1").fetchone()
@@ -406,13 +411,13 @@ def latest_mailboxes():
         return _mailboxes(conn, job_id)
 
 
-@app.get("/api/jobs/{job_id}/mailboxes")
+@app.get("/api/jobs/{job_id}/mailboxes", dependencies=[Depends(auth.require_route("scraping"))])
 def job_mailboxes(job_id: int):
     with db.connect() as conn:
         return _mailboxes(conn, job_id)
 
 
-@app.get("/api/jobs/{job_id}/log")
+@app.get("/api/jobs/{job_id}/log", dependencies=[Depends(auth.require_route("scraping"))])
 def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=1, le=5000)):
     with db.connect() as conn:
         rows = conn.execute(
@@ -421,7 +426,7 @@ def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=
         return {"lines": [row["line"] for row in reversed(rows)]}
 
 
-@app.get("/api/candidates")
+@app.get("/api/candidates", dependencies=[Depends(auth.require_route("review"))])
 def list_candidates(response: Response, state: str = "pending", q: str = "", status: str = "",
                     department: str = "", stage: str = "", sort: str = "last_contact", order: str = "desc",
                     page: int = Query(default=1, ge=1), size: int = Query(default=500, ge=1, le=500)):
@@ -482,7 +487,7 @@ def _get(conn, cid: int, lock: bool = False) -> dict:
     return row
 
 
-@app.get("/api/candidates/{cid}")
+@app.get("/api/candidates/{cid}", dependencies=[Depends(auth.require_route("review"))])
 def get_candidate(cid: int):
     with db.connect() as conn:
         return _get(conn, cid)
@@ -551,7 +556,7 @@ class ClientIn(BaseModel):
         return self
 
 
-@app.post("/api/candidates/{cid}/approve")
+@app.post("/api/candidates/{cid}/approve", dependencies=[Depends(auth.require_route("review"))])
 def approve(cid: int, c: ClientIn):
     with db.connect() as conn:
         cand = _get(conn, cid, lock=True)
@@ -575,7 +580,7 @@ def approve(cid: int, c: ClientIn):
     return {"ok": True}
 
 
-@app.post("/api/publish")
+@app.post("/api/publish", dependencies=[Depends(auth.require_route("review"))])
 def publish():
     inserted = updated = 0
     with db.connect() as conn:
@@ -615,7 +620,7 @@ def publish():
     return {"published": inserted + updated, "inserted": inserted, "updated": updated}
 
 
-@app.post("/api/candidates/{cid}/reject")
+@app.post("/api/candidates/{cid}/reject", dependencies=[Depends(auth.require_route("review"))])
 def reject(cid: int):
     with db.connect() as conn:
         _get(conn, cid)
@@ -627,7 +632,7 @@ def _previous_target(conn, cand: dict) -> set[str]:
     return {_get(conn, cand["merged_into"])["email_key"]} if cand["merged_into"] else set()
 
 
-@app.post("/api/candidates/{cid}/reopen")
+@app.post("/api/candidates/{cid}/reopen", dependencies=[Depends(auth.require_route("review"))])
 def reopen(cid: int):
     with db.connect() as conn:
         cand = _get(conn, cid, lock=True)
@@ -641,7 +646,7 @@ class MergeIn(BaseModel):
     into_id: int
 
 
-@app.post("/api/candidates/{cid}/merge")
+@app.post("/api/candidates/{cid}/merge", dependencies=[Depends(auth.require_route("review"))])
 def merge(cid: int, m: MergeIn):
     if cid == m.into_id:
         raise HTTPException(400, "cannot merge a record into itself")
@@ -657,7 +662,7 @@ def merge(cid: int, m: MergeIn):
     return {"ok": True}
 
 
-@app.get("/api/raw/{item_id}")
+@app.get("/api/raw/{item_id}", dependencies=[Depends(auth.require_route("review"))])
 def raw_item(item_id: int):
     """Full source item, for checking evidence."""
     with db.connect() as conn:
@@ -668,7 +673,7 @@ def raw_item(item_id: int):
     return row
 
 
-@app.get("/api/rules")
+@app.get("/api/rules", dependencies=[Depends(auth.require_route("review"))])
 def rules():
     return {"path": str(RULES_PATH), "text": RULES_PATH.read_text()}
 
