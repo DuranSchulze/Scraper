@@ -124,6 +124,7 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
         "review": [
             ("GET", "/api/candidates", None), ("GET", f"/api/candidates/{cid}", None),
             ("GET", "/api/candidates/facets", None),
+            ("GET", "/api/candidates/timeline", None),
             ("POST", "/api/candidates/bulk", {"ids": [cid], "action": "approve"}),
             ("POST", f"/api/candidates/{cid}/approve", edited()),
             ("POST", f"/api/candidates/{cid}/reject", None),
@@ -415,10 +416,115 @@ def details_body():
     return body
 
 
-def insert_review_candidate(conn, email, values=None, state="pending"):
+def insert_review_candidate(conn, email, values=None, state="pending", match=None, master_ids=None):
     return conn.execute(
-        "INSERT INTO candidates(email_key,fields,review_state) VALUES (%s,%s,%s) RETURNING id",
-        (email, Jsonb({key: {"value": value} for key, value in (values or {}).items()}), state)).fetchone()["id"]
+        "INSERT INTO candidates(email_key,fields,review_state,master_match,master_ids) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+        (email, Jsonb({key: {"value": value} for key, value in (values or {}).items()}), state, match, master_ids)).fetchone()["id"]
+
+
+def test_candidate_match_names_filters_and_nonpending_mask(conn):
+    first = conn.execute("INSERT INTO master_clients(row_no,registered_name) VALUES (2,'Zed') RETURNING id").fetchone()["id"]
+    second = conn.execute("INSERT INTO master_clients(row_no,registered_name) VALUES (3,'Alpha') RETURNING id").fetchone()["id"]
+    exact = insert_review_candidate(conn, "exact@co.test", match="email", master_ids=[second, first])
+    domain = insert_review_candidate(conn, "domain@co.test", match="domain", master_ids=[second])
+    none = insert_review_candidate(conn, "none@co.test")
+    reviewed = insert_review_candidate(conn, "approved@co.test", state="approved", match="email", master_ids=[first])
+    conn.commit()
+    response = local.get("/api/candidates")
+    assert response.status_code == 200
+    rows = {row["id"]: row for row in response.json()}
+    assert rows[exact]["master_match"] == "email" and rows[exact]["master_names"] == ["Zed", "Alpha"]
+    assert rows[domain]["master_match"] == "domain" and rows[domain]["master_names"] == ["Alpha"]
+    assert rows[none]["master_match"] is None and rows[none]["master_names"] == []
+    for match, expected in (("email", {exact}), ("domain", {domain}), ("none", {none}), ("any", {exact, domain}), ("", {exact, domain, none})):
+        response = local.get("/api/candidates", params={"match": match})
+        assert {row["id"] for row in response.json()} == expected
+        assert int(response.headers["X-Total-Count"]) == len(expected)
+    row = local.get("/api/candidates?state=approved").json()[0]
+    assert row["id"] == reviewed and row["master_match"] is None and row["master_names"] == []
+    assert local.get("/api/candidates?state=approved&match=none").headers["X-Total-Count"] == "1"
+    for match in ("any", "email", "domain"):
+        assert local.get("/api/candidates", params={"state": "approved", "match": match}).json() == []
+    assert local.get("/api/candidates?match=unknown").status_code == 422
+    # The static timeline route must not shadow numeric candidate detail or vice versa.
+    assert local.get("/api/candidates/timeline?match=any").json() == [{"bucket": None, "total": 2, "email": 1, "domain": 1}]
+    detail = local.get(f"/api/candidates/{exact}")
+    assert detail.status_code == 200 and detail.json()["id"] == exact
+
+
+def test_timeline_days_weeks_offsets_and_invalid_dates(conn):
+    for i, (last, match) in enumerate([
+        ("2026-11-11T23:59:00-08:00", "email"), ("2026-11-13T00:15:00+14:00", "domain"),
+        ("2026-12-31", "email"), ("2027-01-01", None), ("2027-01-04", "domain"),
+    ]):
+        insert_review_candidate(conn, f"dated{i}@co.test", {"last_contact": last, "first_contact": "2020-01-02"}, match=match)
+    invalid = [None, "", "not-a-date", "2026-02-30", "20261111", "2026-W46-3", 1234, {"bad": "date"}]
+    for i, value in enumerate(invalid):
+        insert_review_candidate(conn, f"invalid{i}@co.test", {"last_contact": value})
+    insert_review_candidate(conn, "missing@co.test")
+    conn.commit()
+    days = local.get("/api/candidates/timeline")
+    assert days.status_code == 200
+    assert days.json() == [
+        {"bucket": "2027-01-04", "total": 1, "email": 0, "domain": 1},
+        {"bucket": "2027-01-01", "total": 1, "email": 0, "domain": 0},
+        {"bucket": "2026-12-31", "total": 1, "email": 1, "domain": 0},
+        {"bucket": "2026-11-13", "total": 1, "email": 0, "domain": 1},
+        {"bucket": "2026-11-11", "total": 1, "email": 1, "domain": 0},
+        {"bucket": None, "total": 9, "email": 0, "domain": 0},
+    ]
+    assert local.get("/api/candidates/timeline?bucket=week").json() == [
+        {"bucket": "2027-01-04", "total": 1, "email": 0, "domain": 1},
+        {"bucket": "2026-12-28", "total": 2, "email": 1, "domain": 0},
+        {"bucket": "2026-11-09", "total": 2, "email": 1, "domain": 1},
+        {"bucket": None, "total": 9, "email": 0, "domain": 0},
+    ]
+    assert local.get("/api/candidates/timeline?field=first_contact&bucket=week").json() == [
+        {"bucket": "2019-12-30", "total": 5, "email": 2, "domain": 2},
+        {"bucket": None, "total": 9, "email": 0, "domain": 0},
+    ]
+
+
+def test_timeline_shares_every_filter_and_ignores_pagination(conn):
+    values = {"name": "Target", "company": "Company", "department": "Sales", "status": "active", "stage": "paid",
+              "handlers": [{"mailbox": "staff@acme.test"}], "services_availed": ["SEO"], "services": ["Legacy"],
+              "phones": ["123"], "amounts": [{"amount": 10}], "last_contact": "2026-10-05T23:59:00Z",
+              "first_contact": "2020-01-02"}
+    insert_review_candidate(conn, "exact@example.test", values, match="email")
+    insert_review_candidate(conn, "domain@example.test", values, match="domain")
+    insert_review_candidate(conn, "other@other.test", {"last_contact": "2026-10-06", "phones": None, "amounts": None})
+    insert_review_candidate(conn, "approved@example.test", values, state="approved", match="email")
+    conn.commit()
+    filters = {"q": "Target", "status": "active", "department": "Sales", "stage": "paid", "mailbox": "staff@acme.test",
+               "service": "SEO", "domain": "@EXAMPLE.test", "has_phone": "true", "has_amount": "true",
+               "date_from": "2026-10-05", "date_to": "2026-10-05", "match": "any"}
+    cases = [{key: value} for key, value in filters.items()] + [filters, {}, {"state": "approved"},
+             {"match": "none"}, {"match": "email"}, {"match": "domain"}, {"q": "absent"},
+             {"service": "SEO' OR 1=1 --"}, {"service": "Legacy"}, {"has_phone": "false", "has_amount": "false"}]
+    for params in cases:
+        response = local.get("/api/candidates", params={**params, "page": 2, "size": 1})
+        assert response.status_code == 200
+        for field in ("last_contact", "first_contact"):
+            timeline = local.get("/api/candidates/timeline", params={**params, "field": field, "page": 0, "size": 0})
+            assert timeline.status_code == 200, timeline.text
+            buckets = timeline.json()
+            assert sum(row["total"] for row in buckets) == int(response.headers["X-Total-Count"]), params
+            if params.get("state") == "approved":
+                assert all(row["email"] == row["domain"] == 0 for row in buckets)
+    for params, code in (({"bucket": "month"}, 422), ({"field": "name"}, 422), ({"match": "bad"}, 422),
+                         ({"field": "last_contact'; DROP TABLE candidates; --"}, 422),
+                         ({"date_from": "2026-02-30"}, 400), ({"date_to": "bad"}, 400), ({"has_phone": "maybe"}, 422)):
+        assert local.get("/api/candidates/timeline", params=params).status_code == code
+
+
+def test_timeline_counts_are_not_limited_to_list_page(conn):
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO candidates(email_key,fields) VALUES (%s,%s)", [
+            (f"page{i}@co.test", Jsonb({"last_contact": {"value": "2026-11-12"}})) for i in range(501)])
+    conn.commit()
+    assert len(local.get("/api/candidates").json()) == 500
+    assert local.get("/api/candidates/timeline?size=1&page=999").json() == [
+        {"bucket": "2026-11-12", "total": 501, "email": 0, "domain": 0}]
 
 
 def test_review_filters_each_and_combined_with_paging(conn):

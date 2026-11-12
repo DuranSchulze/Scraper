@@ -553,16 +553,10 @@ def master_rows(response: Response, q: str = "", matched: Literal["any", "yes", 
             (*args, size, (page - 1) * size)).fetchall()
 
 
-@app.get("/api/candidates", dependencies=[Depends(auth.require_route("review"))])
-def list_candidates(response: Response, state: str = "pending", q: str = "", status: str = "",
-                    department: str = "", stage: str = "", sort: str = "last_contact", order: str = "desc",
-                    mailbox: str = "", service: str = "", domain: str = "",
-                    has_phone: Literal["", "true", "false"] = "",
-                    has_amount: Literal["", "true", "false"] = "", date_from: str = "", date_to: str = "",
-                    page: int = Query(default=1, ge=1), size: int = Query(default=500, ge=1, le=500)):
-    if sort not in {"last_contact", "first_contact"} or order not in {"asc", "desc"}:
-        raise HTTPException(400, "sort must be last_contact or first_contact; order must be asc or desc")
-    order_by = f" ORDER BY fields->'{sort}'->>'value' {order} NULLS LAST, id ASC"
+def _candidate_where(state: str = "pending", q: str = "", status: str = "", department: str = "", stage: str = "",
+                     mailbox: str = "", service: str = "", domain: str = "",
+                     has_phone: Literal["", "true", "false"] = "", has_amount: Literal["", "true", "false"] = "",
+                     date_from: str = "", date_to: str = "", match: Literal["", "email", "domain", "none", "any"] = ""):
     sql = " FROM candidates WHERE review_state=%s"
     args = [state]
     if q:
@@ -598,6 +592,23 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
                 raise HTTPException(400, f"{key} must be YYYY-MM-DD") from None
             sql += f" AND left(fields->'last_contact'->>'value',10) {operator} %s"
             args.append(value)
+    if match == "none":
+        sql += " AND (review_state<>'pending' OR master_match IS NULL)"
+    elif match:
+        sql += " AND review_state='pending' AND master_match" + (" IS NOT NULL" if match == "any" else "=%s")
+        if match != "any":
+            args.append(match)
+    return sql, args
+
+
+@app.get("/api/candidates", dependencies=[Depends(auth.require_route("review"))])
+def list_candidates(response: Response, sort: str = "last_contact", order: str = "desc",
+                    page: int = Query(default=1, ge=1), size: int = Query(default=500, ge=1, le=500),
+                    selected=Depends(_candidate_where)):
+    if sort not in {"last_contact", "first_contact"} or order not in {"asc", "desc"}:
+        raise HTTPException(400, "sort must be last_contact or first_contact; order must be asc or desc")
+    order_by = f" ORDER BY fields->'{sort}'->>'value' {order} NULLS LAST, id ASC"
+    sql, args = selected
     with db.connect() as conn:
         response.headers["X-Total-Count"] = str(conn.execute("SELECT count(*) AS n" + sql, args).fetchone()["n"])
         return conn.execute(
@@ -612,6 +623,9 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
             " count(DISTINCT s.raw_item_id) FILTER (WHERE r.source='sheets') AS sheets FROM lineage l"
             " JOIN signals s ON s.key=l.email_key JOIN raw_items r ON r.id=s.raw_item_id GROUP BY root_id)"
             " SELECT c.id,c.email_key,c.review_state,fields->'name'->>'value' AS name,"
+            " CASE WHEN c.review_state='pending' THEN c.master_match END AS master_match,"
+            " ARRAY(SELECT m.registered_name FROM master_clients m WHERE c.review_state='pending'"
+            " AND m.id=ANY(c.master_ids) ORDER BY m.id) AS master_names,"
             " fields->'status'->>'value' AS status,fields->'department'->>'value' AS department,"
             " coalesce((fields->'engagement_paid'->>'value')::boolean,false) AS paid,"
             " coalesce(fields->'stage'->>'value','inquiry') AS stage,"
@@ -629,6 +643,33 @@ def list_candidates(response: Response, state: str = "pending", q: str = "", sta
             " 'sheets',coalesce(i.sheets,0)) AS item_sources,"
             " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
             + order_by, [*args, size, (page - 1) * size]).fetchall()
+
+
+@app.get("/api/candidates/timeline", dependencies=[Depends(auth.require_route("review"))])
+def candidate_timeline(bucket: Literal["day", "week"] = "day",
+                       field: Literal["last_contact", "first_contact"] = "last_contact", selected=Depends(_candidate_where)):
+    sql, args = selected
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT left(fields->%s->>'value',10) AS day,count(*) AS total,"
+            " count(*) FILTER (WHERE review_state='pending' AND master_match='email') AS email,"
+            " count(*) FILTER (WHERE review_state='pending' AND master_match='domain') AS domain"
+            + sql + " GROUP BY 1", [field, *args]).fetchall()
+    groups = {}
+    for row in rows:
+        try:
+            day = date.fromisoformat(row["day"])
+            if day.isoformat() != row["day"]:
+                raise ValueError()
+            if bucket == "week":
+                day -= timedelta(days=day.weekday())
+            key = day.isoformat()
+        except (TypeError, ValueError):
+            key = None
+        group = groups.setdefault(key, {"bucket": key, "total": 0, "email": 0, "domain": 0})
+        for metric in ("total", "email", "domain"):
+            group[metric] += row[metric]
+    return [groups[key] for key in sorted(groups, key=lambda key: (key is not None, key or ""), reverse=True)]
 
 
 @app.get("/api/candidates/facets", dependencies=[Depends(auth.require_route("review"))])
