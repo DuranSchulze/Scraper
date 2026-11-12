@@ -49,6 +49,10 @@ export type CandidateRow = {
   services: string[];
   latest_amount: { amount: number; currency: string; stage: string; date: string | null } | null;
   item_sources: { gmail: number; contacts: number; sheets: number };
+  /** Accounting master list tag (pending records only): same email, or same company domain. */
+  master_match: MasterMatch | null;
+  /** Registered names of the matched master rows; can hold "" for rows without a name. */
+  master_names: string[];
 };
 
 export type MailboxState = "pending" | "running" | "done" | "failed" | "skipped";
@@ -114,10 +118,16 @@ export type RawItem = {
   } & Record<string, unknown>;
 };
 
-export type Role = "admin" | "member";
-/** Pages a member can be granted, in the API's canonical order (admins always have every one). */
-export const ROUTES = ["review", "scraping"] as const;
+/** Grants a role can hold, in the API's canonical order. `masterlist` is API-only (the client directory's import). */
+export const ROUTES = ["review", "scraping", "masterlist", "accounts"] as const;
 export type RouteKey = (typeof ROUTES)[number];
-/** `routes` are effective on /auth/me (admins: all) and stored on account rows. */
-export type User = { id: number; email: string; name: string; role: Role; routes: RouteKey[] };
+export type RoleRef = { id: number; name: string };
+/** A custom role: the pages its accounts may use. The locked Owner role always has every grant. */
+export type Role = RoleRef & { routes: RouteKey[]; locked: boolean; users: number };
+/** `routes` come from the account's role, re-read by the API on every request. */
+export type User = { id: number; email: string; name: string; role: RoleRef; routes: RouteKey[] };
 export type Account = User & { active: boolean; created_at: string };
+
+export type MasterMatch = "email" | "domain";
+/** One section of the review timeline: counts across every page for one day (or ISO week, keyed by its Monday). */
+export type TimelineBucket = { bucket: string | null; total: number; email: number; domain: number };

@@ -17,15 +17,15 @@ import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
-// Nav stays plain data, grouped like modern app shells. Items with a `route` need that page grant; admin-only groups
-// are hidden for members (pages and the API check again).
+// Nav stays plain data, grouped like modern app shells. Each item needs its grant on the account's role
+// (pages and the API check again).
 const NAV = [
-  { label: "Workspace", admin: false, items: [
+  { label: "Workspace", items: [
     { href: "/", label: "Review", icon: ListChecks, route: "review" },
     { href: "/scraping", label: "Scraping", icon: ScanSearch, route: "scraping" },
   ] },
-  { label: "Admin", admin: true, items: [
-    { href: "/accounts", label: "Accounts", icon: Users, route: null },
+  { label: "Admin", items: [
+    { href: "/accounts", label: "Accounts", icon: Users, route: "accounts" },
   ] },
 ] as const;
 
@@ -96,8 +96,7 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
   const { data: status } = useQuery(statusQuery);
   const pending = status?.candidates.pending;
   // Until the account loads nothing is listed, so a page the member can't use never flashes in.
-  const groups = NAV.filter((g) => !g.admin || me?.role === "admin")
-    .map((g) => ({ ...g, items: g.items.filter((i) => (i.route ? canUse(me, i.route) : !!me)) }))
+  const groups = NAV.map((g) => ({ ...g, items: g.items.filter((i) => canUse(me, i.route)) }))
     .filter((g) => g.items.length);
   const name = me?.name ?? "Account";
   const logo = (
@@ -171,7 +170,7 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
             <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-2 whitespace-nowrap">
               <span className="min-w-0 flex-1 leading-tight">
                 <span className="block truncate text-sm font-medium">{name}</span>
-                {me && <span className="block truncate text-xs text-sidebar-foreground/70 capitalize">{me.role}</span>}
+                {me && <span className="block truncate text-xs text-sidebar-foreground/70">{me.role.name}</span>}
               </span>
             </span>
           </TooltipTrigger>
@@ -183,7 +182,7 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
                 {me && (
                   <div className="px-2 py-1.5 leading-tight">
                     <div className="truncate text-sm font-medium">{me.name}</div>
-                    <div className="truncate text-xs text-muted-foreground capitalize">{me.role}</div>
+                    <div className="truncate text-xs text-muted-foreground">{me.role.name}</div>
                   </div>
                 )}
                 {me && <MenuPrimitive.Separator className="-mx-1 my-1 h-px bg-border" />}

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowDown, ArrowUp, ArrowUpDown, BookUser, CheckCircle2, ChevronRight, FileSpreadsheet, Loader2, Mail, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Loader2, Mail, X } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -13,9 +13,10 @@ import {
 } from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { candidatesQuery, keys, PAGE_SIZE, post, type BulkResult, type Filters, type SortKey } from "@/lib/api";
+import { candidatesQuery, keys, PAGE_SIZE, post, SHOW_MASTER_MATCH, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
-import type { CandidateRow } from "@/lib/types";
+import type { CandidateRow, TimelineBucket } from "@/lib/types";
+import { sections } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
 import { ConfirmDialog } from "./confirm-dialog";
@@ -52,8 +53,12 @@ export function pageList(page: number, pages: number): (number | "…")[] {
   return keep.flatMap((p, i) => i === 0 || p - keep[i - 1] === 1 ? [p] : p - keep[i - 1] === 2 ? [p - 1, p] : ["…" as const, p]);
 }
 
-export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pageHref, toolbar }: {
-  filters: Filters; selectedId: number | null; onSelect: (id: number) => void; onSort: (key: SortKey) => void;
+const DATE_LABEL = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+const sectionLabel = (key: string | null, bucket: Bucket) =>
+  key === null ? "No date" : `${bucket === "week" ? "Week of " : ""}${DATE_LABEL.format(new Date(`${key}T00:00:00Z`))}`;
+
+export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, onPage, pageHref, toolbar }: {
+  filters: Filters; bucket: Bucket; selectedId: number | null; onSelect: (id: number) => void; onSort: (key: SortKey) => void;
   onPage: (page: number) => void; pageHref: (page: number) => string; toolbar?: React.ReactNode;
 }) {
   const tableRef = useRef<HTMLTableElement>(null);
@@ -74,6 +79,8 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
     );
   };
   const { data, error, isPending, isPlaceholderData } = useQuery(candidatesQuery(filters));
+  const { data: timeline } = useQuery(timelineQuery(filters, bucket));
+  const totals = new Map<string | null, TimelineBucket>((timeline ?? []).map((b) => [b.bucket, b]));
   // A new page or filter is loading over the previous result: show skeletons, not the old rows (they looked frozen).
   // Same-page background refreshes are not placeholder data, so they never flash.
   const turning = isPlaceholderData;
@@ -197,8 +204,12 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
             {error && <TableRow><TableCell colSpan={10} className="py-10 text-center text-destructive">{error.message}</TableCell></TableRow>}
             {(isPending || turning) && !error && <SkeletonRows label={turning ? `Loading page ${filters.page.toLocaleString()}…` : "Loading records…"} />}
             {!turning && rows?.length === 0 && <TableRow><TableCell colSpan={10} className="py-10 text-center text-muted-foreground">No records match these filters.</TableCell></TableRow>}
-            {!turning && rows?.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect}
-              ticked={selectable ? ticked.has(r.id) : null} onTick={tick} />)}
+            {!turning && rows && sections(rows, filters.sort, bucket).map((sec, i) => (
+              <SectionRows key={`${sec.key}-${i}`} label={sectionLabel(sec.key, bucket)} onPage={sec.rows.length} totals={totals.get(sec.key)}>
+                {sec.rows.map((r) => <Row key={r.id} r={r} selected={r.id === selectedId} onSelect={onSelect}
+                  ticked={selectable ? ticked.has(r.id) : null} onTick={tick} />)}
+              </SectionRows>
+            ))}
           </TableBody>
       </Table>
       {data && data.total > PAGE_SIZE && (
@@ -230,6 +241,55 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         </div>
       )}
     </Card>
+  );
+}
+
+/** A timeline section: a heading row (date, records across every page, master list matches), then its records. */
+function SectionRows({ label, onPage, totals, children }: { label: string; onPage: number; totals?: TimelineBucket; children: React.ReactNode }) {
+  const total = totals?.total ?? onPage;
+  return (
+    <>
+      <TableRow className="pointer-events-none bg-muted/60 hover:bg-muted/60">
+        <TableCell colSpan={10} className="!py-1.5 pl-4">
+          {/* Sticks to the table's left edge and wraps within the screen, so the counts stay visible while the wide table scrolls. */}
+          <span className="sticky left-4 flex w-fit max-w-[calc(100vw-3rem)] flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <span className="inline-flex items-center gap-1.5 font-semibold text-foreground">
+              <CalendarDays aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />{label}
+            </span>
+            <span className="text-muted-foreground tabular-nums">
+              {total.toLocaleString()} record{total === 1 ? "" : "s"}{onPage < total ? `, ${onPage.toLocaleString()} on this page` : ""}
+            </span>
+            {SHOW_MASTER_MATCH && !!totals?.email && <Pill tone="success" className="tabular-nums">{totals.email.toLocaleString()} same email</Pill>}
+            {SHOW_MASTER_MATCH && !!totals?.domain && <Pill tone="info" className="tabular-nums">{totals.domain.toLocaleString()} same domain</Pill>}
+          </span>
+        </TableCell>
+      </TableRow>
+      {children}
+    </>
+  );
+}
+
+/** Master list tag: the accounting record(s) this email or its company domain matches. */
+function MatchBadge({ r }: { r: CandidateRow }) {
+  if (!SHOW_MASTER_MATCH || !r.master_match) return null;
+  const names = r.master_names.map((n) => n.trim() || "Unnamed master row");
+  const email = r.master_match === "email";
+  const Icon = email ? AtSign : Building2;
+  const text = email ? "Exact email" : "Same domain";
+  return (
+    <Tooltip>
+      <TooltipTrigger type="button" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}
+        aria-label={`${text} in master list: ${names.join(", ")}`}
+        className={cn("mt-1 inline-flex max-w-full items-center gap-1 self-start rounded-full px-2 py-0.5 text-xs font-medium",
+          email ? "bg-success/15 text-success" : "bg-info/15 text-info")}>
+        <Icon aria-hidden className="h-3 w-3 shrink-0" />
+        <span className="truncate">{text}{names[0] ? ` · ${names[0]}` : ""}{names.length > 1 ? ` +${names.length - 1}` : ""}</span>
+      </TooltipTrigger>
+      <TooltipContent className="items-start">
+        <span className="font-medium">{email ? "This email is in the accounting master list" : "This company domain is in the accounting master list"}</span>
+        {tipList(names, (n) => n)}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -290,6 +350,7 @@ function Row({ r, selected, onSelect, ticked, onTick }: {
           </span>
           <span className="truncate text-xs text-muted-foreground" title={r.email_key}>{r.email_key}</span>
           {r.company && <span className="truncate text-xs text-muted-foreground" title={r.company}>{r.company}</span>}
+          <MatchBadge r={r} />
         </div>
         </div>
       </TableCell>

@@ -7,7 +7,7 @@ import { AtSign, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
-import { candidatesQuery, facetsQuery, FILTER_KEYS, PAGE_SIZE, statusQuery, type Filters } from "@/lib/api";
+import { candidatesQuery, facetsQuery, FILTER_KEYS, PAGE_SIZE, SHOW_MASTER_MATCH, statusQuery, type Bucket, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/shell/page-header";
@@ -25,6 +25,11 @@ const STATE_OPTIONS = [
 ];
 const STAGE_OPTIONS = [{ value: "", label: "Any stage" }, ...STAGES.map((s) => ({ value: s, label: s }))];
 const STATUS_OPTIONS = [{ value: "", label: "Any status" }, ...STATUSES.map((s) => ({ value: s, label: s }))];
+const MATCH_OPTIONS = [
+  { value: "", label: "Any master list match" }, { value: "any", label: "In master list" },
+  { value: "email", label: "Exact email" }, { value: "domain", label: "Same domain" }, { value: "none", label: "Not in master list" },
+];
+const BUCKETS: { value: Bucket; label: string }[] = [{ value: "day", label: "Day" }, { value: "week", label: "Week" }];
 const RESETS_PAGE = new Set<string>(["state", "sort", "order", ...FILTER_KEYS]);
 const any = (label: string, values: string[] = []) => [{ value: "", label }, ...values.map((v) => ({ value: v, label: v }))];
 
@@ -38,6 +43,9 @@ export function ReviewApp() {
     order: params.get("order") === "asc" ? "asc" : "desc",
     page: Math.max(1, Math.floor(Number(params.get("page"))) || 1),
   };
+  // A shared ?match= link must not filter silently while matches are hidden.
+  if (!SHOW_MASTER_MATCH) filters.match = "";
+  const bucket: Bucket = params.get("bucket") === "week" ? "week" : "day";
   const selectedId = Number(params.get("id")) || null;
   const { data: status } = useQuery(statusQuery);
   const { data: list } = useQuery(candidatesQuery(filters));
@@ -83,8 +91,8 @@ export function ReviewApp() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="Review" description="Confirm each client's details, then approve or reject. Shortcuts in a record: A approve, R reject, J / K next / previous." />
-      <div className="flex flex-wrap items-center gap-2">
+      <PageHeader title="Review" description={`Records grouped by date${SHOW_MASTER_MATCH ? ", tagged when the accounting master list has the same email or company domain" : ""}. Shortcuts in a record: A approve, R reject, J / K next / previous.`} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div role="group" aria-label="Review state" className="inline-flex max-w-full overflow-x-auto rounded-full border bg-muted/40 p-0.5">
           {STATE_OPTIONS.map((o) => {
             const active = filters.state === o.value;
@@ -99,8 +107,21 @@ export function ReviewApp() {
             );
           })}
         </div>
+        <div role="group" aria-label="Group records by" className="inline-flex rounded-full bg-muted/40 p-0.5">
+          {BUCKETS.map((b) => (
+            <button key={b.value} type="button" aria-pressed={bucket === b.value} onClick={() => setParams({ bucket: b.value === "day" ? null : b.value })}
+              className={cn("inline-flex h-7 items-center rounded-full px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+                bucket === b.value ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
+              By {b.label.toLowerCase()}
+            </button>
+          ))}
+        </div>
       </div>
       <div role="group" aria-label="Filters" className="flex flex-wrap items-center gap-2">
+        {SHOW_MASTER_MATCH && (
+          <Pick label="Master list match" value={filters.match} options={MATCH_OPTIONS} onChange={(v) => setParams({ match: v })}
+            className={cn(PILL, "max-w-56", filters.match && PILL_ON)} />
+        )}
         <Pick label="Stage" value={filters.stage} options={STAGE_OPTIONS} onChange={(v) => setParams({ stage: v })}
           className={cn(PILL, filters.stage && PILL_ON)} />
         <Pick label="Status" value={filters.status} options={STATUS_OPTIONS} onChange={(v) => setParams({ status: v })}
@@ -132,7 +153,7 @@ export function ReviewApp() {
           </Button>
         )}
       </div>
-      <RecordsTable filters={filters} selectedId={selectedId} onSelect={(id) => setParams({ id: String(id) })}
+      <RecordsTable filters={filters} bucket={bucket} selectedId={selectedId} onSelect={(id) => setParams({ id: String(id) })}
         onPage={(p) => setParams(pagePatch(p))} pageHref={(p) => href(pagePatch(p))}
         onSort={(sort) => {
           // A new column starts oldest first; the active column flips. The default (last contact, newest) leaves the URL clean.
