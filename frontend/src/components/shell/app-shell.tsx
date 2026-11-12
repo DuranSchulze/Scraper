@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
-import { ChevronsUpDown, ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, ScanSearch, Sun, Users } from "lucide-react";
+import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, ScanSearch, Sun, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
@@ -138,23 +138,6 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
         ))}
       </nav>
       <div className="flex flex-col gap-1 border-t border-sidebar-border p-2">
-        {/* The whole row is the switch, so the icon alone still toggles it while the sidebar is collapsed. */}
-        <Tooltip disabled={!tip}>
-          <TooltipTrigger render={
-            <button type="button" role="switch" aria-checked={theme === "dark"} aria-label="Dark mode" onClick={toggleTheme}
-              className={cn(ROW, IDLE)} />
-          }>
-            <span className={SLOT}>{theme === "dark" ? <Moon className={ICON} /> : <Sun className={ICON} />}</span>
-            <span className="sb-label flex min-w-0 flex-1 items-center gap-2 pr-2 whitespace-nowrap">
-              <span className="truncate">Dark mode</span>
-              <span aria-hidden className={cn("ml-auto flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
-                theme === "dark" ? "bg-sidebar-primary" : "bg-sidebar-foreground/55")}>
-                <span className={cn("size-4 rounded-full bg-white shadow-sm transition-transform", theme === "dark" && "translate-x-4")} />
-              </span>
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={10}>{theme === "dark" ? "Dark mode on" : "Dark mode off"}</TooltipContent>
-        </Tooltip>
         {/* A labelled row (not a header icon), so the collapse control is easy to find. */}
         {showCollapse && (
           <Tooltip disabled={!tip}>
@@ -171,12 +154,14 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
             <TooltipContent side="right" sideOffset={10}>Expand sidebar</TooltipContent>
           </Tooltip>
         )}
+        {/* One account card: the menu trigger fills it and the theme button sits inside it (hidden while collapsed; the menu has the same action). */}
+        <div className="flex items-center rounded-lg bg-sidebar-accent/40 ring-1 ring-sidebar-border">
         <MenuPrimitive.Root>
           {/* Tooltip and menu share one button: the tooltip trigger renders the menu trigger. */}
           <Tooltip disabled={!tip}>
           <TooltipTrigger render={
             <MenuPrimitive.Trigger aria-label={`Account menu for ${name}`}
-              className={cn(ROW, "h-12 text-left text-sidebar-foreground hover:bg-sidebar-accent/70 data-popup-open:bg-sidebar-accent")} />
+              className={cn(ROW, "h-12 min-w-0 flex-1 text-left text-sidebar-foreground hover:bg-sidebar-accent/70 data-popup-open:bg-sidebar-accent")} />
           }>
             <span className={SLOT}>
               <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-accent-foreground uppercase ring-1 ring-sidebar-border">{name.slice(0, 1)}</span>
@@ -186,7 +171,6 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
                 <span className="block truncate text-sm font-medium">{name}</span>
                 {me && <span className="block truncate text-xs text-sidebar-foreground/70 capitalize">{me.role}</span>}
               </span>
-              <ChevronsUpDown aria-hidden className="size-4 shrink-0 opacity-60" />
             </span>
           </TooltipTrigger>
           <TooltipContent side="right" sideOffset={10}>{`${name} · account`}</TooltipContent>
@@ -201,6 +185,12 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
                   </div>
                 )}
                 {me && <MenuPrimitive.Separator className="-mx-1 my-1 h-px bg-border" />}
+                {collapsed && (
+                  <MenuPrimitive.Item onClick={toggleTheme} className={ITEM}>
+                    {theme === "dark" ? <Sun aria-hidden /> : <Moon aria-hidden />}
+                    {theme === "dark" ? "Light mode" : "Dark mode"}
+                  </MenuPrimitive.Item>
+                )}
                 <MenuPrimitive.Item onClick={onLogout} className={cn(ITEM, "text-destructive data-highlighted:bg-destructive/10 data-highlighted:text-destructive")}>
                   <LogOut aria-hidden />
                   Sign out
@@ -209,6 +199,12 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
             </MenuPrimitive.Positioner>
           </MenuPrimitive.Portal>
         </MenuPrimitive.Root>
+        <button type="button" onClick={toggleTheme} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          className="mr-2 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-sidebar-foreground/80 outline-none transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring in-data-[sidebar=collapsed]:lg:hidden">
+          {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
+        </button>
+        </div>
       </div>
     </div>
   );
