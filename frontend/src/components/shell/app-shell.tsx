@@ -137,9 +137,9 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
           </div>
         ))}
       </nav>
-      <div className="flex flex-col gap-1 border-t border-sidebar-border p-2">
-        {/* A labelled row (not a header icon), so the collapse control is easy to find. */}
-        {showCollapse && (
+      {/* A labelled row (not a header icon), so the collapse control is easy to find. It sits above the footer's border line. */}
+      {showCollapse && (
+        <div className="px-2 pb-2">
           <Tooltip disabled={!tip}>
             <TooltipTrigger render={
               <button type="button" onClick={toggleCollapsed} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
@@ -153,9 +153,11 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
             </TooltipTrigger>
             <TooltipContent side="right" sideOffset={10}>Expand sidebar</TooltipContent>
           </Tooltip>
-        )}
+        </div>
+      )}
+      <div className="border-t border-sidebar-border p-2">
         {/* One account card: the menu trigger fills it and the theme button sits inside it (hidden while collapsed; the menu has the same action). */}
-        <div className="flex items-center rounded-lg bg-sidebar-accent/40 ring-1 ring-sidebar-border">
+        <div className="flex items-center rounded-md">
         <MenuPrimitive.Root>
           {/* Tooltip and menu share one button: the tooltip trigger renders the menu trigger. */}
           <Tooltip disabled={!tip}>
