@@ -11,6 +11,7 @@ from typing import Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from . import auth, db, pipeline
+from . import auth, db, master, pipeline
 from .db import JobStopped
 from .config import RULES_PATH, ROOT, env, env_list, jwt_secret, load_rules
 
@@ -515,6 +516,43 @@ def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=
         return {"lines": [row["line"] for row in reversed(rows)]}
 
 
+@app.post("/api/master/import", dependencies=[Depends(auth.require_route("masterlist"))])
+async def import_master(request: Request, filename: str = Query(default="Clients Database.xlsx", min_length=1, max_length=255),
+                        check: bool = False, user=Depends(auth.current_user)):
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > master.MAX_BYTES:
+            raise HTTPException(413, "Workbook exceeds 10 MB")
+        data.extend(chunk)
+    return await run_in_threadpool(master.import_workbook, bytes(data), filename, user["email"], check)
+
+
+@app.get("/api/master", dependencies=[Depends(auth.require_route("masterlist"))])
+def master_status():
+    with db.connect() as conn:
+        last_import = conn.execute(
+            "SELECT filename,sheet,rows,emails,imported_by,imported_at FROM master_imports ORDER BY id DESC LIMIT 1").fetchone()
+        return {"last_import": last_import, "tagged": master.counts(conn)}
+
+
+@app.get("/api/master/rows", dependencies=[Depends(auth.require_route("masterlist"))])
+def master_rows(response: Response, q: str = "", matched: Literal["any", "yes", "no"] = "any",
+                page: int = Query(default=1, ge=1), size: int = Query(default=50, ge=1, le=200)):
+    cte = ("WITH counts AS (SELECT mid,count(*) AS matched FROM candidates c, unnest(c.master_ids) mid"
+           " WHERE c.review_state='pending' GROUP BY mid) ")
+    sql = (" FROM master_clients m LEFT JOIN counts c ON c.mid=m.id"
+           " WHERE concat_ws(' ',m.registered_name,m.alias,m.trade_name,m.tin,array_to_string(m.emails,' ')) ILIKE %s")
+    args = [f"%{q}%"]
+    if matched != "any":
+        sql += " AND coalesce(c.matched,0)" + (">0" if matched == "yes" else "=0")
+    with db.connect() as conn:
+        response.headers["X-Total-Count"] = str(conn.execute(cte + "SELECT count(*) AS n" + sql, args).fetchone()["n"])
+        return conn.execute(
+            cte + "SELECT m.id,m.row_no," + ",".join("m." + field for field in master.FIELDS) + ",m.emails,"
+            " coalesce(c.matched,0) AS matched" + sql + " ORDER BY m.registered_name,m.id LIMIT %s OFFSET %s",
+            (*args, size, (page - 1) * size)).fetchall()
+
+
 @app.get("/api/candidates", dependencies=[Depends(auth.require_route("review"))])
 def list_candidates(response: Response, state: str = "pending", q: str = "", status: str = "",
                     department: str = "", stage: str = "", sort: str = "last_contact", order: str = "desc",
@@ -614,6 +652,8 @@ def _get(conn, cid: int, lock: bool = False) -> dict:
     row = conn.execute("SELECT * FROM candidates WHERE id = %s" + (" FOR UPDATE" if lock else ""), (cid,)).fetchone()
     if not row:
         raise HTTPException(404, "candidate not found")
+    if row["review_state"] != "pending":
+        row["master_match"] = row["master_ids"] = None
     return row
 
 
@@ -709,7 +749,7 @@ def _approve(conn, cand: dict, c: ClientIn):
     since = min((p.date for p in reviewed.payments if p.date), default=None)
     values["client_since"] = since.isoformat() if since else None
     conn.execute(
-        "UPDATE candidates SET review_state='approved', reviewed=%s, reviewed_by=%s,"
+        "UPDATE candidates SET review_state='approved', master_match=NULL,master_ids=NULL, reviewed=%s, reviewed_by=%s,"
         " reviewed_at=clock_timestamp(), updated_at=now() WHERE id=%s",
         (Jsonb(values), getuser(), cand["id"]))
 
@@ -763,7 +803,7 @@ def reject(cid: int):
 
 
 def _reject(conn, cid: int):
-    conn.execute("UPDATE candidates SET review_state='rejected', updated_at=now() WHERE id=%s", (cid,))
+    conn.execute("UPDATE candidates SET review_state='rejected', master_match=NULL,master_ids=NULL, updated_at=now() WHERE id=%s", (cid,))
 
 
 class BulkIn(BaseModel):
@@ -835,6 +875,7 @@ def _previous_target(conn, cand: dict) -> set[str]:
 @app.post("/api/candidates/{cid}/reopen", dependencies=[Depends(auth.require_route("review"))])
 def reopen(cid: int):
     with db.connect() as conn:
+        conn.execute(master.LOCK)
         cand = _get(conn, cid, lock=True)
         keys = {cand["email_key"]} | _previous_target(conn, cand)
         conn.execute("UPDATE candidates SET review_state='pending', merged_into=NULL, updated_at=now() WHERE id=%s", (cid,))
@@ -851,13 +892,14 @@ def merge(cid: int, m: MergeIn):
     if cid == m.into_id:
         raise HTTPException(400, "cannot merge a record into itself")
     with db.connect() as conn:
+        conn.execute(master.LOCK)
         # Lock the source and target in id order.
         locked = {i: _get(conn, i, lock=True) for i in sorted((cid, m.into_id))}
         src, dst = locked[cid], locked[m.into_id]
         if dst["review_state"] == "merged":
             raise HTTPException(400, "target is itself merged; pick the record it was merged into")
         keys = {src["email_key"], dst["email_key"]} | _previous_target(conn, src)
-        conn.execute("UPDATE candidates SET review_state='merged', merged_into=%s, updated_at=now() WHERE id=%s", (m.into_id, cid))
+        conn.execute("UPDATE candidates SET review_state='merged', master_match=NULL,master_ids=NULL, merged_into=%s, updated_at=now() WHERE id=%s", (m.into_id, cid))
         pipeline.rebuild(conn, keys, load_rules(), datetime.now(timezone.utc))
     return {"ok": True}
 

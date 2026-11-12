@@ -37,6 +37,69 @@ def test_rebuild_targets_includes_merged_ancestors():
         "c": {"a", "b", "c", "d"}, "x": {"x"}}
 
 
+def test_committed_extraction_batch_is_tagged_before_stop(conn, monkeypatch):
+    from scraper import master
+    from test_master import workbook
+
+    for i in range(3):
+        seed(conn, sid=str(i), email=f"p{i}@client.test")
+    master.import_workbook(workbook([["Client", "p0@client.test"]]), "synthetic.xlsx", "test")
+    monkeypatch.setattr(pipeline, "BATCH", 2)
+
+    def stop_after_batch():
+        if conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] >= 2:
+            raise db.JobStopped()
+
+    with pytest.raises(db.JobStopped):
+        pipeline.run_extract(lambda _: None, checkpoint=stop_after_batch)
+    rows = candidates(conn)
+    assert len(rows) == 2
+    assert rows["p0@client.test"]["master_match"] == "email"
+    assert rows["p1@client.test"]["master_match"] == "domain"
+    assert all(row["master_ids"] for row in rows.values())
+
+
+def test_reimport_review_merge_and_reopen_recompute_tags(conn, authenticated_client):
+    from scraper import master
+    from test_master import workbook
+
+    seed(conn, sid="a", email="a@client.test")
+    seed(conn, sid="b", email="b@client.test")
+    pipeline.run_extract(lambda _: None)
+    master.import_workbook(workbook([["Old", "a@client.test"]]), "old.xlsx", "test")
+    rows = candidates(conn)
+    a, b = rows["a@client.test"]["id"], rows["b@client.test"]["id"]
+    client, gui = authenticated_client, {"X-Local-GUI": "1"}
+    assert client.post(f"/api/candidates/{a}/approve", headers=gui, json={"name": "Reviewed", "status": "active"}).status_code == 200
+    assert candidates(conn)["a@client.test"]["master_ids"] is None
+    master.import_workbook(workbook([["New", "b@client.test"]]), "new.xlsx", "test")
+    assert client.get(f"/api/candidates/{a}").json()["master_match"] is None
+    assert client.post(f"/api/candidates/{a}/reopen", headers=gui).status_code == 200
+    assert candidates(conn)["a@client.test"]["master_match"] == "domain"
+    assert client.post(f"/api/candidates/{a}/merge", headers=gui, json={"into_id": b}).status_code == 200
+    rows = candidates(conn)
+    assert rows["a@client.test"]["master_match"] is None and rows["a@client.test"]["master_ids"] is None
+    assert rows["b@client.test"]["master_match"] == "email"
+    assert client.post(f"/api/candidates/{a}/reopen", headers=gui).status_code == 200
+    assert candidates(conn)["a@client.test"]["master_match"] == "domain"
+    assert client.post(f"/api/candidates/{a}/reject", headers=gui).status_code == 200
+    assert candidates(conn)["a@client.test"]["master_ids"] is None
+
+
+def test_changed_extraction_key_gets_new_match(conn):
+    from scraper import master
+    from test_master import workbook
+
+    seed(conn, email="old@first.test")
+    master.import_workbook(workbook([["First", "old@first.test"], ["Second", "owner@second.test"]]), "synthetic.xlsx", "test")
+    pipeline.run_extract(lambda _: None)
+    assert candidates(conn)["old@first.test"]["master_match"] == "email"
+    seed(conn, email="new@second.test")
+    pipeline.run_extract(lambda _: None)
+    rows = candidates(conn)
+    assert set(rows) == {"new@second.test"} and rows["new@second.test"]["master_match"] == "domain"
+
+
 def test_incremental_replaces_old_and_new_person_and_skips_extracted(conn, monkeypatch):
     item = seed(conn)
     pipeline.run_extract(lambda _: None)

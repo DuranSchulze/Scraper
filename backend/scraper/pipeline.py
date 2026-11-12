@@ -8,7 +8,7 @@ import time
 import psycopg
 from psycopg.types.json import Jsonb
 
-from . import db
+from . import db, master
 from .db import JobStopped
 from .config import env, env_int, env_list, load_rules
 from .extract import extract_item
@@ -31,6 +31,7 @@ def rebuild_targets(keys, merged: dict[str, str]) -> dict[str, set[str]]:
 
 
 def rebuild(conn, keys, rules: dict, now: datetime) -> None:
+    conn.execute(master.LOCK)
     merged = {r["email_key"]: r["target"] for r in conn.execute(
         "SELECT c.email_key, t.email_key AS target FROM candidates c"
         " JOIN candidates t ON t.id=c.merged_into WHERE c.review_state='merged'")}
@@ -54,6 +55,8 @@ def rebuild(conn, keys, rules: dict, now: datetime) -> None:
             "DELETE FROM candidates c WHERE c.review_state='pending' AND c.email_key=ANY(%s)"
             " AND c.reviewed IS NULL AND c.client_id IS NULL"
             " AND NOT EXISTS (SELECT 1 FROM candidates src WHERE src.merged_into=c.id)", (absent,))
+
+    master.rematch(conn, targets)
 
 
 def _failure(log, count: int = 1) -> None:
