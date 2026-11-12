@@ -77,7 +77,20 @@ export const keys = {
   rules: ["rules"] as const,
   me: ["me"] as const,
   users: ["users"] as const,
+  schedule: ["schedule"] as const,
 };
+
+export type Schedule = { enabled: boolean; interval_minutes: number; last_auto_at: string | null; next_run_at: string | null };
+
+export const scheduleQuery = queryOptions({
+  queryKey: keys.schedule,
+  queryFn: () => request<Schedule>("/api/schedule"),
+  refetchInterval: 30_000,
+  retry: false,
+});
+
+export const updateSchedule = (body: Pick<Schedule, "enabled" | "interval_minutes">) =>
+  request<Schedule>("/api/schedule", { method: "PUT", body: JSON.stringify(body) });
 
 export const statusQuery = queryOptions({
   queryKey: keys.status,
