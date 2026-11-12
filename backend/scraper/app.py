@@ -448,7 +448,7 @@ def extract(body: ExtractIn):
 
 @app.get("/api/status")
 def status(user=Depends(auth.current_user)):
-    scraping = user["role"] == "admin" or "scraping" in user["routes"]
+    scraping = "scraping" in user["routes"]
     with db.connect() as conn:
         db.interrupt_stale(conn)
         job = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()

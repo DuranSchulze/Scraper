@@ -10,7 +10,6 @@ import re
 import secrets
 import threading
 import time
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 import jwt
@@ -21,7 +20,12 @@ from . import db
 from .config import env, jwt_secret
 
 COOKIE = "scraper_session"
-ROUTES = ("review", "scraping")
+ROUTES = ("review", "scraping", "masterlist", "accounts")
+USER_SELECT = ("SELECT u.id,u.email,u.name,u.active,u.created_at,"
+               " jsonb_build_object('id',r.id,'name',r.name) AS role,r.routes"
+               " FROM users u JOIN roles r ON r.id=u.role_id")
+ROLE_SELECT = ("SELECT r.id,r.name,r.routes,r.locked,"
+               " (SELECT count(*) FROM users u WHERE u.role_id=r.id) AS users FROM roles r")
 SESSION_SECONDS = 8 * 60 * 60
 MAX_BUCKETS = 10_000
 buckets = {}
@@ -77,18 +81,17 @@ DUMMY_HASH = hash_password("unused login comparison")
 
 def sign_token(user: dict) -> str:
     now = int(time.time())
-    return jwt.encode({"sub": str(user["id"]), "role": user["role"], "iat": now,
+    return jwt.encode({"sub": str(user["id"]), "iat": now,
                        "exp": now + SESSION_SECONDS}, jwt_secret(), algorithm="HS256")
 
 
 def verify_token(token: str) -> dict | None:
     try:
         claims = jwt.decode(token, jwt_secret(), algorithms=["HS256"],
-                            options={"require": ["sub", "role", "iat", "exp"]})
+                            options={"require": ["sub", "iat", "exp"]})
         subject = claims["sub"]
         if (not isinstance(subject, str) or not subject.isascii() or not subject.isdigit()
-                or len(subject) > 19 or not 0 < int(subject) <= 9223372036854775807
-                or claims["role"] not in ("admin", "member")):
+                or len(subject) > 19 or not 0 < int(subject) <= 9223372036854775807):
             return None
         return claims
     except (jwt.InvalidTokenError, ValueError, TypeError, OverflowError, RuntimeError):
@@ -103,7 +106,7 @@ def current_user(request: Request):
     if not claims:
         raise HTTPException(401, "Sign in required")
     with db.connect() as conn:
-        user = conn.execute("SELECT id,email,name,role,routes FROM users WHERE id=%s AND active", (int(claims["sub"]),)).fetchone()
+        user = conn.execute(USER_SELECT + " WHERE u.id=%s AND u.active", (int(claims["sub"]),)).fetchone()
     if not user:
         raise HTTPException(401, "Sign in required")
     if request.method == "POST" and request.url.path == "/api/users":
@@ -113,18 +116,12 @@ def current_user(request: Request):
     return user
 
 
-def require_admin(user=Depends(current_user)):
-    if user["role"] != "admin":
-        raise HTTPException(403, "Admin access required")
-    return user
-
-
 def require_route(key):
     if key not in ROUTES:
         raise ValueError("Unknown route")
 
     def permitted(user=Depends(current_user)):
-        if user["role"] != "admin" and key not in user["routes"]:
+        if key not in user["routes"]:
             raise HTTPException(403, "You don't have access to this page")
         return user
 
@@ -159,13 +156,8 @@ class RoutesIn(BaseModel):
         return [key for key in ROUTES if key in value]
 
 
-class UserIn(LoginIn, RoutesIn):
-    model_config = ConfigDict(hide_input_in_errors=True)
-
+class RoleIn(RoutesIn):
     name: str = Field(min_length=1, max_length=200)
-    password: str = Field(min_length=1, max_length=1024)
-    role: Literal["admin", "member"]
-    routes: list[str] = Field(default_factory=lambda: list(ROUTES), min_length=1)
 
     @field_validator("name")
     @classmethod
@@ -175,11 +167,41 @@ class UserIn(LoginIn, RoutesIn):
         return value.strip()
 
 
+class UserRoleIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role_id: int = Field(gt=0)
+
+
+class UserIn(LoginIn, UserRoleIn):
+    model_config = ConfigDict(hide_input_in_errors=True, extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def nonempty_name(cls, value):
+        if not value.strip():
+            raise ValueError("Name is required")
+        return value.strip()
+
+
+class RoleRef(BaseModel):
+    id: int
+    name: str
+
+
+class Role(RoleRef):
+    routes: list[str]
+    locked: bool
+    users: int
+
+
 class User(BaseModel):
     id: int
     email: str
     name: str
-    role: Literal["admin", "member"]
+    role: RoleRef
     routes: list[str]
 
     @field_validator("routes")
@@ -207,7 +229,7 @@ def login(body: LoginIn, request: Request, response: Response):
     hit("login_ip", peer, 30, 900)
     hit("login_email", (peer, body.email), 5, 900)
     with db.connect() as conn:
-        user = conn.execute("SELECT id,email,name,role,routes,password_hash,active FROM users WHERE lower(email)=%s",
+        user = conn.execute(USER_SELECT.replace("SELECT u.id", "SELECT u.password_hash,u.id") + " WHERE lower(u.email)=%s",
                             (body.email,)).fetchone()
     valid = verify_password(body.password, user["password_hash"] if user else DUMMY_HASH)
     if not valid or not user or not user["active"]:
@@ -216,7 +238,7 @@ def login(body: LoginIn, request: Request, response: Response):
     response.set_cookie(COOKIE, sign_token(user), max_age=SESSION_SECONDS, httponly=True,
                         secure=samesite == "none" or request.url.scheme == "https" or env("APP_URL").startswith("https://"),
                         samesite=samesite, path="/")
-    return {**user, "routes": list(ROUTES) if user["role"] == "admin" else user["routes"]}
+    return user
 
 
 @router.post("/auth/logout")
@@ -229,38 +251,112 @@ def logout(request: Request, response: Response):
 
 @router.get("/auth/me", response_model=User)
 def me(user=Depends(current_user)):
-    return {**user, "routes": list(ROUTES) if user["role"] == "admin" else user["routes"]}
+    return user
+
+
+def _lock_accounts(conn, user):
+    # One lock order serializes role edits, assignments and Owner-count checks.
+    conn.execute("LOCK TABLE roles, users IN SHARE ROW EXCLUSIVE MODE")
+    actor = conn.execute(USER_SELECT + " WHERE u.id=%s AND u.active", (user["id"],)).fetchone()
+    if not actor:
+        raise HTTPException(401, "Sign in required")
+    if "accounts" not in actor["routes"]:
+        raise HTTPException(403, "You don't have access to this page")
+    return actor
+
+
+@router.get("/roles", response_model=list[Role])
+def roles(user=Depends(require_route("accounts"))):
+    with db.connect() as conn:
+        return conn.execute(ROLE_SELECT + " ORDER BY r.id").fetchall()
+
+
+@router.post("/roles", response_model=Role, status_code=201)
+def create_role(body: RoleIn, user=Depends(require_route("accounts"))):
+    try:
+        with db.connect() as conn:
+            _lock_accounts(conn, user)
+            rid = conn.execute("INSERT INTO roles(name,routes) VALUES (%s,%s) RETURNING id",
+                               (body.name, body.routes)).fetchone()["id"]
+            return conn.execute(ROLE_SELECT + " WHERE r.id=%s", (rid,)).fetchone()
+    except UniqueViolation as exc:
+        raise HTTPException(409, "Role name already exists") from exc
+
+
+@router.patch("/roles/{role_id}", response_model=Role)
+def update_role(role_id: int, body: RoleIn, user=Depends(require_route("accounts"))):
+    try:
+        with db.connect() as conn:
+            actor = _lock_accounts(conn, user)
+            role = conn.execute("SELECT locked FROM roles WHERE id=%s", (role_id,)).fetchone()
+            if not role:
+                raise HTTPException(404, "Role not found")
+            if role["locked"]:
+                raise HTTPException(400, "Locked role cannot be edited or deleted")
+            if actor["role"]["id"] == role_id and "accounts" not in body.routes:
+                raise HTTPException(400, "You would lose access to Accounts")
+            conn.execute("UPDATE roles SET name=%s,routes=%s WHERE id=%s", (body.name, body.routes, role_id))
+            return conn.execute(ROLE_SELECT + " WHERE r.id=%s", (role_id,)).fetchone()
+    except UniqueViolation as exc:
+        raise HTTPException(409, "Role name already exists") from exc
+
+
+@router.delete("/roles/{role_id}")
+def delete_role(role_id: int, user=Depends(require_route("accounts"))):
+    with db.connect() as conn:
+        _lock_accounts(conn, user)
+        role = conn.execute(ROLE_SELECT + " WHERE r.id=%s", (role_id,)).fetchone()
+        if not role:
+            raise HTTPException(404, "Role not found")
+        if role["locked"]:
+            raise HTTPException(400, "Locked role cannot be edited or deleted")
+        if role["users"]:
+            raise HTTPException(409, "Role is in use")
+        conn.execute("DELETE FROM roles WHERE id=%s", (role_id,))
+    return {"ok": True}
 
 
 @router.get("/users", response_model=list[Account])
-def users(admin=Depends(require_admin)):
+def users(user=Depends(require_route("accounts"))):
     with db.connect() as conn:
-        return conn.execute("SELECT id,email,name,role,routes,active,created_at FROM users ORDER BY id").fetchall()
+        return conn.execute(USER_SELECT + " ORDER BY u.id").fetchall()
 
 
 @router.post("/users", response_model=Account, status_code=201)
-def create_user(body: UserIn, admin=Depends(require_admin)):
+def create_user(body: UserIn, user=Depends(require_route("accounts"))):
+    password_hash = hash_password(body.password)
     try:
         with db.connect() as conn:
-            return conn.execute(
-                "INSERT INTO users(email,name,password_hash,role,routes) VALUES (%s,%s,%s,%s,%s)"
-                " RETURNING id,email,name,role,routes,active,created_at",
-                (body.email, body.name, hash_password(body.password), body.role, body.routes)).fetchone()
+            _lock_accounts(conn, user)
+            if not conn.execute("SELECT 1 FROM roles WHERE id=%s", (body.role_id,)).fetchone():
+                raise HTTPException(404, "Role not found")
+            uid = conn.execute(
+                "INSERT INTO users(email,name,password_hash,role_id) VALUES (%s,%s,%s,%s) RETURNING id",
+                (body.email, body.name, password_hash, body.role_id)).fetchone()["id"]
+            return conn.execute(USER_SELECT + " WHERE u.id=%s", (uid,)).fetchone()
     except UniqueViolation as exc:
         raise HTTPException(409, "Email already exists") from exc
 
 
 @router.patch("/users/{user_id}", response_model=Account)
-def update_routes(user_id: int, body: RoutesIn, admin=Depends(require_admin)):
+def update_user_role(user_id: int, body: UserRoleIn, user=Depends(require_route("accounts"))):
     with db.connect() as conn:
-        target = conn.execute("SELECT role FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
+        actor = _lock_accounts(conn, user)
+        target = conn.execute("SELECT role_id,active FROM users WHERE id=%s FOR UPDATE", (user_id,)).fetchone()
         if not target:
             raise HTTPException(404, "User not found")
-        if target["role"] == "admin":
-            raise HTTPException(400, "Cannot change an admin's routes")
-        return conn.execute(
-            "UPDATE users SET routes=%s WHERE id=%s RETURNING id,email,name,role,routes,active,created_at",
-            (body.routes, user_id)).fetchone()
+        role = conn.execute("SELECT routes FROM roles WHERE id=%s", (body.role_id,)).fetchone()
+        if not role:
+            raise HTTPException(404, "Role not found")
+        if user_id == actor["id"] and "accounts" not in role["routes"]:
+            raise HTTPException(400, "You would lose access to Accounts")
+        owner_id = conn.execute("SELECT id FROM roles WHERE locked AND name='Owner'").fetchone()["id"]
+        if target["active"] and target["role_id"] == owner_id and body.role_id != owner_id:
+            owners = conn.execute("SELECT count(*) AS n FROM users WHERE active AND role_id=%s", (owner_id,)).fetchone()["n"]
+            if owners <= 1:
+                raise HTTPException(400, "Cannot leave zero active Owner accounts")
+        conn.execute("UPDATE users SET role_id=%s WHERE id=%s", (body.role_id, user_id))
+        return conn.execute(USER_SELECT + " WHERE u.id=%s", (user_id,)).fetchone()
 
 
 def seed_admin(conn):
@@ -271,6 +367,7 @@ def seed_admin(conn):
     if not email or not password:
         logging.getLogger(__name__).warning("Users table is empty; set ADMIN_EMAIL and ADMIN_PASSWORD to create the first admin")
         return
-    admin = UserIn(email=email, password=password, name="Administrator", role="admin")
-    conn.execute("INSERT INTO users(email,name,password_hash,role) VALUES (%s,%s,%s,'admin')",
-                 (admin.email, admin.name, hash_password(admin.password)))
+    owner_id = conn.execute("SELECT id FROM roles WHERE locked AND name='Owner'").fetchone()["id"]
+    admin = UserIn(email=email, password=password, name="Administrator", role_id=owner_id)
+    conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES (%s,%s,%s,%s)",
+                 (admin.email, admin.name, hash_password(admin.password), admin.role_id))

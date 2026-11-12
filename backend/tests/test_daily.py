@@ -315,7 +315,8 @@ def test_schedule_api(scheduled, authenticated_client):
         assert response.status_code == 200 and response.json()["interval_minutes"] == interval
         assert response.json()["next_run_at"] == now[0].isoformat()
     with db.connect() as conn:
-        conn.execute("UPDATE users SET role='member',routes=ARRAY['review']")
+        rid = conn.execute("INSERT INTO roles(name,routes) VALUES ('Schedule reviewer',ARRAY['review']) RETURNING id").fetchone()["id"]
+        conn.execute("UPDATE users SET role_id=%s", (rid,))
     assert client.get("/api/schedule").status_code == 403
     assert client.put("/api/schedule", json=body, headers={"X-Local-GUI": "1"}).status_code == 403
     client.cookies.clear()
