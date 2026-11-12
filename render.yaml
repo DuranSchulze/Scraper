@@ -34,5 +34,8 @@ services:
         sync: false
       - key: GOOGLE_WORKSPACE_DOMAIN
         sync: false
+      # Initial interval in minutes (5..1440); unset disables auto-scrape until enabled in the UI.
+      - key: SCRAPE_EVERY_MINUTES
+        sync: false
       - key: INTERNAL_DOMAINS
         sync: false

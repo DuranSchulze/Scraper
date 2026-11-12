@@ -30,85 +30,58 @@ async def lifespan(app):
         with db.connect() as conn:
             db.interrupt_stale(conn)
             auth.seed_admin(conn)
+            try:
+                interval = int(env("SCRAPE_EVERY_MINUTES"))
+            except ValueError:
+                interval = 0
+            enabled = 5 <= interval <= 1440
+            conn.execute("INSERT INTO schedule(id,enabled,interval_minutes) VALUES (1,%s,%s)"
+                         " ON CONFLICT DO NOTHING", (enabled, interval if enabled else 15))
     except (RuntimeError, PostgresError):
         pass  # Keep the GUI available; status reports the error and retries the check.
     stopped = threading.Event()
-    at = _daily_time()
-    scheduler = threading.Thread(target=_daily_scrape, args=(at, stopped), daemon=True) if at is not None else None
-    if scheduler:
-        scheduler.start()
+    if env("DAILY_SCRAPE_AT"):
+        logging.getLogger(__name__).warning("DAILY_SCRAPE_AT is ignored; use SCRAPE_EVERY_MINUTES or /api/schedule")
+    scheduler = threading.Thread(target=_auto_scrape, args=(stopped,), daemon=True)
+    scheduler.start()
     try:
         yield
     finally:
         stopped.set()
-        if scheduler:
-            scheduler.join(timeout=1)
+        scheduler.join(timeout=1)
 
 
-def _daily_time():
-    value = env("DAILY_SCRAPE_AT")
-    if not value:
-        return None
-    try:
-        at = datetime.strptime(value, "%H:%M").time()
-        if value != at.strftime("%H:%M"):
-            raise ValueError("Expected HH:MM")
-        return at
-    except ValueError:
-        logging.getLogger(__name__).warning("Invalid DAILY_SCRAPE_AT %r; daily scrape disabled (expected HH:MM)", value)
-        return None
+def _auto_due(now, enabled, interval_minutes, last_auto_started_at, running):
+    return enabled and not running and (
+        last_auto_started_at is None or now - last_auto_started_at >= timedelta(minutes=interval_minutes))
 
 
-def _daily_due(now, last_run_date, last_done_scrape_at, running, at, *, boot=False, pending=False):
-    if running or last_run_date == now.date():
-        return False
-    catch_up = boot and (last_done_scrape_at is None or now - last_done_scrape_at > timedelta(days=1))
-    return pending or now.time() >= at or catch_up
-
-
-def _daily_scrape(at, stopped):
+def _auto_scrape(stopped):
     logger = logging.getLogger("uvicorn.error")
-    boot = True
-    last_run_date = None
-    pending = False
     while not stopped.is_set():
         try:
-            now = datetime.now().astimezone()
-            # A blocked scheduled run remains due even if the next minute is on the following date.
-            pending = pending or (now.time() >= at and last_run_date != now.date())
             with db.connect() as conn:
-                # Serialize scheduler checks across API workers; start_job still arbitrates against manual jobs.
+                # Serialize checks across workers; start_job still arbitrates against manual jobs.
                 locked = conn.execute("SELECT pg_try_advisory_xact_lock(783214901) AS locked").fetchone()["locked"]
                 if locked:
+                    schedule = conn.execute("SELECT enabled,interval_minutes FROM schedule WHERE id=1").fetchone()
                     running = conn.execute("SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('running','paused')) AS running").fetchone()["running"]
-                    last_done = conn.execute(
-                        "SELECT max(finished_at) AS finished_at FROM jobs WHERE name='scrape'"
-                        " AND status IN ('done','done_with_errors') AND error IS NULL").fetchone()["finished_at"]
-                    ran_today = conn.execute(
-                        "SELECT 1 FROM jobs WHERE name='scrape' AND params->>'daily_date'=%s LIMIT 1",
-                        (now.date().isoformat(),)).fetchone()
-                    if ran_today:
-                        last_run_date, pending = now.date(), False
-                    if not stopped.is_set() and _daily_due(now, last_run_date, last_done, running, at, boot=boot, pending=pending):
+                    last_auto = conn.execute(
+                        "SELECT max(started_at) AS last_auto_at FROM jobs WHERE name='scrape'"
+                        " AND params->>'auto'='true'").fetchone()["last_auto_at"]
+                    if schedule and not stopped.is_set() and _auto_due(
+                            datetime.now(timezone.utc), schedule["enabled"], schedule["interval_minutes"], last_auto, running):
                         params = {"sources": ["gmail", "contacts", "sheets"], "mailboxes": [],
-                                  "since": env("SCRAPE_SINCE") or "2018-01-01", "full": False,
-                                  "daily_date": now.date().isoformat()}
+                                  "since": env("SCRAPE_SINCE") or "2018-01-01", "full": False, "auto": True}
                         datetime.strptime(params["since"], "%Y-%m-%d")
                         job_id = start_job("scrape", params, carry=True)
-                        last_run_date, pending = now.date(), False
-                        logger.info("Daily scrape started: job %s (incremental extraction is included)", job_id)
-                    elif running:
-                        logger.info("Daily scrape skipped: another job is running; retrying in 60 seconds")
-                    else:
-                        logger.debug("Daily scrape skipped: not due or already started today")
-                    if not running:
-                        boot = False
-                else:
-                    logger.debug("Daily scrape skipped: another scheduler is checking")
+                        logger.info("Auto scrape started: job %s (incremental extraction is included)", job_id)
         except HTTPException as exc:
-            logger.info("Daily scrape skipped: %s; retrying in 60 seconds", exc.detail)
+            if exc.status_code != 409:
+                raise
+            logger.info("Auto scrape skipped: %s; retrying in 60 seconds", exc.detail)
         except (PostgresError, RuntimeError, ValueError):
-            logger.exception("Daily scrape check failed; retrying in 60 seconds")
+            logger.exception("Auto scrape check failed; retrying in 60 seconds")
         stopped.wait(60)
 
 
@@ -404,6 +377,38 @@ def continue_job(job_id: int):
 @app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(auth.require_route("scraping"))])
 def stop(job_id: int):
     return _control(job_id, "stop")
+
+
+class ScheduleIn(BaseModel):
+    enabled: bool
+    interval_minutes: int = Field(ge=5, le=1440)
+
+
+def _schedule(conn):
+    row = conn.execute(
+        "SELECT enabled,interval_minutes,"
+        " (SELECT max(started_at) FROM jobs WHERE name='scrape' AND params->>'auto'='true') AS last_auto_at,"
+        " EXISTS(SELECT 1 FROM jobs WHERE status IN ('running','paused')) AS running"
+        " FROM schedule WHERE id=1").fetchone()
+    running = row.pop("running")
+    now = datetime.now(timezone.utc)
+    next_run = row["last_auto_at"] + timedelta(minutes=row["interval_minutes"]) if row["last_auto_at"] else now
+    row["next_run_at"] = next_run if row["enabled"] and not (running and next_run <= now) else None
+    return row
+
+
+@app.get("/api/schedule", dependencies=[Depends(auth.require_route("scraping"))])
+def get_schedule():
+    with db.connect() as conn:
+        return _schedule(conn)
+
+
+@app.put("/api/schedule", dependencies=[Depends(auth.require_route("scraping"))])
+def put_schedule(body: ScheduleIn):
+    with db.connect() as conn:
+        conn.execute("UPDATE schedule SET enabled=%s,interval_minutes=%s,updated_at=clock_timestamp() WHERE id=1",
+                     (body.enabled, body.interval_minutes))
+        return _schedule(conn)
 
 
 class ScrapeIn(BaseModel):
