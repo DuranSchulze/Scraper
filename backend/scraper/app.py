@@ -30,13 +30,7 @@ async def lifespan(app):
         with db.connect() as conn:
             db.interrupt_stale(conn)
             auth.seed_admin(conn)
-            try:
-                interval = int(env("SCRAPE_EVERY_MINUTES"))
-            except ValueError:
-                interval = 0
-            enabled = 5 <= interval <= 1440
-            conn.execute("INSERT INTO schedule(id,enabled,interval_minutes) VALUES (1,%s,%s)"
-                         " ON CONFLICT DO NOTHING", (enabled, interval if enabled else 15))
+            _seed_schedule(conn)
     except (RuntimeError, PostgresError):
         pass  # Keep the GUI available; status reports the error and retries the check.
     stopped = threading.Event()
@@ -49,6 +43,16 @@ async def lifespan(app):
     finally:
         stopped.set()
         scheduler.join(timeout=1)
+
+
+def _seed_schedule(conn):
+    try:
+        interval = int(env("SCRAPE_EVERY_MINUTES"))
+    except ValueError:
+        interval = 0
+    enabled = 5 <= interval <= 1440
+    conn.execute("INSERT INTO schedule(id,enabled,interval_minutes) VALUES (1,%s,%s)"
+                 " ON CONFLICT DO NOTHING", (enabled, interval if enabled else 15))
 
 
 def _auto_due(now, enabled, interval_minutes, last_auto_started_at, running):
@@ -64,6 +68,7 @@ def _auto_scrape(stopped):
                 # Serialize checks across workers; start_job still arbitrates against manual jobs.
                 locked = conn.execute("SELECT pg_try_advisory_xact_lock(783214901) AS locked").fetchone()["locked"]
                 if locked:
+                    _seed_schedule(conn)
                     schedule = conn.execute("SELECT enabled,interval_minutes FROM schedule WHERE id=1").fetchone()
                     running = conn.execute("SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('running','paused')) AS running").fetchone()["running"]
                     last_auto = conn.execute(
@@ -400,12 +405,14 @@ def _schedule(conn):
 @app.get("/api/schedule", dependencies=[Depends(auth.require_route("scraping"))])
 def get_schedule():
     with db.connect() as conn:
+        _seed_schedule(conn)
         return _schedule(conn)
 
 
 @app.put("/api/schedule", dependencies=[Depends(auth.require_route("scraping"))])
 def put_schedule(body: ScheduleIn):
     with db.connect() as conn:
+        _seed_schedule(conn)
         conn.execute("UPDATE schedule SET enabled=%s,interval_minutes=%s,updated_at=clock_timestamp() WHERE id=1",
                      (body.enabled, body.interval_minutes))
         return _schedule(conn)

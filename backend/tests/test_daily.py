@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import logging
 import threading
+from unittest.mock import Mock
 
 import pytest
 
@@ -237,6 +238,46 @@ def test_stopped_scheduler_does_not_access_database(monkeypatch):
     stopped.set()
     monkeypatch.setattr(db, "connect", lambda: pytest.fail("Stopped scheduler accessed database"))
     api._auto_scrape(stopped)
+
+
+@pytest.mark.parametrize("recovery", ["scheduler", "get", "put"])
+def test_schedule_recovers_after_startup_database_failure(scheduled, authenticated_client, monkeypatch, recovery):
+    _, launched = scheduled
+    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "5")
+    with db.connect() as conn:
+        conn.execute("DELETE FROM schedule")
+
+    def offline():
+        raise api.PostgresError("temporary startup outage")
+
+    async def boot():
+        async with api.lifespan(api.app):
+            pass
+
+    with monkeypatch.context() as startup:
+        startup.setattr(api, "jwt_secret", lambda: None)
+        startup.setattr(db, "connect", offline)
+        startup.setattr(api.threading, "Thread", Mock())
+        asyncio.run(boot())
+
+    client = authenticated_client
+    if recovery == "scheduler":
+        api._auto_scrape(Checks())
+        assert len(launched) == 1
+    elif recovery == "get":
+        response = client.get("/api/schedule")
+        assert response.status_code == 200 and response.json()["interval_minutes"] == 5
+    else:
+        response = client.put("/api/schedule", json={"enabled": False, "interval_minutes": 30},
+                              headers={"X-Local-GUI": "1"})
+        assert response.status_code == 200
+
+    saved = client.put("/api/schedule", json={"enabled": False, "interval_minutes": 30},
+                       headers={"X-Local-GUI": "1"})
+    assert saved.status_code == 200
+    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "60")
+    api._auto_scrape(Checks())
+    assert client.get("/api/schedule").json() == saved.json()
 
 
 def test_schedule_constraints(scheduled):
