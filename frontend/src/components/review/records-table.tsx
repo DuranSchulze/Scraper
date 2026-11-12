@@ -98,16 +98,16 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
   const qc = useQueryClient();
   const [ask, setAsk] = useState<"approve" | "reject" | null>(null);
   const act = useMutation({
-    mutationFn: (action: "approve" | "reject") => bulk([...ticked], action),
-    onSuccess: (r, action) => {
+    // The originating key travels with the request, so a late answer never touches another page's selection.
+    mutationFn: ({ action, ids }: { action: "approve" | "reject"; ids: number[]; key: string }) => bulk(ids, action),
+    onSuccess: (r, { action, key }) => {
       const verb = action === "approve" ? "Approved" : "Rejected";
       if (r.done.length) toast.success(`${verb} ${r.done.length.toLocaleString()} record${r.done.length === 1 ? "" : "s"}.`);
       if (r.failed.length) {
         toast.error(`${r.failed.length.toLocaleString()} could not be ${action === "approve" ? "approved" : "rejected"}.`,
-          { description: "They stay ticked; every reason is listed above the table." });
+          { description: "Every record and reason is listed above the table." });
       }
-      // Done records leave the list; failed ones stay ticked with their reasons so nothing gets lost.
-      setSel({ key: selKey, ids: new Set(r.failed.map((f) => f.id)), failed: r.failed });
+      setSel((s) => s.key === key ? { key, ids: EMPTY, failed: r.failed } : s);
     },
     onError: (e: Error) => toast.error(e.message),
     onSettled: () => {
@@ -164,7 +164,7 @@ export function RecordsTable({ filters, selectedId, onSelect, onSort, onPage, pa
         title={`${ask === "reject" ? "Reject" : "Approve"} ${ticked.size.toLocaleString()} record${ticked.size === 1 ? "" : "s"}?`}
         description={ask === "reject" ? "They move to Rejected. You can move any of them back to pending later."
           : "Each record is approved with its scraped details as they are and stays in staging until you publish. Records that fail validation are skipped and listed."}
-        confirmLabel={ask === "reject" ? "Reject" : "Approve"} onConfirm={() => ask && act.mutate(ask)} />
+        confirmLabel={ask === "reject" ? "Reject" : "Approve"} onConfirm={() => ask && act.mutate({ action: ask, ids: [...ticked], key: selKey })} />
       <Table ref={tableRef} className="min-w-[1120px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">
