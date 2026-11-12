@@ -165,6 +165,34 @@ def test_import_matches_and_directory_contract(conn, authenticated_client):
         assert authenticated_client.get("/api/master/rows", params=params).status_code == 422
 
 
+def test_regional_free_mail_never_domain_matches(conn):
+    domains = ["yahoo.com.ph", "yahoo.co.uk", "yahoo.de", "ymail.ph", "rocketmail.ph", "hotmail.co.uk",
+               "outlook.ph", "live.com.ph", "msn.ph", "gmail.ph", "googlemail.ph", "aol.ph", "icloud.ph",
+               "me.ph", "mac.ph", "proton.ph", "protonmail.ph", "gmx.ph", "mail.ph", "zoho.ph", "yandex.ph",
+               "company.test", "yahoocorp.test"]
+    keys = [f"stranger@{domain}" for domain in domains]
+    for domain in domains:
+        for local in ("owner", "stranger"):
+            conn.execute("INSERT INTO candidates(email_key) VALUES (%s)", (f"{local}@{domain}",))
+    conn.commit()
+    master.import_workbook(workbook([[domain, f"owner@{domain}"] for domain in domains]), "regional.xlsx", "test")
+
+    def assert_tags():
+        tags = {row["email_key"]: row for row in conn.execute("SELECT email_key,master_match,master_ids FROM candidates")}
+        for domain in domains:
+            assert tags[f"owner@{domain}"]["master_match"] == "email"
+            stranger = tags[f"stranger@{domain}"]
+            if domain in ("company.test", "yahoocorp.test"):
+                assert stranger["master_match"] == "domain" and len(stranger["master_ids"]) == 1
+            else:
+                assert stranger["master_match"] is None and stranger["master_ids"] is None
+
+    assert_tags()
+    conn.execute("UPDATE candidates SET master_match='domain',master_ids=ARRAY[999] WHERE email_key=ANY(%s)", (keys,))
+    master.rematch(conn, keys)
+    assert_tags()
+
+
 def test_empty_directory(conn, authenticated_client):
     assert authenticated_client.get("/api/master").json() == {"last_import": None, "tagged": {"email": 0, "domain": 0, "none": 0}}
     response = authenticated_client.get("/api/master/rows")

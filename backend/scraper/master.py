@@ -18,6 +18,8 @@ from .merge import FREE_MAIL
 MAX_BYTES = 10 * 1024 * 1024
 MAX_EXPANDED = 100 * 1024 * 1024
 MAX_ROWS = 20_000
+FREE_MAIL_PROVIDERS = ("yahoo", "ymail", "rocketmail", "hotmail", "outlook", "live", "msn", "gmail", "googlemail",
+                       "aol", "icloud", "me", "mac", "proton", "protonmail", "gmx", "mail", "zoho", "yandex")
 LOCK = "SELECT pg_advisory_xact_lock(783214902)"
 FIELDS = ("registered_name", "alias", "trade_name", "tin", "intercompany", "engagement_status", "contact_person")
 ALIASES = {
@@ -111,13 +113,14 @@ def rematch(conn, keys=None):
         "WITH matches AS (SELECT c.id,"
         " ARRAY(SELECT m.id FROM master_clients m WHERE m.emails @> ARRAY[lower(c.email_key)] ORDER BY m.id) AS email_ids,"
         " ARRAY(SELECT m.id FROM master_clients m WHERE m.domains @> ARRAY[split_part(lower(c.email_key),'@',2)]"
-        " AND NOT (split_part(lower(c.email_key),'@',2)=ANY(%s)) ORDER BY m.id) AS domain_ids"
+        " AND NOT (split_part(lower(c.email_key),'@',2)=ANY(%s))"
+        " AND NOT (split_part(split_part(lower(c.email_key),'@',2),'.',1)=ANY(%s)) ORDER BY m.id) AS domain_ids"
         " FROM candidates c WHERE %s::text[] IS NULL OR c.email_key=ANY(%s))"
         " UPDATE candidates c SET master_match=CASE WHEN c.review_state<>'pending' THEN NULL"
         " WHEN cardinality(m.email_ids)>0 THEN 'email' WHEN cardinality(m.domain_ids)>0 THEN 'domain' END,"
         " master_ids=CASE WHEN c.review_state<>'pending' THEN NULL"
         " WHEN cardinality(m.email_ids)>0 THEN m.email_ids WHEN cardinality(m.domain_ids)>0 THEN m.domain_ids END"
-        " FROM matches m WHERE c.id=m.id", (excluded, keys, keys))
+        " FROM matches m WHERE c.id=m.id", (excluded, list(FREE_MAIL_PROVIDERS), keys, keys))
 
 
 def counts(conn):
