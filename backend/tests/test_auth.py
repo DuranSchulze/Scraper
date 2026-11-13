@@ -181,7 +181,7 @@ def test_users_create_list_and_case_insensitive_duplicates(authenticated_client)
 
 
 @pytest.mark.parametrize("routes", [
-    ["review"], ["scraping"], ["scraping", "review", "scraping"], ["accounts", "masterlist"],
+    ["review"], ["scraping"], ["scraping", "review", "scraping"], ["accounts", "review"],
 ])
 def test_stored_and_effective_routes_are_canonical(authenticated_client, routes):
     admin = authenticated_client
@@ -207,7 +207,7 @@ def test_stored_and_effective_routes_are_canonical(authenticated_client, routes)
         assert set(claims) == {"sub", "iat", "exp"}
 
 
-@pytest.mark.parametrize("routes", [[], ["unknown"], ["review", "unknown"], [None], None, "review"])
+@pytest.mark.parametrize("routes", [[], ["unknown"], ["masterlist"], ["review", "unknown"], [None], None, "review"])
 def test_create_and_patch_reject_invalid_routes(authenticated_client, routes):
     admin = authenticated_client
     assert admin.post("/api/roles", headers=GUI, json={"name": "Invalid", "routes": routes}).status_code == 422
@@ -267,7 +267,7 @@ def test_roles_crud_counts_locked_names_and_errors(authenticated_client):
         {"id": role_id("Owner"), "name": "Owner", "routes": list(auth.ROUTES), "locked": True, "users": 1},
         {"id": role_id("Developer"), "name": "Developer", "routes": ["review", "scraping"], "locked": False, "users": 0},
     ]
-    role = new_role(client, name=" Accounting ", routes=["masterlist"])
+    role = new_role(client, name=" Accounting ", routes=["review"])
     assert role["name"] == "Accounting" and role["users"] == 0
     assert client.post("/api/roles", headers=GUI, json={"name": "ACCOUNTING", "routes": ["review"]}).status_code == 409
     assert client.patch(f"/api/roles/{role['id']}", headers=GUI,
@@ -327,7 +327,7 @@ def test_shared_role_edit_cannot_remove_own_accounts_access(authenticated_client
         conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('coworker@test','Coworker','unused',%s)", (role["id"],))
     manager = TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(actor)})
     url = f"/api/roles/{role['id']}"
-    denied = manager.patch(url, headers=GUI, json={"name": "Accounting", "routes": ["masterlist"]})
+    denied = manager.patch(url, headers=GUI, json={"name": "Accounting", "routes": ["review"]})
     assert denied.status_code == 400 and denied.json()["detail"] == "You would lose access to Accounts"
     assert manager.get("/api/roles").json()[-1]["routes"] == ["accounts"]
     assert manager.patch(f"/api/users/{actor['id']}", headers=GUI, json={"role_id": role_id("Developer")}).status_code == 400

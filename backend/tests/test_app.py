@@ -124,7 +124,7 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
         "review": [
             ("GET", "/api/candidates", None), ("GET", f"/api/candidates/{cid}", None),
             ("GET", "/api/candidates/facets", None),
-            ("GET", "/api/candidates/timeline", None),
+            ("GET", "/api/candidates/timeline", None), ("GET", "/api/master/summary", None),
             ("POST", "/api/candidates/bulk", {"ids": [cid], "action": "approve"}),
             ("POST", f"/api/candidates/{cid}/approve", edited()),
             ("POST", f"/api/candidates/{cid}/reject", None),
@@ -161,7 +161,7 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
 @pytest.mark.parametrize("role,routes", [
     ("Review only", ["review"]), ("Scraping only", ["scraping"]),
     ("Custom developer", ["scraping", "review"]), ("Administrator", ["accounts"]),
-    ("Accounting", ["masterlist"]), ("Custom owner", list(auth.ROUTES)),
+    ("Review only", ["review"]), ("Custom owner", list(auth.ROUTES)),
 ])
 def test_route_grants_without_admin_bypass_and_status_redaction(conn, monkeypatch, role, routes):
     cid = candidate(conn)
@@ -422,9 +422,8 @@ def insert_review_candidate(conn, email, values=None, state="pending", match=Non
         (email, Jsonb({key: {"value": value} for key, value in (values or {}).items()}), state, match, master_ids)).fetchone()["id"]
 
 
-def test_candidate_match_names_filters_and_nonpending_mask(conn):
-    first = conn.execute("INSERT INTO master_clients(row_no,registered_name) VALUES (2,'Zed') RETURNING id").fetchone()["id"]
-    second = conn.execute("INSERT INTO master_clients(row_no,registered_name) VALUES (3,'Alpha') RETURNING id").fetchone()["id"]
+def test_candidate_match_names_filters_and_nonpending_mask(conn, directory):
+    first, second = directory([("Zed", []), ("Alpha", [])])
     exact = insert_review_candidate(conn, "exact@co.test", match="email", master_ids=[second, first])
     domain = insert_review_candidate(conn, "domain@co.test", match="domain", master_ids=[second])
     none = insert_review_candidate(conn, "none@co.test")

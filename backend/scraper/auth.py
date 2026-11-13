@@ -20,7 +20,7 @@ from . import db
 from .config import env, jwt_secret
 
 COOKIE = "scraper_session"
-ROUTES = ("review", "scraping", "masterlist", "accounts")
+ROUTES = ("review", "scraping", "accounts")
 USER_SELECT = ("SELECT u.id,u.email,u.name,u.active,u.created_at,"
                " jsonb_build_object('id',r.id,'name',r.name) AS role,r.routes"
                " FROM users u JOIN roles r ON r.id=u.role_id")

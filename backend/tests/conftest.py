@@ -15,6 +15,26 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import pytest
 
 
+@pytest.fixture
+def directory(conn):
+    conn.execute("CREATE TABLE companies(id bigserial PRIMARY KEY,name text NOT NULL)")
+    conn.execute("CREATE TABLE contacts(id bigserial PRIMARY KEY,company_id bigint REFERENCES companies(id),emails text[])")
+    conn.commit()
+
+    def replace(rows):
+        conn.execute("DELETE FROM contacts")
+        conn.execute("DELETE FROM companies")
+        ids = []
+        for name, emails in rows:
+            cid = conn.execute("INSERT INTO companies(name) VALUES (%s) RETURNING id", (name,)).fetchone()["id"]
+            conn.execute("INSERT INTO contacts(company_id,emails) VALUES (%s,%s)", (cid, emails))
+            ids.append(cid)
+        conn.commit()
+        return ids
+
+    return replace
+
+
 @pytest.fixture(scope="session")
 def pg_server():
     default_bin = (Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "PostgreSQL/17/bin"

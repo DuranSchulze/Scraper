@@ -232,4 +232,8 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
             log(f"extract: database connection lost ({exc.__class__.__name__}); reconnecting and retrying the batch")
             time.sleep(5 * drops)
     checkpoint()
+    with db.connect() as conn:
+        master.rematch(conn)
+        matched = master.counts(conn)
+    log(f"tag: {matched['email']} email, {matched['domain']} domain matches")
     log(f"extract: done ({succeeded} items, {failed} failed)")

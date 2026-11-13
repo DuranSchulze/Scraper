@@ -11,7 +11,6 @@ from typing import Literal
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -516,41 +515,10 @@ def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=
         return {"lines": [row["line"] for row in reversed(rows)]}
 
 
-@app.post("/api/master/import", dependencies=[Depends(auth.require_route("masterlist"))])
-async def import_master(request: Request, filename: str = Query(default="Clients Database.xlsx", min_length=1, max_length=255),
-                        check: bool = False, user=Depends(auth.current_user)):
-    data = bytearray()
-    async for chunk in request.stream():
-        if len(data) + len(chunk) > master.MAX_BYTES:
-            raise HTTPException(413, "Workbook exceeds 10 MB")
-        data.extend(chunk)
-    return await run_in_threadpool(master.import_workbook, bytes(data), filename, user["email"], check)
-
-
-@app.get("/api/master", dependencies=[Depends(auth.require_route("masterlist"))])
-def master_status():
+@app.get("/api/master/summary", dependencies=[Depends(auth.require_route("review"))])
+def master_summary():
     with db.connect() as conn:
-        last_import = conn.execute(
-            "SELECT filename,sheet,rows,emails,imported_by,imported_at FROM master_imports ORDER BY id DESC LIMIT 1").fetchone()
-        return {"last_import": last_import, "tagged": master.counts(conn)}
-
-
-@app.get("/api/master/rows", dependencies=[Depends(auth.require_route("masterlist"))])
-def master_rows(response: Response, q: str = "", matched: Literal["any", "yes", "no"] = "any",
-                page: int = Query(default=1, ge=1), size: int = Query(default=50, ge=1, le=200)):
-    cte = ("WITH counts AS (SELECT mid,count(*) AS matched FROM candidates c, unnest(c.master_ids) mid"
-           " WHERE c.review_state='pending' GROUP BY mid) ")
-    sql = (" FROM master_clients m LEFT JOIN counts c ON c.mid=m.id"
-           " WHERE concat_ws(' ',m.registered_name,m.alias,m.trade_name,m.tin,array_to_string(m.emails,' ')) ILIKE %s")
-    args = [f"%{q}%"]
-    if matched != "any":
-        sql += " AND coalesce(c.matched,0)" + (">0" if matched == "yes" else "=0")
-    with db.connect() as conn:
-        response.headers["X-Total-Count"] = str(conn.execute(cte + "SELECT count(*) AS n" + sql, args).fetchone()["n"])
-        return conn.execute(
-            cte + "SELECT m.id,m.row_no," + ",".join("m." + field for field in master.FIELDS) + ",m.emails,"
-            " coalesce(c.matched,0) AS matched" + sql + " ORDER BY m.registered_name,m.id LIMIT %s OFFSET %s",
-            (*args, size, (page - 1) * size)).fetchall()
+        return master.summary(conn)
 
 
 def _candidate_where(state: str = "pending", q: str = "", status: str = "", department: str = "", stage: str = "",
@@ -610,6 +578,8 @@ def list_candidates(response: Response, sort: str = "last_contact", order: str =
     order_by = f" ORDER BY fields->'{sort}'->>'value' {order} NULLS LAST, id ASC"
     sql, args = selected
     with db.connect() as conn:
+        master_names = ("ARRAY(SELECT m.name FROM companies m WHERE c.review_state='pending'"
+                        " AND m.id=ANY(c.master_ids) ORDER BY m.id)" if master.available(conn) else "ARRAY[]::text[]")
         response.headers["X-Total-Count"] = str(conn.execute("SELECT count(*) AS n" + sql, args).fetchone()["n"])
         return conn.execute(
             "WITH RECURSIVE selected AS (SELECT *" + sql +
@@ -624,8 +594,7 @@ def list_candidates(response: Response, sort: str = "last_contact", order: str =
             " JOIN signals s ON s.key=l.email_key JOIN raw_items r ON r.id=s.raw_item_id GROUP BY root_id)"
             " SELECT c.id,c.email_key,c.review_state,fields->'name'->>'value' AS name,"
             " CASE WHEN c.review_state='pending' THEN c.master_match END AS master_match,"
-            " ARRAY(SELECT m.registered_name FROM master_clients m WHERE c.review_state='pending'"
-            " AND m.id=ANY(c.master_ids) ORDER BY m.id) AS master_names,"
+            + master_names + " AS master_names,"
             " fields->'status'->>'value' AS status,fields->'department'->>'value' AS department,"
             " coalesce((fields->'engagement_paid'->>'value')::boolean,false) AS paid,"
             " coalesce(fields->'stage'->>'value','inquiry') AS stage,"

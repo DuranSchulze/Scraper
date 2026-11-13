@@ -7,7 +7,6 @@ dependencies = [
     "fastapi>=0.162.0",
     "google-api-python-client>=2.201.0",
     "google-auth>=2.62.1",
-    "openpyxl>=3.1.5",
     "phonenumbers>=9.0.43",
     "psycopg[binary]>=3.2",
     "pyjwt>=2.15.1",

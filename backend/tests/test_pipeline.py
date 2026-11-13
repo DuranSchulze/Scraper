@@ -37,13 +37,10 @@ def test_rebuild_targets_includes_merged_ancestors():
         "c": {"a", "b", "c", "d"}, "x": {"x"}}
 
 
-def test_committed_extraction_batch_is_tagged_before_stop(conn, monkeypatch):
-    from scraper import master
-    from test_master import workbook
-
+def test_committed_extraction_batch_is_tagged_before_stop(conn, monkeypatch, directory):
     for i in range(3):
         seed(conn, sid=str(i), email=f"p{i}@client.test")
-    master.import_workbook(workbook([["Client", "p0@client.test"]]), "synthetic.xlsx", "test")
+    directory([("Client", ["p0@client.test"])])
     monkeypatch.setattr(pipeline, "BATCH", 2)
 
     def stop_after_batch():
@@ -57,22 +54,42 @@ def test_committed_extraction_batch_is_tagged_before_stop(conn, monkeypatch):
     assert rows["p0@client.test"]["master_match"] == "email"
     assert rows["p1@client.test"]["master_match"] == "domain"
     assert all(row["master_ids"] for row in rows.values())
+    assert conn.execute("SELECT tagged_at FROM directory_tag_state").fetchone()["tagged_at"] is None
 
 
-def test_reimport_review_merge_and_reopen_recompute_tags(conn, authenticated_client):
+def test_full_retag_without_new_items_reflects_directory_changes(conn, directory):
+    directory([("Original", ["bob@client.test"])])
+    seed(conn)
+    pipeline.run_extract(lambda _: None)
+    assert candidates(conn)["bob@client.test"]["master_match"] == "email"
+    first_tagged = conn.execute("SELECT tagged_at FROM directory_tag_state").fetchone()["tagged_at"]
+    replacement, = directory([("Replacement", ["other@client.test"])])
+    lines = []
+    pipeline.run_extract(lines.append)
+    row = candidates(conn)["bob@client.test"]
+    assert row["master_match"] == "domain" and row["master_ids"] == [replacement]
+    assert "tag: 0 email, 1 domain matches" in lines
+    assert "extract: done (0 items, 0 failed)" in lines
+    assert conn.execute("SELECT tagged_at FROM directory_tag_state").fetchone()["tagged_at"] > first_tagged
+
+
+def test_directory_changes_review_merge_and_reopen_recompute_tags(conn, authenticated_client, directory):
     from scraper import master
-    from test_master import workbook
 
     seed(conn, sid="a", email="a@client.test")
     seed(conn, sid="b", email="b@client.test")
     pipeline.run_extract(lambda _: None)
-    master.import_workbook(workbook([["Old", "a@client.test"]]), "old.xlsx", "test")
+    directory([("Old", ["a@client.test"])])
+    with db.connect() as connection:
+        master.rematch(connection)
     rows = candidates(conn)
     a, b = rows["a@client.test"]["id"], rows["b@client.test"]["id"]
     client, gui = authenticated_client, {"X-Local-GUI": "1"}
     assert client.post(f"/api/candidates/{a}/approve", headers=gui, json={"name": "Reviewed", "status": "active"}).status_code == 200
     assert candidates(conn)["a@client.test"]["master_ids"] is None
-    master.import_workbook(workbook([["New", "b@client.test"]]), "new.xlsx", "test")
+    directory([("New", ["b@client.test"])])
+    with db.connect() as connection:
+        master.rematch(connection)
     assert client.get(f"/api/candidates/{a}").json()["master_match"] is None
     assert client.post(f"/api/candidates/{a}/reopen", headers=gui).status_code == 200
     assert candidates(conn)["a@client.test"]["master_match"] == "domain"
@@ -86,12 +103,9 @@ def test_reimport_review_merge_and_reopen_recompute_tags(conn, authenticated_cli
     assert candidates(conn)["a@client.test"]["master_ids"] is None
 
 
-def test_changed_extraction_key_gets_new_match(conn):
-    from scraper import master
-    from test_master import workbook
-
+def test_changed_extraction_key_gets_new_match(conn, directory):
     seed(conn, email="old@first.test")
-    master.import_workbook(workbook([["First", "old@first.test"], ["Second", "owner@second.test"]]), "synthetic.xlsx", "test")
+    directory([("First", ["old@first.test"]), ("Second", ["owner@second.test"])])
     pipeline.run_extract(lambda _: None)
     assert candidates(conn)["old@first.test"]["master_match"] == "email"
     seed(conn, email="new@second.test")
