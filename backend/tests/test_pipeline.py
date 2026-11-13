@@ -467,6 +467,8 @@ def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, 
                 assert time.monotonic() < deadline
                 time.sleep(.01)
             assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 2
+            progress = conn.execute("SELECT progress FROM jobs WHERE id=%s", (jid,)).fetchone()["progress"]
+            assert (progress["stage"], progress["done"], progress["total"]) == ("extract", 2, 3)
             assert client.post(f"/api/jobs/{jid}/continue", headers={"X-Local-GUI": "1"}).status_code == 200
         worker.join(timeout=5)
         assert not worker.is_alive()
@@ -477,6 +479,8 @@ def test_extraction_batch_controls_and_full_resume_keep_completed_signals(conn, 
             worker.join(timeout=5)
     if action == "stop":
         assert len(before) == 2
+        progress = conn.execute("SELECT progress FROM jobs WHERE id=%s", (jid,)).fetchone()["progress"]
+        assert (progress["stage"], progress["done"], progress["total"]) == ("extract", 2, 3)
         assert conn.execute("SELECT status,params FROM jobs").fetchone() == {
             "status": "stopped", "params": {"full": True, "full_reset_done": True}}
         monkeypatch.setattr(api, "_launch_job", api._run_job)
@@ -890,3 +894,113 @@ def test_extract_gives_up_after_repeated_connection_drops(conn, monkeypatch):
     monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
     with pytest.raises(psycopg.OperationalError):
         pipeline.run_extract(lambda _: None)
+
+
+def test_progress_full_reset_batch_retry_and_failed_items(conn, monkeypatch):
+    from scraper import app as api
+
+    seed(conn, sid="one")
+    seed(conn, sid="two", email="second@client.test")
+    db.upsert_raw(conn, "sheets", "", "bad", {"record": None})
+    conn.execute("UPDATE raw_items SET extracted_at=now()")
+    conn.commit()
+    monkeypatch.setattr(pipeline, "BATCH", 2)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    original = api.JobLog.progress
+    attempts, snapshots = [], []
+
+    def progress(logger, stage, done, total, *, conn=None):
+        if stage == "tag" and done == 0:
+            with db.connect() as observer:
+                p = observer.execute("SELECT progress FROM jobs WHERE id=%s", (logger.job_id,)).fetchone()["progress"]
+                assert (p["stage"], p["done"], p["total"]) == ("extract", 3, 3)
+        original(logger, stage, done, total, conn=conn)
+        if stage == "extract":
+            assert total == 3
+            snapshots.append(conn.execute("SELECT progress FROM jobs WHERE id=%s", (logger.job_id,)).fetchone()["progress"])
+            if done == 2:
+                attempts.append(done)
+                if len(attempts) == 1:
+                    with db.connect() as observer:
+                        assert observer.execute("SELECT progress FROM jobs WHERE id=%s", (logger.job_id,)).fetchone()["progress"]["done"] == 0
+                    raise pipeline.psycopg.OperationalError("injected failure before batch commit")
+
+    monkeypatch.setattr(api.JobLog, "progress", progress)
+    # Initial extract progress has an unknown total until the full reset is committed.
+    jid = conn.execute("INSERT INTO jobs(name,status,params) VALUES ('extract','running','{\"full\":true}') RETURNING id").fetchone()["id"]
+    conn.commit()
+    api._run_job(jid, "extract", {"full": True})
+    row = conn.execute("SELECT * FROM jobs WHERE id=%s", (jid,)).fetchone()
+    assert row["status"] == "done_with_errors" and row["failures"] == 1
+    assert (row["progress"]["stage"], row["progress"]["done"], row["progress"]["total"]) == ("tag", 1, 1)
+    assert attempts == [2, 2]
+    assert all(0 <= p["done"] <= p["total"] for p in snapshots)
+    assert len({p["started_at"] for p in snapshots}) == 1
+    assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 2
+
+
+def test_fetch_progress_counts_resumed_and_failed_mailboxes_through_sheets(conn, monkeypatch):
+    from scraper import app as api
+
+    monkeypatch.setenv("DRIVE_SHEET_IDS", "SheetID")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    observed = []
+
+    def current():
+        return conn.execute("SELECT progress FROM jobs ORDER BY id DESC LIMIT 1").fetchone()["progress"]
+
+    def fetch(connection, mailbox, *args, **kwargs):
+        p = current()
+        assert p["stage"] == "fetch" and p["total"] == 3
+        observed.append(p)
+        if mailbox == "bad":
+            raise RuntimeError("mailbox failed")
+        connection.commit()
+
+    def contacts_fetch(connection, mailbox, *args, **kwargs):
+        p = current()
+        # A failed Gmail source is not a finished mailbox while contacts still run.
+        assert p["done"] == (1 if mailbox == "good" else 2)
+        connection.commit()
+
+    def sheet_fetch(connection, *args, **kwargs):
+        p = current()
+        assert (p["stage"], p["done"], p["total"]) == ("fetch", 3, 3)
+        connection.commit()
+
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline.contacts, "fetch_contacts", contacts_fetch)
+    monkeypatch.setattr(pipeline.sheets, "fetch_sheets", sheet_fetch)
+    jid = api.start_job("scrape", {"sources": ["gmail", "contacts", "sheets"], "mailboxes": ["old", "good", "bad"],
+                                  "done_mailboxes": ["old"], "since": "2020-01-01", "full": False})
+    assert observed[0]["done"] == 1
+    assert len({p["started_at"] for p in observed}) == 1
+    row = conn.execute("SELECT status,progress FROM jobs WHERE id=%s", (jid,)).fetchone()
+    assert row["status"] == "done_with_errors" and row["progress"]["stage"] == "tag"
+
+
+def test_sheets_only_and_zero_item_stage_progress(conn, monkeypatch):
+    from scraper import app as api
+
+    monkeypatch.setenv("DRIVE_SHEET_IDS", "SheetID")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    stages = []
+    original = api.JobLog.progress
+
+    def progress(logger, stage, done, total, *, conn=None):
+        stages.append((stage, done, total))
+        original(logger, stage, done, total, conn=conn)
+
+    def fetch(connection, *args, **kwargs):
+        p = conn.execute("SELECT progress FROM jobs ORDER BY id DESC LIMIT 1").fetchone()["progress"]
+        assert (p["stage"], p["done"], p["total"]) == ("fetch", 0, 0)
+        connection.commit()
+
+    monkeypatch.setattr(api.JobLog, "progress", progress)
+    monkeypatch.setattr(pipeline.sheets, "fetch_sheets", fetch)
+    api.start_job("scrape", {"sources": ["sheets"], "mailboxes": [], "since": "2020-01-01", "full": False})
+    assert stages == [("fetch", 0, 0), ("fetch", 0, 0), ("extract", 0, 0), ("tag", 0, 1), ("tag", 1, 1)]
+    stages.clear()
+    api.start_job("extract", {"full": False})
+    assert stages == [("extract", 0, 0), ("extract", 0, 0), ("tag", 0, 1), ("tag", 1, 1)]

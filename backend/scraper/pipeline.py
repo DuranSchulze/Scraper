@@ -2,7 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from threading import Event
+from threading import Event, Lock
 import time
 
 import psycopg
@@ -65,11 +65,20 @@ def _failure(log, count: int = 1) -> None:
         callback(count)
 
 
+def _progress(log, stage, done, total, *, conn=None):
+    callback = getattr(log, "progress", None)
+    if callback:
+        callback(stage, done, total, conn=conn)
+
+
 def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log, *,
                checkpoint=lambda: None, done_mailboxes=()) -> None:
     parallel = env_int("SCRAPE_PARALLEL_MAILBOXES", 4, 1, 8, log)
     env_int("SCRAPE_MESSAGE_WORKERS", gmail.WORKERS, 1, 25, log)
     stopped = Event()
+    finished_mailboxes = set()
+    progress_lock = Lock()
+    resolved = []
 
     def task_checkpoint():
         if stopped.is_set():
@@ -89,6 +98,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
 
     def mailbox_task(mb):
         step = "connect"
+        completed = False
         try:
             task_checkpoint()
             with db.connect() as conn:
@@ -118,6 +128,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                     if mailbox_done:
                         mailbox_done(mb)
                 conn.commit()
+            completed = True
         except JobStopped:
             stopped.set()
             mailbox_status(mb, "pending")
@@ -125,10 +136,18 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
             mailbox_status(mb, "failed", repr(exc)[:500])
             log(f"{mb} {step}: FAILED {exc!r}")
             _failure(log)
+            completed = True
+        finally:
+            if completed:
+                with progress_lock:
+                    finished_mailboxes.add(mb)
+                    _progress(log, "fetch", len(finished_mailboxes), len(resolved))
 
     if {"gmail", "contacts"} & set(sources):
         resolved = list(dict.fromkeys(mailboxes or gmail.list_mailboxes()))
         done = set(done_mailboxes)
+        finished_mailboxes.update(done.intersection(resolved))
+        _progress(log, "fetch", len(finished_mailboxes), len(resolved))
         seed_mailboxes = getattr(log, "mailboxes", None)
         if seed_mailboxes:
             seed_mailboxes(resolved, done)
@@ -136,6 +155,8 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
         log(f"{len(pending)} mailboxes")
         with ThreadPoolExecutor(max_workers=parallel) as pool:
             list(pool.map(mailbox_task, pending))
+    else:
+        _progress(log, "fetch", 0, 0)
     task_checkpoint()
     if "sheets" in sources:
         # Sheet ids are case-sensitive, so not env_list (which lower-cases).
@@ -158,9 +179,10 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
         raise RuntimeError("INTERNAL_DOMAINS is empty; staff would be listed as clients")
     succeeded = failed = total_signals = last_id = 0
     rebuild_keys = set(keys)
+    extract_total = None
 
     def one_pass():
-        nonlocal succeeded, failed, total_signals, last_id, full
+        nonlocal succeeded, failed, total_signals, last_id, full, extract_total
         with db.connect() as conn:
             # Also recover pending keys left without signals by an interrupted full reset.
             rebuild_keys.update(r["email_key"] for r in conn.execute(
@@ -177,6 +199,10 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                 if reset_done:
                     reset_done()
                 checkpoint()
+            if extract_total is None:
+                extract_total = conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"]
+            _progress(log, "extract", succeeded + failed, extract_total, conn=conn)
+            conn.commit()
             while True:
                 rows = conn.execute(
                     "SELECT id, source, payload FROM raw_items WHERE extracted_at IS NULL AND id>%s"
@@ -205,6 +231,7 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                     cur.executemany("INSERT INTO signals (raw_item_id, key, data) VALUES (%s,%s,%s)", signals)
                 conn.execute("UPDATE raw_items SET extracted_at=now(), extract_error=NULL WHERE id=ANY(%s)", (successful,))
                 rebuild(conn, affected, rules, datetime.now(timezone.utc))
+                _progress(log, "extract", succeeded + failed + len(rows), extract_total, conn=conn)
                 # Signals, markers and candidates commit together; a failed batch is retried.
                 conn.commit()
                 _failure(log, len(rows) - len(successful))
@@ -232,8 +259,10 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
             log(f"extract: database connection lost ({exc.__class__.__name__}); reconnecting and retrying the batch")
             time.sleep(5 * drops)
     checkpoint()
+    _progress(log, "tag", 0, 1)
     with db.connect() as conn:
         master.rematch(conn)
         matched = master.counts(conn)
+        _progress(log, "tag", 1, 1, conn=conn)
     log(f"tag: {matched['email']} email, {matched['domain']} domain matches")
     log(f"extract: done ({succeeded} items, {failed} failed)")

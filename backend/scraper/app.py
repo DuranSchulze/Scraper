@@ -150,6 +150,18 @@ class JobLog:
     def __call__(self, msg: str) -> None:
         log(self.job_id, msg)
 
+    def progress(self, stage, done, total, *, conn=None) -> None:
+        value = Jsonb({"stage": stage, "done": done, "total": total,
+                       "started_at": datetime.now(timezone.utc).isoformat()})
+        sql = ("UPDATE jobs SET progress=CASE WHEN progress->>'stage'=%s THEN"
+               " %s::jsonb || jsonb_build_object('started_at',progress->'started_at') ELSE %s::jsonb END"
+               " WHERE id=%s AND status='running'")
+        args = (stage, value, value, self.job_id)
+        if conn is not None:
+            conn.execute(sql, args)
+        else:
+            self._mailbox_write(sql, args)
+
     def failure(self, count: int = 1) -> None:
         try:
             with db.connect() as conn:
@@ -332,6 +344,10 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
                     params["done_mailboxes"] = sorted(done_mailboxes)
             job_id = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,'running') RETURNING id",
                                   (name, Jsonb(params))).fetchone()["id"]
+            initial_mailboxes = set(params.get("mailboxes", [])) if name == "scrape" else set()
+            JobLog(job_id).progress("fetch" if name == "scrape" else "extract",
+                                    len(initial_mailboxes.intersection(params.get("done_mailboxes", []))),
+                                    len(initial_mailboxes), conn=conn)
             if resume_id is not None:
                 conn.execute("UPDATE jobs SET status='done', control=NULL, error=%s WHERE id=%s AND status IN ('interrupted','stopped','failed')",
                              (f"resumed as job {job_id}", resume_id))
@@ -468,7 +484,8 @@ def status(user=Depends(auth.current_user)):
             "job_control": job["control"] if job else None,
             "job_id": job["id"] if job else None, "job_status": job["status"] if job else None,
             "job_params": job["params"] if job else {}, "job_failures": job["failures"] if job else 0,
-            "job_started_at": job["started_at"] if job else None, "job_finished_at": job["finished_at"] if job else None}
+            "job_started_at": job["started_at"] if job else None, "job_finished_at": job["finished_at"] if job else None,
+            "job_progress": job["progress"] if scraping and job and job["status"] in ("running", "paused") else None}
     if not scraping:
         for key in ("log", "job_params", "error"):
             del result[key]
@@ -601,6 +618,10 @@ def list_candidates(response: Response, sort: str = "last_contact", order: str =
             " coalesce(jsonb_array_length(fields->'needs_check'->'value'),0) AS needs_check,"
             " fields->'last_contact'->>'value' AS last_contact,fields->'first_contact'->>'value' AS first_contact,"
             " fields->'company'->>'value' AS company,"
+            " ARRAY(SELECT h->>'mailbox' FROM jsonb_array_elements(CASE"
+            " WHEN jsonb_typeof(fields->'handlers'->'value')='array' THEN fields->'handlers'->'value'"
+            " ELSE '[]'::jsonb END) h WHERE nullif(btrim(h->>'mailbox'),'') IS NOT NULL"
+            " GROUP BY h->>'mailbox' ORDER BY sum(coalesce((h->>'messages')::bigint,0)) DESC,h->>'mailbox') AS mailboxes,"
             " coalesce(nullif(fields->'phones'->'value','null'::jsonb),'[]'::jsonb) AS phones,"
             " coalesce(nullif(nullif(fields->'services_availed'->'value','null'::jsonb),'[]'::jsonb),"
             " nullif(fields->'services'->'value','null'::jsonb),'[]'::jsonb) AS services,"

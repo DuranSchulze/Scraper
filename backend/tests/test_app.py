@@ -1522,3 +1522,58 @@ def test_contact_sort_selects_oldest_before_cap(conn, sort):
 ])
 def test_contact_sort_rejects_invalid_parameters(conn, params):
     assert local.get('/api/candidates', params=params).status_code == 400
+
+
+def test_candidate_mailboxes_sum_departments_sort_ties_and_keep_filter(conn):
+    handlers = [
+        {"department": "Sales", "mailbox": "sales@acme.test", "messages": 11},
+        {"department": "Sales", "mailbox": "billing@acme.test", "messages": 4},
+        {"department": "Accounts", "mailbox": "billing@acme.test", "messages": 7},
+        {"mailbox": "zero@acme.test"}, {"mailbox": "", "messages": 100},
+        {"mailbox": "   ", "messages": 100}, {"messages": 100},
+    ]
+    cid = insert_review_candidate(conn, "origin@company.test", {"handlers": handlers})
+    empty = [insert_review_candidate(conn, f"empty{i}@company.test", values)
+             for i, values in enumerate(({}, {"handlers": None}, {"handlers": []}))]
+    conn.commit()
+    rows = {r["id"]: r for r in local.get("/api/candidates").json()}
+    assert rows[cid]["mailboxes"] == ["billing@acme.test", "sales@acme.test", "zero@acme.test"]
+    assert all(rows[i]["mailboxes"] == [] for i in empty)
+    filtered = local.get("/api/candidates?mailbox=billing@acme.test")
+    assert [r["id"] for r in filtered.json()] == [cid]
+    assert filtered.headers["X-Total-Count"] == "1"
+
+
+@pytest.mark.parametrize("routes", [["review"], ["scraping"]])
+def test_job_progress_status_visibility_and_terminal_persistence(conn, routes):
+    jid = job_row(conn, status="running")
+    conn.commit()
+    logger = app_module.JobLog(jid)
+    logger.progress("extract", 1, 3)
+    saved = conn.execute("SELECT progress FROM jobs WHERE id=%s", (jid,)).fetchone()["progress"]
+    assert datetime.fromisoformat(saved["started_at"]).utcoffset().total_seconds() == 0
+    with permission_client(conn, routes, "Progress viewer") as client:
+        for state in ("running", "paused", "done", "done_with_errors", "failed", "stopped", "interrupted"):
+            conn.execute("UPDATE jobs SET status=%s,heartbeat_at=now() WHERE id=%s", (state, jid))
+            conn.commit()
+            if state != "running":
+                logger.progress("tag", 0, 1)
+            result = client.get("/api/status")
+            assert result.status_code == 200, result.text
+            expected = saved if "scraping" in routes and state in ("running", "paused") else None
+            assert result.json()["job_progress"] == expected
+            assert conn.execute("SELECT progress FROM jobs WHERE id=%s", (jid,)).fetchone()["progress"] == saved
+    conn.execute("DELETE FROM jobs WHERE id=%s", (jid,))
+    conn.commit()
+    assert local.get("/api/status").json()["job_progress"] is None
+
+
+def test_resumed_job_progress_counts_done_mailboxes_before_launch(conn, monkeypatch):
+    previous = job_row(conn, status="stopped", name="scrape", params={
+        "sources": ["gmail"], "mailboxes": ["old", "new", "old"], "done_mailboxes": ["old"],
+        "since": "2020-01-01", "full": False})
+    conn.commit()
+    monkeypatch.setattr(app_module, "_launch_job", lambda *args: None)
+    jid = app_module.start_job("", {}, resume_id=previous)
+    progress = conn.execute("SELECT progress FROM jobs WHERE id=%s", (jid,)).fetchone()["progress"]
+    assert (progress["stage"], progress["done"], progress["total"]) == ("fetch", 1, 2)
