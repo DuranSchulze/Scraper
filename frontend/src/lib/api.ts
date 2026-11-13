@@ -1,5 +1,5 @@
 import { queryOptions } from "@tanstack/react-query";
-import type { Account, Candidate, CandidateRow, MailboxBoard, RawItem, Role, RouteKey, Status, TimelineBucket, User } from "./types";
+import type { Account, Candidate, CandidateRow, MailboxBoard, MasterSummary, RawItem, Role, RouteKey, Status, TimelineBucket, User } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public retryAfter: number | null = null) {
@@ -70,8 +70,6 @@ export type Filters = {
 export const FILTER_KEYS = ["stage", "status", "department", "mailbox", "service", "domain", "has_phone", "has_amount", "date_from", "date_to", "match", "q"] as const;
 import type { Bucket } from "./timeline";
 export type { Bucket };
-/** Master list matches stay hidden until the client directory app ships; tagging still runs in the backend. */
-export const SHOW_MASTER_MATCH = process.env.NEXT_PUBLIC_MASTER_MATCH === "1";
 export type Facets = { departments: string[]; mailboxes: string[]; services: string[] };
 export type BulkResult = { done: number[]; failed: { id: number; error: string }[] };
 export const PAGE_SIZE = 50;
@@ -91,6 +89,8 @@ export const keys = {
   schedule: ["schedule"] as const,
   // Under "candidates", so every review action that refreshes the list refreshes the section counts too.
   timeline: (f: Filters, bucket: Bucket) => ["candidates", "timeline", f, bucket] as const,
+  // Under "candidates" too: a job ending or a review action refreshes it.
+  master: ["candidates", "master-summary"] as const,
 };
 
 export type Schedule = { enabled: boolean; interval_minutes: number; last_auto_at: string | null; next_run_at: string | null };
@@ -125,6 +125,12 @@ export const timelineQuery = (f: Filters, bucket: Bucket) => queryOptions({
   // Page and order don't change section totals; the API ignores them.
   queryFn: () => request<TimelineBucket[]>("/api/candidates/timeline?" + new URLSearchParams({ ...f, page: String(f.page), field: f.sort, bucket })),
   placeholderData: (prev) => prev,
+});
+
+export const masterSummaryQuery = queryOptions({
+  queryKey: keys.master,
+  queryFn: () => request<MasterSummary>("/api/master/summary"),
+  staleTime: 30_000,
 });
 
 /** Mailbox progress of the latest scrape job; polled faster while a job runs. */
@@ -171,7 +177,7 @@ export const meQuery = queryOptions({
 
 /** Grants that open a page in this app, in nav order; the first granted one is the account's home. */
 export const PAGES = [["review", "/"], ["scraping", "/scraping"], ["accounts", "/accounts"]] as const;
-/** Home for a role whose grants open no page here (e.g. only the client directory's master list import). */
+/** Fallback home for an account whose grants open no page here. */
 export const NO_PAGE = "/no-access";
 export const canUse = (me: User | undefined, route: RouteKey) => !!me && me.routes.includes(route);
 export const homeFor = (me: User) => PAGES.find(([r]) => canUse(me, r))?.[1] ?? NO_PAGE;

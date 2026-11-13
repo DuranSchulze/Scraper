@@ -27,6 +27,16 @@ export type Status = {
   job_failures: number;
   job_started_at: string | null;
   job_finished_at: string | null;
+  /** Stage of the running or paused job; null when idle or without the Scraping page. */
+  job_progress: JobProgress | null;
+};
+
+export type JobProgress = { stage: "fetch" | "extract" | "tag"; done: number; total: number; started_at: string };
+
+/** Client Directory master list (shared companies + contacts tables) and the pending tags made from it. */
+export type MasterSummary = {
+  available: boolean; companies: number; contacts: number;
+  email: number; domain: number; none: number; tagged_at: string | null;
 };
 
 export type CandidateRow = {
@@ -49,10 +59,12 @@ export type CandidateRow = {
   services: string[];
   latest_amount: { amount: number; currency: string; stage: string; date: string | null } | null;
   item_sources: { gmail: number; contacts: number; sheets: number };
-  /** Accounting master list tag (pending records only): same email, or same company domain. */
+  /** Client Directory tag (pending records only): a contact has this email, or this company domain. */
   master_match: MasterMatch | null;
-  /** Registered names of the matched master rows; can hold "" for rows without a name. */
+  /** Directory company names the tag points at. */
   master_names: string[];
+  /** Mailboxes this record was found in, busiest first. */
+  mailboxes: string[];
 };
 
 export type MailboxState = "pending" | "running" | "done" | "failed" | "skipped";
@@ -118,8 +130,8 @@ export type RawItem = {
   } & Record<string, unknown>;
 };
 
-/** Grants a role can hold, in the API's canonical order. `masterlist` is API-only (the client directory's import). */
-export const ROUTES = ["review", "scraping", "masterlist", "accounts"] as const;
+/** Grants a role can hold, in the API's canonical order. */
+export const ROUTES = ["review", "scraping", "accounts"] as const;
 export type RouteKey = (typeof ROUTES)[number];
 export type RoleRef = { id: number; name: string };
 /** A custom role: the pages its accounts may use. The locked Owner role always has every grant. */

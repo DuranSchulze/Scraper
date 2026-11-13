@@ -7,7 +7,7 @@ import { DoorClosed } from "lucide-react";
 import { PageSkeleton } from "@/components/shell/route-guard";
 import { homeFor, meQuery, NO_PAGE } from "@/lib/api";
 
-/** Landing page for a role that opens no page in this app (for example only the client directory's master list import). */
+/** Fallback for an account whose role opens no page in this app. */
 export default function Page() {
   const router = useRouter();
   const { data: me } = useQuery(meQuery);

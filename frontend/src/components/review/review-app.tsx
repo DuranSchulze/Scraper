@@ -3,11 +3,11 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { AtSign, Search, X } from "lucide-react";
+import { AtSign, BookUser, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
-import { candidatesQuery, facetsQuery, FILTER_KEYS, PAGE_SIZE, SHOW_MASTER_MATCH, statusQuery, type Bucket, type Filters } from "@/lib/api";
+import { candidatesQuery, facetsQuery, FILTER_KEYS, masterSummaryQuery, PAGE_SIZE, statusQuery, type Bucket, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/shell/page-header";
@@ -26,8 +26,8 @@ const STATE_OPTIONS = [
 const STAGE_OPTIONS = [{ value: "", label: "Any stage" }, ...STAGES.map((s) => ({ value: s, label: s }))];
 const STATUS_OPTIONS = [{ value: "", label: "Any status" }, ...STATUSES.map((s) => ({ value: s, label: s }))];
 const MATCH_OPTIONS = [
-  { value: "", label: "Any master list match" }, { value: "any", label: "In master list" },
-  { value: "email", label: "Exact email" }, { value: "domain", label: "Same domain" }, { value: "none", label: "Not in master list" },
+  { value: "", label: "Any directory match" }, { value: "any", label: "In client directory" },
+  { value: "email", label: "Exact email" }, { value: "domain", label: "Same domain" }, { value: "none", label: "Not in directory" },
 ];
 const BUCKETS: { value: Bucket; label: string }[] = [{ value: "day", label: "Day" }, { value: "week", label: "Week" }];
 const RESETS_PAGE = new Set<string>(["state", "sort", "order", ...FILTER_KEYS]);
@@ -43,8 +43,6 @@ export function ReviewApp() {
     order: params.get("order") === "asc" ? "asc" : "desc",
     page: Math.max(1, Math.floor(Number(params.get("page"))) || 1),
   };
-  // A shared ?match= link must not filter silently while matches are hidden.
-  if (!SHOW_MASTER_MATCH) filters.match = "";
   const bucket: Bucket = params.get("bucket") === "week" ? "week" : "day";
   const selectedId = Number(params.get("id")) || null;
   const { data: status } = useQuery(statusQuery);
@@ -91,7 +89,8 @@ export function ReviewApp() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="Review" description={`Records grouped by date${SHOW_MASTER_MATCH ? ", tagged when the accounting master list has the same email or company domain" : ""}. Shortcuts in a record: A approve, R reject, J / K next / previous.`} />
+      <PageHeader title="Review" description="Records grouped by date, tagged when a client directory contact has the same email or company domain. Shortcuts in a record: A approve, R reject, J / K next / previous." />
+      <DirectoryLine />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div role="group" aria-label="Review state" className="inline-flex max-w-full overflow-x-auto rounded-full border bg-muted/40 p-0.5">
           {STATE_OPTIONS.map((o) => {
@@ -118,10 +117,8 @@ export function ReviewApp() {
         </div>
       </div>
       <div role="group" aria-label="Filters" className="flex flex-wrap items-center gap-2">
-        {SHOW_MASTER_MATCH && (
-          <Pick label="Master list match" value={filters.match} options={MATCH_OPTIONS} onChange={(v) => setParams({ match: v })}
-            className={cn(PILL, "max-w-56", filters.match && PILL_ON)} />
-        )}
+        <Pick label="Client directory match" value={filters.match} options={MATCH_OPTIONS} onChange={(v) => setParams({ match: v })}
+          className={cn(PILL, "max-w-56", filters.match && PILL_ON)} />
         <Pick label="Stage" value={filters.stage} options={STAGE_OPTIONS} onChange={(v) => setParams({ stage: v })}
           className={cn(PILL, filters.stage && PILL_ON)} />
         <Pick label="Status" value={filters.status} options={STATUS_OPTIONS} onChange={(v) => setParams({ status: v })}
@@ -178,5 +175,23 @@ export function ReviewApp() {
               </SheetContent>
             </Sheet>
     </div>
+  );
+}
+
+/** Which master list the tags come from and how fresh they are. */
+function DirectoryLine() {
+  const { data: m } = useQuery(masterSummaryQuery);
+  if (!m) return null;
+  return (
+    <p role="status" className="-mt-2 inline-flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+      <BookUser aria-hidden className="h-3.5 w-3.5 shrink-0" />
+      {m.available ? (
+        <>
+          <span>Client directory: <span className="tabular-nums text-foreground">{m.companies.toLocaleString()}</span> companies, <span className="tabular-nums text-foreground">{m.contacts.toLocaleString()}</span> contacts.</span>
+          <span><span className="tabular-nums text-foreground">{m.email.toLocaleString()}</span> pending records match by email, <span className="tabular-nums text-foreground">{m.domain.toLocaleString()}</span> by company domain.</span>
+          {m.tagged_at && <span>Tagged {new Date(m.tagged_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}; retagged after every scrape.</span>}
+        </>
+      ) : <span>The client directory tables are not in this database yet, so no records are tagged.</span>}
+    </p>
   );
 }

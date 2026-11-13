@@ -7,7 +7,7 @@
     "api": "uv run --directory backend python -m scraper.app",
     "web": "npm --prefix frontend run dev",
     "dev": "concurrently --kill-others --names api,web --prefix-colors blue,magenta \"npm:api\" \"npm:web\"",
-    "test": "uv run --directory backend pytest -q && node --test frontend/src/lib/timeline.test.mjs && npm --prefix frontend run typecheck && npm --prefix frontend run lint"
+    "test": "uv run --directory backend pytest -q && node --test frontend/src/lib/timeline.test.mjs frontend/src/lib/progress.test.mjs && npm --prefix frontend run typecheck && npm --prefix frontend run lint"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

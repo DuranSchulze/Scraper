@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Loader2, Mail, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Inbox, Loader2, Mail, X } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { candidatesQuery, keys, PAGE_SIZE, post, SHOW_MASTER_MATCH, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
+import { candidatesQuery, keys, PAGE_SIZE, post, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow, TimelineBucket } from "@/lib/types";
 import { sections } from "@/lib/timeline";
@@ -244,7 +244,7 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
   );
 }
 
-/** A timeline section: a heading row (date, records across every page, master list matches), then its records. */
+/** A timeline section: a heading row (date, records across every page, directory matches), then its records. */
 function SectionRows({ label, onPage, totals, children }: { label: string; onPage: number; totals?: TimelineBucket; children: React.ReactNode }) {
   const total = totals?.total ?? onPage;
   return (
@@ -259,8 +259,8 @@ function SectionRows({ label, onPage, totals, children }: { label: string; onPag
             <span className="text-muted-foreground tabular-nums">
               {total.toLocaleString()} record{total === 1 ? "" : "s"}{onPage < total ? `, ${onPage.toLocaleString()} on this page` : ""}
             </span>
-            {SHOW_MASTER_MATCH && !!totals?.email && <Pill tone="success" className="tabular-nums">{totals.email.toLocaleString()} same email</Pill>}
-            {SHOW_MASTER_MATCH && !!totals?.domain && <Pill tone="info" className="tabular-nums">{totals.domain.toLocaleString()} same domain</Pill>}
+            {!!totals?.email && <Pill tone="success" className="tabular-nums">{totals.email.toLocaleString()} same email</Pill>}
+            {!!totals?.domain && <Pill tone="info" className="tabular-nums">{totals.domain.toLocaleString()} same domain</Pill>}
           </span>
         </TableCell>
       </TableRow>
@@ -269,25 +269,45 @@ function SectionRows({ label, onPage, totals, children }: { label: string; onPag
   );
 }
 
-/** Master list tag: the accounting record(s) this email or its company domain matches. */
+/** Directory tag: the client company (or companies) whose contacts hold this email or its company domain. */
 function MatchBadge({ r }: { r: CandidateRow }) {
-  if (!SHOW_MASTER_MATCH || !r.master_match) return null;
-  const names = r.master_names.map((n) => n.trim() || "Unnamed master row");
+  if (!r.master_match) return null;
+  const names = r.master_names.map((n) => n.trim() || "Unnamed company");
   const email = r.master_match === "email";
   const Icon = email ? AtSign : Building2;
   const text = email ? "Exact email" : "Same domain";
   return (
     <Tooltip>
       <TooltipTrigger type="button" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}
-        aria-label={`${text} in master list: ${names.join(", ")}`}
+        aria-label={`${text} in the client directory: ${names.join(", ")}`}
         className={cn("mt-1 inline-flex max-w-full items-center gap-1 self-start rounded-full px-2 py-0.5 text-xs font-medium",
           email ? "bg-success/15 text-success" : "bg-info/15 text-info")}>
         <Icon aria-hidden className="h-3 w-3 shrink-0" />
         <span className="truncate">{text}{names[0] ? ` · ${names[0]}` : ""}{names.length > 1 ? ` +${names.length - 1}` : ""}</span>
       </TooltipTrigger>
       <TooltipContent className="items-start">
-        <span className="font-medium">{email ? "This email is in the accounting master list" : "This company domain is in the accounting master list"}</span>
-        {tipList(names, (n) => n)}
+        <span className="font-medium">{email ? "A client directory contact has this email" : "A client directory contact uses this company domain"}</span>
+        {tipList(names, (n) => n, true)}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Where the record came from: the busiest mailbox, plus how many others; the tooltip lists all of them. */
+function MailboxChip({ mailboxes }: { mailboxes: string[] }) {
+  if (!mailboxes.length) return null;
+  const [first, ...rest] = mailboxes;
+  return (
+    <Tooltip>
+      <TooltipTrigger type="button" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}
+        aria-label={`Found in ${mailboxes.length === 1 ? "mailbox" : "mailboxes"}: ${mailboxes.join(", ")}`}
+        className="mt-1 inline-flex max-w-full items-center gap-1 self-start rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+        <Inbox aria-hidden className="h-3 w-3 shrink-0" />
+        <span className="truncate">{first.split("@")[0]}{rest.length ? ` +${rest.length}` : ""}</span>
+      </TooltipTrigger>
+      <TooltipContent className="items-start">
+        <span className="font-medium">Found in {mailboxes.length === 1 ? "this mailbox" : `${mailboxes.length} mailboxes`}, busiest first</span>
+        {tipList(mailboxes, (m) => m, true)}
       </TooltipContent>
     </Tooltip>
   );
@@ -295,8 +315,9 @@ function MatchBadge({ r }: { r: CandidateRow }) {
 
 const TIP_MAX = 10;
 
-/** Tooltip list, capped so it fits on screen; the record details show everything. */
-function tipList(items: string[], render: (item: string) => React.ReactNode) {
+/** Tooltip list, capped so it fits on screen; the record details show everything. `all` lists every item in a scrolling box instead. */
+function tipList(items: string[], render: (item: string) => React.ReactNode, all = false) {
+  if (all) return <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto overscroll-contain pr-1">{items.map((item) => <li key={item}>{render(item)}</li>)}</ul>;
   return (
     <ul className="flex flex-col gap-1">
       {items.slice(0, TIP_MAX).map((item) => <li key={item}>{render(item)}</li>)}
@@ -350,7 +371,10 @@ function Row({ r, selected, onSelect, ticked, onTick }: {
           </span>
           <span className="truncate text-xs text-muted-foreground" title={r.email_key}>{r.email_key}</span>
           {r.company && <span className="truncate text-xs text-muted-foreground" title={r.company}>{r.company}</span>}
-          <MatchBadge r={r} />
+          <span className="flex min-w-0 flex-wrap items-center gap-1">
+            <MatchBadge r={r} />
+            <MailboxChip mailboxes={r.mailboxes} />
+          </span>
         </div>
         </div>
       </TableCell>

@@ -21,12 +21,11 @@ import { stamp } from "@/lib/format";
 import { ROUTES, type Account, type Role, type RouteKey } from "@/lib/types";
 
 const ROUTE_LABEL: Record<RouteKey, string> = {
-  review: "Review", scraping: "Scraping", masterlist: "Master list import", accounts: "Accounts",
+  review: "Review", scraping: "Scraping", accounts: "Accounts",
 };
 const ROUTE_HINT: Record<RouteKey, string> = {
   review: "Approve or reject scraped records.",
   scraping: "Run and watch mailbox scrapes.",
-  masterlist: "Upload the accounting master list from the client directory. Opens no page here.",
   accounts: "Manage accounts and roles.",
 };
 // Keeps the API's canonical order whatever order the boxes are ticked in.

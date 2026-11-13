@@ -216,3 +216,9 @@ html[data-sidebar-ready] .sb-label { transition: opacity 0.15s ease 0.05s; }
   html[data-sidebar="collapsed"] .sb-icon-expanded { display: none; }
   html[data-sidebar="collapsed"] .sb-icon-collapsed { display: block; }
 }
+
+/* Status bar: sweep for a stage whose total is not known yet. */
+@keyframes stage-sweep {
+  from { left: -33%; }
+  to { left: 100%; }
+}

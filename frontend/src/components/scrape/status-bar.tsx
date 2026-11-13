@@ -2,13 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pause, Play, Square, Upload } from "lucide-react";
+import { Pause, Play, Square, Timer, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { boardQuery, canUse, keys, meQuery, post, statusQuery } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { boardQuery, canUse, keys, meQuery, post, scheduleQuery, statusQuery } from "@/lib/api";
 import { stamp } from "@/lib/format";
-import type { RouteKey, Status, User } from "@/lib/types";
+import type { JobProgress, RouteKey, Status, User } from "@/lib/types";
+import { clock, stageView } from "@/lib/progress";
 import { Pill } from "@/components/review/badges";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
@@ -71,9 +73,6 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
 
   const state = s?.job_status ? JOB_STATE[s.job_status] : null;
   const ready = s?.ready_to_publish ?? 0;
-  const counts = board?.counts;
-  const total = board ? board.items.length : 0;
-  const finished = counts ? counts.done + counts.skipped : 0;
   const note = !canScrape ? null : s?.job_control === "stop" ? "Stopping after the current batch is saved…"
     : s?.job_control === "pause" && s.job_status === "running" ? "Pausing after the current batch is saved…"
     : s?.job_status === "paused" && !s.job_control ? "Continuing…"
@@ -100,14 +99,9 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
             onResume={() => resume.mutate(jobId)} />}
         </div>
 
-        {canScrape && total > 0 && (
-          <div className="flex min-w-[12rem] flex-1 items-center gap-2 sm:max-w-xs" title="Mailboxes finished in the latest scrape">
-            <Progress value={(finished / total) * 100} aria-label="Mailboxes finished" className="flex-1" />
-            <span className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">
-              {finished}/{total} mailboxes{counts?.running ? ` · ${counts.running} running` : ""}
-            </span>
-          </div>
-        )}
+        {canScrape && (running
+          ? <StageProgress progress={s?.job_progress ?? null} paused={s?.job_status === "paused"} running={board?.counts?.running ?? 0} />
+          : <NextScrape />)}
 
         {canReview && (
           <Button size="sm" className="ml-auto" disabled={!ready || publish.isPending} onClick={() => setConfirm("publish")}>
@@ -167,4 +161,52 @@ function JobControls({ status, control, busy, resuming, onPause, onContinue, onS
     );
   }
   return null;
+}
+
+/** Current time, re-read every second while mounted. */
+function useNow() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
+  return now;
+}
+
+/** The running job's stage with its own bar and count, plus time spent in that stage. Never a full bar while work remains. */
+function StageProgress({ progress, paused, running }: { progress: JobProgress | null; paused: boolean; running: number }) {
+  const now = useNow();
+  const view = progress ? stageView(progress) : { label: "Starting", count: "", value: null };
+  const elapsed = progress ? clock(now - new Date(progress.started_at).getTime()) : "";
+  const label = `${view.label}${paused ? " (paused)" : ""}`;
+  return (
+    <div className="flex min-w-[14rem] flex-1 flex-col gap-1 sm:max-w-sm">
+      <div className="flex items-baseline justify-between gap-2 text-xs">
+        <span className="truncate font-medium text-foreground">{label}</span>
+        <span className="whitespace-nowrap text-muted-foreground tabular-nums">
+          {view.count}{view.count && progress?.stage === "fetch" && running ? ` · ${running} running` : ""}{elapsed ? `${view.count ? " · " : ""}${elapsed}` : ""}
+        </span>
+      </div>
+      {view.value == null
+        ? <div role="progressbar" aria-label={label} aria-valuetext={`${label}, total not known yet`} className="relative h-1 w-full overflow-hidden rounded-full bg-muted">
+            <div className={cn("absolute inset-y-0 w-1/3 rounded-full bg-primary/70", !paused && "motion-safe:animate-[stage-sweep_1.4s_ease-in-out_infinite]")} />
+          </div>
+        : <Progress value={view.value} aria-label={label} aria-valuetext={`${label}: ${view.count}`} />}
+    </div>
+  );
+}
+
+/** Idle: a live countdown to the next automatic scrape, from the saved schedule. */
+function NextScrape() {
+  const now = useNow();
+  const { data: sched } = useQuery(scheduleQuery);
+  if (!sched) return null;
+  const at = sched.next_run_at ? new Date(sched.next_run_at).getTime() : null;
+  const text = !sched.enabled ? "Auto-scrape off"
+    : at == null ? "Next auto-scrape after the current job"
+    : at - now <= 0 ? "Auto-scrape starting…"
+    : `Next auto-scrape in ${clock(at - now)}`;
+  return (
+    <span role="timer" aria-live="off" className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground tabular-nums"
+      title={at ? new Date(at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : undefined}>
+      <Timer aria-hidden className="h-3.5 w-3.5 shrink-0" />{text}
+    </span>
+  );
 }
