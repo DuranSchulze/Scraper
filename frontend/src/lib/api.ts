@@ -23,12 +23,25 @@ function sessionLost() {
   window.location.href = next ? `/login?next=${encodeURIComponent(next)}` : "/login";
 }
 
+// The account this page loaded as: pinned from the first /api/auth/me for the life of the document, never replaced.
+let pageUser: number | null = null;
+// Latched once /me reports another account: stays true until the page reloads, even if /me swings back.
+let pageSwitched = false;
+export const accountSwitched = () => pageSwitched;
+const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const SESSION_PATHS = new Set(["/api/auth/login", "/api/auth/logout"]);
+
 /** Calls the FastAPI server through the Next.js /api rewrite. */
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  // Every write names the account that confirmed it; the API refuses it (409) if the cookie now belongs to
+  // another account, e.g. one signed in from another tab whose broadcast has not arrived yet.
+  const bound = WRITES.has((init.method ?? "GET").toUpperCase()) && !SESSION_PATHS.has(path);
+  if (bound && pageSwitched) throw new ApiError(409, "The signed-in account changed in another tab. Nothing was saved; reload the page.");
+  if (bound && pageUser === null) throw new ApiError(0, "Your account could not be confirmed yet. Nothing was saved; try again in a moment, or reload the page.");
   const res = await fetch(path, {
     ...init,
-    // The API rejects writes without this header (blocks cross-site POSTs).
-    headers: { "Content-Type": "application/json", "X-Local-GUI": "1", ...init.headers },
+    // The API rejects writes without X-Local-GUI (blocks cross-site POSTs).
+    headers: { "Content-Type": "application/json", "X-Local-GUI": "1", ...(bound ? { "X-Expected-User": String(pageUser) } : {}), ...init.headers },
   });
   const data = await res.json().catch(() => null);
   // A wrong password is also a 401; the login form shows that inline instead of redirecting.
@@ -168,7 +181,13 @@ export const rawQuery = (id: number) => queryOptions({
 
 export const meQuery = queryOptions({
   queryKey: keys.me,
-  queryFn: () => request<User>("/api/auth/me"),
+  queryFn: async () => {
+    const me = await request<User>("/api/auth/me");
+    // An id past 2^53 would round to a neighbour's id, so it is never pinned and writes stay refused.
+    if (pageUser === null && !pageSwitched && Number.isSafeInteger(me.id)) pageUser = me.id;
+    else if (pageUser !== null && me.id !== pageUser) pageSwitched = true;
+    return me;
+  },
   staleTime: 60_000,
   // Page grants can change while signed in; re-read them whenever the tab regains focus.
   refetchOnWindowFocus: "always",

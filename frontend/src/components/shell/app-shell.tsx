@@ -13,7 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
 import { cancelQueued } from "@/lib/guarded";
-import { announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
+import { accountSwitched, announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
 import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
@@ -219,6 +219,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [signingOut, setSigningOut] = useState(false);
   // Another tab changed the account and this page's reload was declined: nothing here may start a request.
   const [stale, setStale] = useState(false);
+  const { data: me } = useQuery(meQuery);
+  // A /me refetch reporting another account than this page loaded as: same lock as a broadcast whose reload was declined.
+  // Re-read on every /me change; latched in api.ts, so it never unlocks without a reload.
+  const switched = !!me && accountSwitched();
+  useEffect(() => { if (switched) cancelQueued(); }, [switched]);
+  const locked = stale || switched;
 
   // Turn transitions on after the first painted frame, so the saved state never animates in on load.
   useEffect(() => {
@@ -238,7 +244,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // inert stops clicks and focus, but page shortcuts (A approve, R reject) listen on window: no key may reach
   // any listener. Inside the lock notice the browser default still runs, so Tab and Enter work on Reload.
   useEffect(() => {
-    if (!stale) return;
+    if (!locked) return;
     const block = (e: KeyboardEvent) => {
       e.stopImmediatePropagation();
       // Reload is the only control left, so Tab keeps focus on it instead of leaving the notice.
@@ -249,7 +255,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener("keydown", block, true);
     return () => window.removeEventListener("keydown", block, true);
-  }, [stale]);
+  }, [locked]);
 
   async function logout() {
     setSigningOut(true);
@@ -271,7 +277,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-    <div className="flex min-h-screen" inert={stale}>
+    <div className="flex min-h-screen" inert={locked}>
       {/* The spacer snaps to the new width (one page layout); only the fixed sidebar animates, so the page never re-lays out per frame. */}
       <div aria-hidden className="sb-spacer hidden shrink-0 lg:block" />
       <aside aria-label="Sidebar" className="sb-aside fixed inset-y-0 left-0 z-40 hidden lg:block">
@@ -297,7 +303,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <ConfirmDialog open={confirm} onOpenChange={setConfirm} title="Sign out?" confirmLabel="Sign out" pending={signingOut}
         description="You will need to sign in again to review records." onConfirm={logout} />
     </div>
-    {stale && (
+    {locked && (
       <div data-stale-lock role="alertdialog" aria-modal="true" aria-labelledby="stale-title" aria-describedby="stale-text"
         className="fixed inset-0 z-[60] grid place-items-center bg-background/80 p-4 backdrop-blur-sm">
         <div className="flex max-w-sm flex-col gap-3 rounded-xl bg-popover p-5 text-popover-foreground shadow-lg">
