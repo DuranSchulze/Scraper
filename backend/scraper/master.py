@@ -8,7 +8,9 @@ from .merge import FREE_MAIL
 
 FREE_MAIL_PROVIDERS = ("yahoo", "ymail", "rocketmail", "hotmail", "outlook", "live", "msn", "gmail", "googlemail",
                        "aol", "icloud", "me", "mac", "proton", "protonmail", "gmx", "mail", "zoho", "yandex")
-LOCK = "SELECT pg_advisory_xact_lock(783214902)"
+_LOCK_KEY = 783214902
+LOCK = f"SELECT pg_advisory_xact_lock({_LOCK_KEY})"
+TRY_LOCK = f"SELECT pg_try_advisory_xact_lock({_LOCK_KEY}) AS ok"
 APPROVABLE = ("review_state='pending' AND (master_match='email'"
               " OR (master_match='domain' AND cardinality(master_ids)=1))")
 _missing_logged = False
@@ -58,7 +60,9 @@ def counts(conn):
     return conn.execute(
         "SELECT count(*) FILTER (WHERE master_match='email') AS email,"
         " count(*) FILTER (WHERE master_match='domain') AS domain,"
-        " count(*) FILTER (WHERE master_match IS NULL) AS none FROM candidates WHERE review_state='pending'").fetchone()
+        " count(*) FILTER (WHERE master_match IS NULL) AS none,"
+        f" count(*) FILTER (WHERE {APPROVABLE}) AS approvable"
+        " FROM candidates WHERE review_state='pending'").fetchone()
 
 
 def summary(conn):
@@ -68,6 +72,7 @@ def summary(conn):
     tagged_at = conn.execute("SELECT tagged_at FROM directory_tag_state").fetchone()["tagged_at"]
     if tagged_at is not None:
         tagged_at = tagged_at.astimezone(timezone.utc)
-    approvable = conn.execute(
-        f"SELECT count(*) AS n FROM candidates WHERE {APPROVABLE}").fetchone()["n"] if ready else 0
-    return {"available": ready, **totals, **counts(conn), "approvable": approvable, "tagged_at": tagged_at}
+    pending = counts(conn)
+    if not ready:
+        pending["approvable"] = 0
+    return {"available": ready, **totals, **pending, "tagged_at": tagged_at}

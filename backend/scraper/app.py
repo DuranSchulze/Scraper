@@ -899,28 +899,39 @@ def bulk_candidates(body: BulkIn):
     return {"done": done, "failed": failed}
 
 
+class ApproveMatchedIn(BaseModel):
+    expected: int | None = Field(default=None, ge=0, strict=True)
+
+
 @app.post("/api/candidates/approve-matched", dependencies=[Depends(auth.require_route("review"))])
-def approve_matched():
+def approve_matched(body: ApproveMatchedIn | None = None):
     approved, skipped = 0, []
     with db.connect() as conn:
-        conn.execute(master.LOCK)
-        if not master.available(conn):
+        if not conn.execute(master.TRY_LOCK).fetchone()["ok"]:
+            raise HTTPException(409, "directory tagging is running; try again in a minute")
+        rows = []
+        if master.available(conn):
+            rows = conn.execute(
+                f"SELECT * FROM candidates WHERE {master.APPROVABLE} ORDER BY id FOR UPDATE").fetchall()
+        if body is not None and body.expected is not None and body.expected != len(rows):
+            raise HTTPException(409, "matched count changed")
+        if not rows:
             return {"approved": 0, "skipped": []}
-        rows = conn.execute(
-            f"SELECT * FROM candidates WHERE {master.APPROVABLE} ORDER BY id FOR UPDATE").fetchall()
-        for cand in rows:
-            try:
-                _approve(conn, cand, _extracted_client(cand["fields"]))
-            except (HTTPException, ValidationError, TypeError, AttributeError) as exc:
-                if isinstance(exc, HTTPException):
-                    error = str(exc.detail)
-                elif isinstance(exc, ValidationError):
-                    error = str(exc)
+        # Send writes without waiting for each result. A SQL error still aborts the transaction.
+        with conn.pipeline():
+            for cand in rows:
+                try:
+                    _approve(conn, cand, _extracted_client(cand["fields"]))
+                except (HTTPException, ValidationError, TypeError, AttributeError) as exc:
+                    if isinstance(exc, HTTPException):
+                        error = str(exc.detail)
+                    elif isinstance(exc, ValidationError):
+                        error = str(exc)
+                    else:
+                        error = "invalid extracted field shapes"
+                    skipped.append({"id": cand["id"], "error": error})
                 else:
-                    error = "invalid extracted field shapes"
-                skipped.append({"id": cand["id"], "error": error})
-            else:
-                approved += 1
+                    approved += 1
     return {"approved": approved, "skipped": skipped}
 
 

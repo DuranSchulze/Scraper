@@ -28,7 +28,7 @@ import pytest
 from psycopg import OperationalError
 from psycopg.types.json import Jsonb
 
-from scraper import auth, db, pipeline
+from scraper import auth, db, master, pipeline
 from scraper import app as app_module
 
 GUI = {"X-Local-GUI": "1"}
@@ -628,8 +628,15 @@ def test_approve_matched_uses_summary_selection(conn, directory, malformed):
     assert local.post(path).status_code == 403
     assert TestClient(app, base_url="http://localhost").post(path, headers=GUI).status_code == 401
     count = local.get("/api/master/summary").json()["approvable"]
-    response = local.post(path, headers=GUI)
     assert count == 2 + len(skipped)
+    if malformed:
+        assert local.post(path, headers=GUI, json={"expected": -1}).status_code == 422
+        stale = local.post(path, headers=GUI, json={"expected": count - 1})
+        assert stale.status_code == 409 and stale.json() == {"detail": "matched count changed"}
+        assert local.get("/api/master/summary").json()["approvable"] == count
+        response = local.post(path, headers=GUI, json={"expected": count})
+    else:
+        response = local.post(path, headers=GUI)
     assert response.status_code == 200
     assert response.json() == {"approved": count - len(skipped), "skipped": skipped}
     assert local.get("/api/master/summary").json()["approvable"] == len(skipped)
@@ -642,6 +649,33 @@ def test_approve_matched_uses_summary_selection(conn, directory, malformed):
     assert conn.execute(query, (exact,)).fetchone()["reviewed"]["name"] == "Exact"
     if not malformed:
         assert local.post(path, headers=GUI).json() == {"approved": 0, "skipped": []}
+
+
+def test_approve_matched_retries_after_rematch(conn, directory):
+    email = "new@co.test"
+    existing_email = "existing@co.test"
+    company, = directory([("Company", [email, existing_email])])
+    existing = insert_review_candidate(conn, existing_email, match="email", master_ids=[company])
+    cid = insert_review_candidate(conn, email)
+    conn.commit()
+    master.rematch(conn)
+
+    path = "/api/candidates/approve-matched"
+    with ThreadPoolExecutor(1) as pool:
+        approving = pool.submit(local.post, path, headers=GUI, json={"expected": 1})
+        try:
+            conflict = approving.result(timeout=5)
+        finally:
+            conn.commit()
+    assert conflict.status_code == 409
+    assert conflict.json() == {"detail": "directory tagging is running; try again in a minute"}
+    query = "SELECT DISTINCT review_state FROM candidates WHERE id=ANY(%s)"
+    assert conn.execute(query, ([existing, cid],)).fetchall() == [{"review_state": "pending"}]
+
+    response = local.post(path, headers=GUI, json={"expected": 2})
+    assert response.status_code == 200
+    assert response.json() == {"approved": 2, "skipped": []}
+    assert conn.execute(query, ([existing, cid],)).fetchall() == [{"review_state": "approved"}]
 
 
 def test_approve_matched_database_error_rolls_back_batch(conn, directory):
