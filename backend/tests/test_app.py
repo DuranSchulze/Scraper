@@ -43,13 +43,14 @@ def test_configured_hosts_and_cors(monkeypatch, origins):
     assert client.get("/").status_code == 200
     assert client.get("/", headers={"Host": "evil.test"}).status_code == 400
     headers = {"Origin": "https://ui.example.test", "Access-Control-Request-Method": "POST",
-               "Access-Control-Request-Headers": "content-type,x-local-gui"}
+               "Access-Control-Request-Headers": "content-type,x-local-gui,x-expected-user"}
     response = client.options("/api/extract", headers=headers)
     if origins.startswith("https"):
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == headers["Origin"]
         assert response.headers["access-control-allow-credentials"] == "true"
         assert set(response.headers["access-control-allow-methods"].split(", ")) == {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        assert "x-expected-user" in response.headers["access-control-allow-headers"].lower().split(", ")
         assert client.post("/api/extract", headers={"Origin": headers["Origin"]}).status_code == 403
         denied = client.options("/api/extract", headers={**headers, "Origin": "https://evil.test"})
         assert denied.status_code == 400 and "access-control-allow-origin" not in denied.headers

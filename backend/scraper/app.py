@@ -119,7 +119,7 @@ def configure_middleware(application):
         # Outermost so preflights do not reach the GUI header or authentication checks.
         application.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
                                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-                                   allow_headers=["Content-Type", "X-Local-GUI"])
+                                   allow_headers=["Content-Type", "X-Local-GUI", "X-Expected-User"])
 
 
 configure_middleware(app)

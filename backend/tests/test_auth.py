@@ -73,6 +73,46 @@ def test_login_cookie_me_and_logout(authenticated_client):
     assert client.get("/api/auth/me").status_code == 401
 
 
+def test_writes_require_matching_expected_user_when_supplied(authenticated_client):
+    admin = authenticated_client
+    admin_id = admin.get("/api/auth/me").json()["id"]
+    email = "member@example.test"
+    created = admin.post("/api/users", headers=GUI, json={
+        "email": email, "name": "Member", "password": PASSWORD, "role_id": role_id("Developer"),
+    })
+    assert created.status_code == 201
+    member_id = created.json()["id"]
+    stale_headers = {**GUI, "X-Expected-User": str(admin_id)}
+    schedule = "/api/schedule"
+    body = {"enabled": True, "interval_minutes": 60}
+    assert admin.put(schedule, headers=stale_headers, json={"enabled": False, "interval_minutes": 15}).status_code == 200
+
+    member = TestClient(app, base_url="http://localhost")
+    try:
+        assert member.put(schedule, headers=stale_headers, json=body).status_code == 401
+        login = member.post("/api/auth/login", headers=stale_headers, json={"email": email, "password": PASSWORD})
+        assert login.status_code == 200 and login.json()["id"] == member_id
+        original = member.get(schedule, headers=stale_headers)
+        assert original.status_code == 200
+
+        for header in (str(admin_id), "abc", "", f"0{member_id}"):
+            response = member.put(schedule, headers={**GUI, "X-Expected-User": header}, json=body)
+            assert response.status_code == 409
+            assert response.json() == {"detail": "The signed-in account changed in another tab. Nothing was saved; reload the page."}
+        assert member.get(schedule).json() == original.json()
+
+        saved = member.put(schedule, headers={**GUI, "X-Expected-User": str(member_id)}, json=body)
+        assert saved.status_code == 200 and saved.json()["interval_minutes"] == 60
+        assert member.put(schedule, headers=GUI, json={**body, "interval_minutes": 120}).status_code == 200
+        assert member.get(schedule).json()["interval_minutes"] == 120
+
+        logout = member.post("/api/auth/logout", headers=stale_headers)
+        assert logout.status_code == 200 and "Max-Age=0" in logout.headers["set-cookie"]
+        assert member.put(schedule, headers=stale_headers, json=body).status_code == 401
+    finally:
+        member.close()
+
+
 @pytest.mark.parametrize("https,configured", [(True, False), (False, True)])
 def test_secure_cookie_on_https_and_configured_https(authenticated_client, monkeypatch, https, configured):
     monkeypatch.setenv("APP_URL", "https://localhost" if configured else "")
@@ -462,6 +502,9 @@ def test_user_and_api_limits_are_per_user(authenticated_client, monkeypatch):
     assert authenticated_client.get("/api/auth/me").status_code == 200
     auth.buckets[("api", 1)] = (auth.deque([100.0] * 300), 60)
     response = authenticated_client.get("/api/auth/me")
+    assert response.status_code == 429 and response.headers["Retry-After"] == "60"
+    response = authenticated_client.put("/api/schedule", headers={**GUI, "X-Expected-User": "2"},
+                                        json={"enabled": True, "interval_minutes": 60})
     assert response.status_code == 429 and response.headers["Retry-After"] == "60"
     # A second user has an independent API bucket.
     with db.connect() as conn:

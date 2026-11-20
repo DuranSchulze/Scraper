@@ -113,6 +113,10 @@ def current_user(request: Request):
         hit("create_user", user["id"], 10, 3600)
     else:
         hit("api", user["id"], 300, 60)
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path != "/api/auth/logout":
+        expected = request.headers.get("X-Expected-User")
+        if expected is not None and expected != str(user["id"]):
+            raise HTTPException(409, "The signed-in account changed in another tab. Nothing was saved; reload the page.")
     return user
 
 
