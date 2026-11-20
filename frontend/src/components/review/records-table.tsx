@@ -20,6 +20,7 @@ import { sections } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import { Pill, StageBadge } from "./badges";
 import { ConfirmDialog } from "./confirm-dialog";
+import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
 import { PhoneNumber } from "./phone";
 import { Skeleton, LoadingLabel } from "@/components/ui/skeleton";
 
@@ -104,6 +105,7 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
   };
   const qc = useQueryClient();
   const [ask, setAsk] = useState<"approve" | "reject" | null>(null);
+  const guard = useGuarded("bulk");
   const act = useMutation({
     // The originating key travels with the request, so a late answer never touches another page's selection.
     mutationFn: ({ action, ids }: { action: "approve" | "reject"; ids: number[]; key: string }) => bulk(ids, action),
@@ -145,11 +147,13 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
       {selectable && ticked.size > 0 && (
         <div role="region" aria-label="Selected records" className="flex flex-wrap items-center gap-2 border-b border-primary/30 bg-primary/10 px-4 py-2">
           <span className="text-sm font-medium tabular-nums" aria-live="polite">{ticked.size.toLocaleString()} selected</span>
-          <Button size="sm" disabled={act.isPending} onClick={() => setAsk("approve")}>
-            <CheckCircle2 className="h-4 w-4 shrink-0" /> Approve selected
-          </Button>
-          <Button size="sm" variant="destructive" disabled={act.isPending} onClick={() => setAsk("reject")}>Reject selected</Button>
-          <Button size="sm" variant="ghost" disabled={act.isPending} onClick={() => setTicked(EMPTY)} className="ml-auto">
+          {guard.busyLabel ? <span role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground"><Spinner />{guard.busyLabel}</span> : <>
+            <Button size="sm" onClick={() => setAsk("approve")}>
+              <CheckCircle2 className="h-4 w-4 shrink-0" /> Approve selected
+            </Button>
+            <Button size="sm" variant="destructive" onClick={() => setAsk("reject")}>Reject selected</Button>
+          </>}
+          <Button size="sm" variant="ghost" disabled={guard.busy} onClick={() => setTicked(EMPTY)} className="ml-auto">
             <X className="h-4 w-4 shrink-0" /> Clear selection
           </Button>
         </div>
@@ -167,11 +171,21 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
           </ul>
         </div>
       )}
-      <ConfirmDialog open={!!ask} onOpenChange={(o) => !o && !act.isPending && setAsk(null)} pending={act.isPending}
+      <ConfirmDialog open={!!ask} onOpenChange={(o) => !o && setAsk(null)} guard={guard}
         title={`${ask === "reject" ? "Reject" : "Approve"} ${ticked.size.toLocaleString()} record${ticked.size === 1 ? "" : "s"}?`}
-        description={ask === "reject" ? "They move to Rejected. You can move any of them back to pending later."
-          : "Each record is approved with its scraped details as they are and stays in staging until you publish. Records that fail validation are skipped and listed."}
-        confirmLabel={ask === "reject" ? "Reject" : "Approve"} onConfirm={() => ask && act.mutate({ action: ask, ids: [...ticked], key: selKey })} />
+        description={(ask === "reject" ? "They move to Rejected. You can move any of them back to pending later."
+          : "Each record is approved with its scraped details as they are and stays in staging until you publish. Records that fail validation are skipped and listed.")
+          + ` You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+        confirmLabel={ask === "reject" ? "Reject" : "Approve"} onConfirm={() => {
+          if (!ask) return;
+          setAsk(null);
+          // The selection is copied now, so ticking boxes during the countdown doesn't change what gets sent.
+          const vars = { action: ask, ids: [...ticked], key: selKey };
+          const n = vars.ids.length.toLocaleString();
+          guard.start({ verb: ask === "reject" ? "Rejecting" : "Approving",
+            what: `${ask === "reject" ? "Rejecting" : "Approving"} ${n} record${vars.ids.length === 1 ? "" : "s"}`,
+            run: () => act.mutateAsync(vars) });
+        }} />
       <Table ref={tableRef} className="min-w-[1120px]" containerClassName="max-h-[calc(100vh-15rem)] min-h-[16rem] overflow-auto">
           <TableHeader className="sticky top-0 z-20 bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground">
             <TableRow className="hover:bg-transparent">

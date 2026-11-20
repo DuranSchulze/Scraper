@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, ChevronDown, ChevronUp, Mail, X } from "lucide-react";
 import { toast } from "sonner";
@@ -20,6 +20,8 @@ import { clearDraft, initialDraft, loadDraft, saveDraft, toClientIn, validate, t
 import { Pick } from "./pick";
 import { SourceDialog } from "./text-dialog";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
+import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
+import { ConfirmDialog } from "./confirm-dialog";
 
 type Nav = { prevId: number | null; nextId: number | null; onNav: (id: number) => void; position: string | null };
 
@@ -112,6 +114,11 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
   const [draft, setDraft] = useState<Draft>(() => stored?.draft ?? initialDraft(c));
   const [source, setSource] = useState<number | null>(null);
   const [mergeId, setMergeId] = useState("");
+  const [asking, setAsking] = useState(false);
+  const guard = useGuarded(`approve:${c.id}`);
+  // An approve that finishes after this record was closed must not move the drawer the admin is now looking at.
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   const set = (patch: Partial<Draft>) => setDraft((d) => {
     const next = { ...d, ...patch };
@@ -127,25 +134,31 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
     qc.invalidateQueries({ queryKey: ["candidates"] });
     qc.invalidateQueries({ queryKey: keys.status });
     qc.removeQueries({ queryKey: keys.candidate(c.id) });
-    onDone(advance ? nav.nextId : null);
+    if (alive.current) onDone(advance ? nav.nextId : null);
   };
   const fail = (e: Error) => toast.error(e.message);
   const approve = useMutation({
-    mutationFn: () => post(`/api/candidates/${c.id}/approve`, toClientIn(draft, c)),
+    mutationFn: (body: ReturnType<typeof toClientIn>) => post(`/api/candidates/${c.id}/approve`, body),
     onSuccess: () => finish("Approved. It stays in staging until you publish."), onError: fail,
   });
   const action = useMutation({
     mutationFn: ({ path, body }: { path: string; body?: unknown; msg: string; advance?: boolean }) => post(`/api/candidates/${c.id}/${path}`, body),
     onSuccess: (_r, v) => finish(v.msg, v.advance ?? true), onError: fail,
   });
-  const busy = approve.isPending || action.isPending;
+  const busy = guard.busy || action.isPending;
 
   // Approve lives in the pinned footer, outside the form (the Details tab may be closed), so it calls this directly.
   const submit = (e?: React.FormEvent) => {
     e?.preventDefault();
     const problem = validate(draft);
     if (problem) return toast.error(problem);
-    approve.mutate();
+    setAsking(true);
+  };
+  // The form is read when confirmed, so edits during the countdown don't change what gets sent.
+  const confirmApprove = () => {
+    setAsking(false);
+    const body = toClientIn(draft, c);
+    guard.start({ verb: "Confirming", what: `Confirming ${draft.name || c.email_key}`, run: () => approve.mutateAsync(body) });
   };
 
   const amounts = (c.reviewed?.amounts ?? fv("amounts")) ?? [];
@@ -157,7 +170,7 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
   // Keyboard shortcuts; re-bound every render so they always see the current draft and nav.
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || busy || source) return;
+      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || busy || source || asking) return;
       const t = e.target as HTMLElement | null;
       if (t?.closest("input, textarea, select, [contenteditable=true], [role=combobox], [role=listbox], [role=menu]")) return;
       const k = e.key.toLowerCase();
@@ -207,11 +220,13 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
             {restored && (
               <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-info/30 bg-info/10 px-3 py-2 text-sm">
                 Restored unsaved edits from {new Date(restored).toLocaleString()}.
-                <Button type="button" variant="ghost" size="sm" onClick={discard}>Discard edits</Button>
+                <Button type="button" variant="ghost" size="sm" disabled={guard.busy} onClick={discard}>Discard edits</Button>
               </div>
             )}
 
             <form id="record-form" onSubmit={submit} className="flex flex-col gap-6">
+              {/* Locked from confirm until the approve settles: an edit made now would not be sent, then lost. */}
+              <fieldset disabled={guard.busy} className="contents">
               <Section title="Contact">
                 <Text id="d_name" label="Name" value={draft.name} onChange={(v) => set({ name: v })} />
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -268,6 +283,7 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
                   .map((k) => `${k} (${f[k]!.source}, ${Math.round(f[k]!.confidence * 100)}%)`).join(" · ")}
                 {fv("sources") ? ` · sources: ${fv("sources")!.join(", ")}` : ""}
               </p>
+              </fieldset>
             </form>
           </div>
         </TabsContent>
@@ -319,8 +335,8 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
       </Tabs>
 
       <div className="flex flex-wrap items-center gap-2 border-t bg-card px-5 py-3">
-        <Button type="button" disabled={busy} onClick={() => submit()} aria-keyshortcuts="A">
-          <CheckCircle2 className="h-4 w-4 shrink-0" />{approve.isPending ? "Saving…" : "Confirm client"}<Kbd>A</Kbd>
+        <Button type="button" disabled={busy} aria-busy={guard.running} onClick={() => submit()} aria-keyshortcuts="A">
+          {guard.busyLabel ? <><Spinner />{guard.busyLabel}</> : <><CheckCircle2 className="h-4 w-4 shrink-0" />Confirm client<Kbd>A</Kbd></>}
         </Button>
         <Button type="button" variant="destructive" disabled={busy} onClick={reject} aria-keyshortcuts="R">Reject<Kbd>R</Kbd></Button>
         <Button type="button" variant="outline" disabled={busy}
@@ -333,6 +349,9 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
         </div>
       </div>
 
+      <ConfirmDialog open={asking} onOpenChange={setAsking} guard={guard} title="Confirm this client?" confirmLabel="Confirm client"
+        description={`Approves the record with the details in the form. It stays in staging until you publish. You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+        onConfirm={confirmApprove} />
       {source && <SourceDialog id={source} onClose={() => setSource(null)} />}
     </div>
   );

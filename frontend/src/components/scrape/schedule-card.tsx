@@ -11,6 +11,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { keys, scheduleQuery, updateSchedule } from "@/lib/api";
 import { ago } from "@/lib/format";
+import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
+import { ConfirmDialog } from "@/components/review/confirm-dialog";
 
 const label = (m: number) => m < 60 ? `Every ${m} minutes` : m === 60 ? "Every hour" : m % 60 === 0 ? `Every ${m / 60} hours` : `Every ${m} minutes`;
 const PRESETS = [5, 15, 30, 60, 240, 1440];
@@ -22,6 +24,8 @@ export function ScheduleCard() {
   const [draft, setDraft] = useState<{ enabled: boolean; interval: number } | null>(null);
   const enabled = draft?.enabled ?? data?.enabled ?? false;
   const interval = draft?.interval ?? data?.interval_minutes ?? 15;
+  const [asking, setAsking] = useState(false);
+  const guard = useGuarded("schedule");
   const save = useMutation({
     mutationFn: (v: { enabled: boolean; interval: number }) => updateSchedule({ enabled: v.enabled, interval_minutes: v.interval }),
     // Keep any edit made while the request was pending: only clear the draft if it is what was saved.
@@ -54,9 +58,17 @@ export function ScheduleCard() {
               <Pick id="schedule-interval" label="Interval" value={String(interval)} options={options}
                 onChange={(v) => setDraft({ enabled, interval: Number(v) })} />
             </div>
-            <Button className="self-start" disabled={!draft || save.isPending} onClick={() => save.mutate({ enabled, interval })}>
-              {save.isPending ? "Saving…" : "Save"}
+            <Button className="self-start" disabled={!draft || guard.busy} aria-busy={guard.running} onClick={() => setAsking(true)}>
+              {guard.busyLabel ? <><Spinner />{guard.busyLabel}</> : "Save"}
             </Button>
+            <ConfirmDialog open={asking} onOpenChange={setAsking} guard={guard} confirmLabel="Save schedule"
+              title={enabled ? "Save automatic scraping?" : "Turn off automatic scraping?"}
+              description={`${enabled ? `New emails will be scraped ${label(interval).toLowerCase()}.` : "No scrape will start on its own until you turn it on again."} You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+              onConfirm={() => {
+                setAsking(false);
+                const v = { enabled, interval };
+                guard.start({ verb: "Saving", what: "Saving automatic scraping", run: () => save.mutateAsync(v) });
+              }} />
             <p className="border-t pt-3 text-xs text-muted-foreground tabular-nums">
               Last auto run: {data.last_auto_at ? ago(data.last_auto_at) : "never"} · Next run: {next}
             </p>

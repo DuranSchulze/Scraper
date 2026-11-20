@@ -5,13 +5,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
-import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, ScanSearch, Sun, Users } from "lucide-react";
+import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, RefreshCw, ScanSearch, Sun, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
+import { cancelQueued } from "@/lib/guarded";
 import { announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
 import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -216,6 +217,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [drawer, setDrawer] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  // Another tab changed the account and this page's reload was declined: nothing here may start a request.
+  const [stale, setStale] = useState(false);
 
   // Turn transitions on after the first painted frame, so the saved state never animates in on load.
   useEffect(() => {
@@ -227,9 +230,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let ch: BroadcastChannel;
     try { ch = new BroadcastChannel("scraper-session"); } catch { return; }
-    ch.onmessage = () => window.location.reload();
+    // Queued writes are dropped first, so none is sent later with the new account's cookie.
+    ch.onmessage = () => { cancelQueued(); setStale(true); window.location.reload(); };
     return () => ch.close();
   }, []);
+
+  // inert stops clicks and focus, but page shortcuts (A approve, R reject) listen on window: no key may reach
+  // any listener. Inside the lock notice the browser default still runs, so Tab and Enter work on Reload.
+  useEffect(() => {
+    if (!stale) return;
+    const block = (e: KeyboardEvent) => {
+      e.stopImmediatePropagation();
+      // Reload is the only control left, so Tab keeps focus on it instead of leaving the notice.
+      if (e.key === "Tab" || !(e.target as Element | null)?.closest?.("[data-stale-lock]")) {
+        e.preventDefault();
+        document.querySelector<HTMLElement>("[data-stale-lock] button")?.focus();
+      }
+    };
+    window.addEventListener("keydown", block, true);
+    return () => window.removeEventListener("keydown", block, true);
+  }, [stale]);
 
   async function logout() {
     setSigningOut(true);
@@ -250,7 +270,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen">
+    <>
+    <div className="flex min-h-screen" inert={stale}>
       {/* The spacer snaps to the new width (one page layout); only the fixed sidebar animates, so the page never re-lays out per frame. */}
       <div aria-hidden className="sb-spacer hidden shrink-0 lg:block" />
       <aside aria-label="Sidebar" className="sb-aside fixed inset-y-0 left-0 z-40 hidden lg:block">
@@ -276,5 +297,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <ConfirmDialog open={confirm} onOpenChange={setConfirm} title="Sign out?" confirmLabel="Sign out" pending={signingOut}
         description="You will need to sign in again to review records." onConfirm={logout} />
     </div>
+    {stale && (
+      <div data-stale-lock role="alertdialog" aria-modal="true" aria-labelledby="stale-title" aria-describedby="stale-text"
+        className="fixed inset-0 z-[60] grid place-items-center bg-background/80 p-4 backdrop-blur-sm">
+        <div className="flex max-w-sm flex-col gap-3 rounded-xl bg-popover p-5 text-popover-foreground shadow-lg">
+          <h2 id="stale-title" className="text-base font-semibold">The account changed in another tab</h2>
+          <p id="stale-text" className="text-sm text-muted-foreground">
+            This page still belongs to the previous sign-in, so it is locked. A save that was already sending finishes first. Reload to continue as the current account.
+          </p>
+          <Button autoFocus className="self-end" onClick={() => window.location.reload()}>
+            <RefreshCw aria-hidden className="h-4 w-4 shrink-0" /> Reload page
+          </Button>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

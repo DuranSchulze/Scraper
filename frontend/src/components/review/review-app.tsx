@@ -13,6 +13,7 @@ import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/shell/page-header";
 import { ConfirmDialog } from "./confirm-dialog";
+import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
 import { DateRangeFilter } from "./date-range";
 import { Pick } from "./pick";
 import { RecordDetail } from "./record-detail";
@@ -205,17 +206,17 @@ function DirectoryLine() {
 function SyncMatched({ count }: { count: number }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+  const guard = useGuarded("sync");
   const run = useMutation({
-    mutationFn: () => post<{ approved: number; skipped: { id: number; error: string }[] }>("/api/candidates/approve-matched", { expected: count }),
+    // The count shown in the confirm travels with the request; the server refuses (409) if it changed meanwhile.
+    mutationFn: (expected: number) => post<{ approved: number; skipped: { id: number; error: string }[] }>("/api/candidates/approve-matched", { expected }),
     onSuccess: (r) => {
-      setOpen(false);
       toast.success(`Synced ${r.approved.toLocaleString()} candidate${r.approved === 1 ? "" : "s"} with the client database.`);
       if (r.skipped.length) toast.error(`${r.skipped.length.toLocaleString()} could not be synced and stay pending.`,
         { description: r.skipped.slice(0, 3).map((s) => `#${s.id}: ${s.error}`).join("; ") });
       qc.invalidateQueries();
     },
     onError: (e: Error) => {
-      setOpen(false);
       // 409: the count changed or tagging is running; the server approved nothing, so refresh and let the user retry.
       toast.error(e instanceof ApiError && e.status === 409 ? `Nothing was synced: ${e.message}.` : e.message);
       qc.invalidateQueries();
@@ -224,13 +225,16 @@ function SyncMatched({ count }: { count: number }) {
   const n = count.toLocaleString();
   return (
     <>
-      <Button size="sm" variant="outline" disabled={!count || run.isPending} onClick={() => setOpen(true)}>
-        <RefreshCw aria-hidden className="h-4 w-4 shrink-0" /> Sync {n} matched
+      <Button size="sm" variant="outline" disabled={!count || guard.busy} aria-busy={guard.running} onClick={() => setOpen(true)}>
+        {guard.busyLabel ? <><Spinner />{guard.busyLabel}</> : <><RefreshCw aria-hidden className="h-4 w-4 shrink-0" /> Sync {n} matched</>}
       </Button>
-      <ConfirmDialog open={open} onOpenChange={(o) => !o && !run.isPending && setOpen(false)} pending={run.isPending}
+      <ConfirmDialog open={open} onOpenChange={(o) => !o && setOpen(false)} guard={guard}
         title={`Sync ${n} matched candidate${count === 1 ? "" : "s"} with the client database?`} confirmLabel={`Sync ${n}`}
-        description={`Approves ${n} pending candidate${count === 1 ? "" : "s"} that match the client database uploaded in the Client Directory: exact email matches, and domain matches that point to one company. Domains shared by several companies stay pending. Synced candidates still need Publish to reach the clients table.`}
-        onConfirm={() => run.mutate()} />
+        description={`Approves ${n} pending candidate${count === 1 ? "" : "s"} that match the client database uploaded in the Client Directory: exact email matches, and domain matches that point to one company. Domains shared by several companies stay pending. Synced candidates still need Publish to reach the clients table. You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+        onConfirm={() => {
+          setOpen(false);
+          guard.start({ verb: "Syncing", what: `Syncing ${n} matched candidate${count === 1 ? "" : "s"}`, run: () => run.mutateAsync(count) });
+        }} />
     </>
   );
 }

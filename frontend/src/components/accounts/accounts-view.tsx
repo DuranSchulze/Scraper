@@ -19,6 +19,7 @@ import { Pick } from "@/components/review/pick";
 import { deleteRole, keys, post, rolesQuery, saveRole, setUserRole, usersQuery } from "@/lib/api";
 import { stamp } from "@/lib/format";
 import { ROUTES, type Account, type Role, type RouteKey } from "@/lib/types";
+import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
 
 const ROUTE_LABEL: Record<RouteKey, string> = {
   review: "Review", scraping: "Scraping", accounts: "Accounts",
@@ -81,9 +82,11 @@ export function AccountsView() {
   );
 }
 
-/** Saves on change; a refused change (lockout guards) snaps back with the API's reason. */
+/** Saves after a confirm and the undo countdown; a refused change (lockout guards) snaps back with the API's reason. */
 function RoleSelect({ account, options }: { account: Account; options: { value: string; label: string }[] }) {
   const qc = useQueryClient();
+  const [picked, setPicked] = useState<number | null>(null);
+  const guard = useGuarded(`user-role:${account.id}`);
   const save = useMutation({
     mutationFn: (roleId: number) => setUserRole(account.id, roleId),
     onSuccess: (u) => {
@@ -93,14 +96,26 @@ function RoleSelect({ account, options }: { account: Account; options: { value: 
       qc.invalidateQueries({ queryKey: keys.me });
     },
     onError: (e: Error) => toast.error(`Could not change ${account.name}'s role: ${e.message}`),
-    onSettled: () => qc.invalidateQueries({ queryKey: keys.users }),
+    onSettled: () => { setPicked(null); qc.invalidateQueries({ queryKey: keys.users }); },
   });
-  // Locked while saving, so a second pick can't race the first and leave the earlier role saved.
-  const value = String(save.isPending ? save.variables : account.role.id);
+  // Locked while asking or saving, so a second pick can't race the first and leave the earlier role saved.
+  const value = String(picked ?? account.role.id);
+  const pickedName = options.find((o) => Number(o.value) === picked)?.label ?? "";
   if (!options.length) return <span className="text-sm">{account.role.name}</span>;
   return (
-    <Pick label={`Role for ${account.name}`} value={value} options={options}
-      onChange={(v) => { if (v && Number(v) !== account.role.id) save.mutate(Number(v)); }} className="h-8 max-w-52" disabled={save.isPending} />
+    <div className="flex items-center gap-2">
+      <Pick label={`Role for ${account.name}`} value={value} options={options}
+        onChange={(v) => { if (v && Number(v) !== account.role.id) setPicked(Number(v)); }} className="h-8 max-w-52" disabled={picked !== null || guard.busy} />
+      {guard.busyLabel && <span role="status" className="flex items-center gap-1.5 text-xs text-muted-foreground"><Spinner />{guard.busyLabel}</span>}
+      <ConfirmDialog open={picked !== null} guard={guard} onOpenChange={(o) => { if (!o) setPicked(null); }}
+        title={`Make ${account.name} ${pickedName}?`} confirmLabel="Change role"
+        description={`${account.name} can then open only the pages the ${pickedName} role allows. You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+        onConfirm={() => {
+          const roleId = picked!;
+          guard.start({ verb: "Saving", what: `Making ${account.name} ${pickedName}`,
+            run: () => save.mutateAsync(roleId), onUndo: () => setPicked(null) });
+        }} />
+    </div>
   );
 }
 
@@ -172,8 +187,10 @@ function RoleDialog({ role, onClose }: { role: Role | null; onClose: () => void 
   const [name, setName] = useState(role?.name ?? "");
   const [routes, setRoutes] = useState<RouteKey[]>(role?.routes ?? []);
   const [error, setError] = useState("");
+  const [asking, setAsking] = useState(false);
+  const guard = useGuarded(`role-save:${role?.id ?? "new"}`);
   const save = useMutation({
-    mutationFn: () => saveRole({ name: name.trim(), routes }, role?.id),
+    mutationFn: (body: { name: string; routes: RouteKey[] }) => saveRole(body, role?.id),
     onSuccess: (r) => {
       toast.success(role ? `Role ${r.name} saved: ${pages(r.routes)}` : `Role ${r.name} created`);
       qc.invalidateQueries({ queryKey: keys.roles });
@@ -186,9 +203,9 @@ function RoleDialog({ role, onClose }: { role: Role | null; onClose: () => void 
   const valid = name.trim() && routes.length > 0;
 
   return (
-    <Dialog open onOpenChange={(o) => { if (!o && !save.isPending) onClose(); }}>
-      <DialogContent>
-        <form onSubmit={(e) => { e.preventDefault(); setError(""); save.mutate(); }} className="flex flex-col gap-4" noValidate>
+    <Dialog open onOpenChange={(o) => { if (!o && !guard.busy) onClose(); }}>
+      <DialogContent showCloseButton={!guard.busy}>
+        <form onSubmit={(e) => { e.preventDefault(); if (valid && !guard.busy) { setError(""); setAsking(true); } }} className="flex flex-col gap-4" noValidate>
           <DialogHeader>
             <DialogTitle>{role ? `Edit ${role.name}` : "New role"}</DialogTitle>
             <DialogDescription>Accounts with this role can open the pages you tick. Changes apply on their next click.</DialogDescription>
@@ -212,10 +229,21 @@ function RoleDialog({ role, onClose }: { role: Role | null; onClose: () => void 
           </fieldset>
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose} disabled={save.isPending}>Cancel</Button>
-            <Button type="submit" disabled={!valid || save.isPending}>{save.isPending ? "Saving…" : role ? "Save role" : "Create role"}</Button>
+            <Button type="button" variant="outline" onClick={onClose} disabled={guard.busy}>Cancel</Button>
+            <Button type="submit" disabled={!valid || guard.busy} aria-busy={guard.running}>
+              {guard.busyLabel ? <><Spinner />{guard.busyLabel}</> : role ? "Save role" : "Create role"}
+            </Button>
           </DialogFooter>
         </form>
+        <ConfirmDialog open={asking} onOpenChange={setAsking} guard={guard} confirmLabel={role ? "Save role" : "Create role"}
+          title={role ? `Save ${role.name}?` : `Create ${name.trim()}?`}
+          description={`Accounts with this role can open: ${pages(routes)}. You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+          onConfirm={() => {
+            setAsking(false);
+            // Read the form now, so edits during the countdown don't change what gets saved.
+            const body = { name: name.trim(), routes };
+            guard.start({ verb: "Saving", what: `Saving role ${body.name}`, run: () => save.mutateAsync(body) });
+          }} />
       </DialogContent>
     </Dialog>
   );

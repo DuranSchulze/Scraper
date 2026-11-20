@@ -14,6 +14,7 @@ import { clock, stageView } from "@/lib/progress";
 import { Pill } from "@/components/review/badges";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
+import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
 
 const JOB_STATE = {
   running: { label: "Running", tone: "info" },
@@ -36,6 +37,7 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
   const running = !!s?.running;
   const { data: board } = useQuery({ ...boardQuery(running), enabled: canScrape });
   const [confirm, setConfirm] = useState<null | "stop" | "publish">(null);
+  const guard = useGuarded("publish");
 
   // Records, the board and the log change while a job runs; refresh them on each poll and once when it ends.
   useEffect(() => {
@@ -64,7 +66,6 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
   const publish = useMutation({
     mutationFn: () => post<{ published: number; inserted: number; updated: number }>("/api/publish"),
     onSuccess: (r) => {
-      setConfirm(null);
       toast.success(`Published ${r.published}: ${r.inserted} new, ${r.updated} updated.`);
       qc.invalidateQueries();
     },
@@ -104,8 +105,8 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
           : <NextScrape />)}
 
         {canReview && (
-          <Button size="sm" className="ml-auto" disabled={!ready || publish.isPending} onClick={() => setConfirm("publish")}>
-            <Upload className="h-4 w-4 shrink-0" /> Publish {ready} approved
+          <Button size="sm" className="ml-auto" disabled={!ready || guard.busy} aria-busy={guard.running} onClick={() => setConfirm("publish")}>
+            {guard.busyLabel ? <><Spinner />{guard.busyLabel}</> : <><Upload className="h-4 w-4 shrink-0" /> Publish {ready} approved</>}
           </Button>
         )}
       </div>
@@ -124,9 +125,15 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
         description="It stops after the current batch is saved. Everything saved so far is kept, and Resume continues from where it stopped."
         onConfirm={() => allowedNow("scraping") && jobId && control.mutate({ id: jobId, action: "stop" })} />
       <ConfirmDialog open={confirm === "publish" && canReview} onOpenChange={(o) => !o && setConfirm(null)}
-        title="Publish to the official table?" confirmLabel={`Publish ${ready}`} pending={publish.isPending}
-        description={`Copies ${ready} approved record(s) from staging to the official clients table.`}
-        onConfirm={() => allowedNow("review") && publish.mutate()} />
+        title="Publish to the official table?" confirmLabel="Publish approved records" guard={guard}
+        description={`Copies every approved record that is ready when the countdown ends from staging to the official clients table (${ready} right now; approvals made meanwhile are included). You get ${GRACE_SECONDS} seconds to undo before anything is sent.`}
+        onConfirm={() => {
+          setConfirm(null);
+          if (!allowedNow("review")) return;
+          // The grant is checked again when the countdown ends: it may have been revoked meanwhile.
+          guard.start({ verb: "Publishing", what: "Publishing every approved record",
+            run: () => allowedNow("review") ? publish.mutateAsync() : Promise.resolve() });
+        }} />
     </header>
   );
 }
