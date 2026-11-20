@@ -2,15 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
-import { AtSign, BookUser, Search, X } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AtSign, BookUser, CheckCheck, Search, X } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
-import { candidatesQuery, facetsQuery, FILTER_KEYS, masterSummaryQuery, PAGE_SIZE, statusQuery, type Bucket, type Filters } from "@/lib/api";
+import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, masterSummaryQuery, PAGE_SIZE, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/shell/page-header";
+import { ConfirmDialog } from "./confirm-dialog";
 import { DateRangeFilter } from "./date-range";
 import { Pick } from "./pick";
 import { RecordDetail } from "./record-detail";
@@ -183,7 +185,8 @@ function DirectoryLine() {
   const { data: m } = useQuery(masterSummaryQuery);
   if (!m) return null;
   return (
-    <p role="status" className="-mt-2 inline-flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+    <div className="-mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+    <p role="status" className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
       <BookUser aria-hidden className="h-3.5 w-3.5 shrink-0" />
       {m.available ? (
         <>
@@ -193,5 +196,41 @@ function DirectoryLine() {
         </>
       ) : <span>The client directory tables are not in this database yet, so no records are tagged.</span>}
     </p>
+    <ApproveMatched count={m.approvable} />
+    </div>
+  );
+}
+
+/** One click approves every pending email match and every domain match to a single company, after a confirm. */
+function ApproveMatched({ count }: { count: number }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const run = useMutation({
+    mutationFn: () => post<{ approved: number; skipped: { id: number; error: string }[] }>("/api/candidates/approve-matched", { expected: count }),
+    onSuccess: (r) => {
+      setOpen(false);
+      toast.success(`Approved ${r.approved.toLocaleString()} matched record${r.approved === 1 ? "" : "s"}.`);
+      if (r.skipped.length) toast.error(`${r.skipped.length.toLocaleString()} could not be approved and stay pending.`,
+        { description: r.skipped.slice(0, 3).map((s) => `#${s.id}: ${s.error}`).join("; ") });
+      qc.invalidateQueries();
+    },
+    onError: (e: Error) => {
+      setOpen(false);
+      // 409: the count changed or tagging is running; the server approved nothing, so refresh and let the user retry.
+      toast.error(e instanceof ApiError && e.status === 409 ? `Nothing was approved: ${e.message}.` : e.message);
+      qc.invalidateQueries();
+    },
+  });
+  const n = count.toLocaleString();
+  return (
+    <>
+      <Button size="sm" variant="outline" disabled={!count || run.isPending} onClick={() => setOpen(true)}>
+        <CheckCheck aria-hidden className="h-4 w-4 shrink-0" /> Approve {n} matched
+      </Button>
+      <ConfirmDialog open={open} onOpenChange={(o) => !o && !run.isPending && setOpen(false)} pending={run.isPending}
+        title={`Approve ${n} matched record${count === 1 ? "" : "s"}?`} confirmLabel={`Approve ${n}`}
+        description={`Approves ${n} pending record${count === 1 ? "" : "s"} that match the client directory: exact email matches, and domain matches that point to one company. Domains shared by several companies stay pending. Approved records still need Publish to reach the clients table.`}
+        onConfirm={() => run.mutate()} />
+    </>
   );
 }

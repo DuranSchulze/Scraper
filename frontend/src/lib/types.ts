@@ -36,7 +36,7 @@ export type JobProgress = { stage: "fetch" | "extract" | "tag"; done: number; to
 /** Client Directory master list (shared companies + contacts tables) and the pending tags made from it. */
 export type MasterSummary = {
   available: boolean; companies: number; contacts: number;
-  email: number; domain: number; none: number; tagged_at: string | null;
+  email: number; domain: number; none: number; approvable: number; tagged_at: string | null;
 };
 
 export type CandidateRow = {
