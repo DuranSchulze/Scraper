@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, BookUser, CheckCheck, Search, X } from "lucide-react";
+import { AtSign, BookUser, RefreshCw, Search, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -196,28 +196,28 @@ function DirectoryLine() {
         </>
       ) : <span>The client directory tables are not in this database yet, so no records are tagged.</span>}
     </p>
-    <ApproveMatched count={m.approvable} />
+    <SyncMatched count={m.approvable} />
     </div>
   );
 }
 
-/** One click approves every pending email match and every domain match to a single company, after a confirm. */
-function ApproveMatched({ count }: { count: number }) {
+/** Sync: one click approves every pending email match and every domain match to a single company, after a confirm. */
+function SyncMatched({ count }: { count: number }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const run = useMutation({
     mutationFn: () => post<{ approved: number; skipped: { id: number; error: string }[] }>("/api/candidates/approve-matched", { expected: count }),
     onSuccess: (r) => {
       setOpen(false);
-      toast.success(`Approved ${r.approved.toLocaleString()} matched record${r.approved === 1 ? "" : "s"}.`);
-      if (r.skipped.length) toast.error(`${r.skipped.length.toLocaleString()} could not be approved and stay pending.`,
+      toast.success(`Synced ${r.approved.toLocaleString()} candidate${r.approved === 1 ? "" : "s"} with the client database.`);
+      if (r.skipped.length) toast.error(`${r.skipped.length.toLocaleString()} could not be synced and stay pending.`,
         { description: r.skipped.slice(0, 3).map((s) => `#${s.id}: ${s.error}`).join("; ") });
       qc.invalidateQueries();
     },
     onError: (e: Error) => {
       setOpen(false);
       // 409: the count changed or tagging is running; the server approved nothing, so refresh and let the user retry.
-      toast.error(e instanceof ApiError && e.status === 409 ? `Nothing was approved: ${e.message}.` : e.message);
+      toast.error(e instanceof ApiError && e.status === 409 ? `Nothing was synced: ${e.message}.` : e.message);
       qc.invalidateQueries();
     },
   });
@@ -225,11 +225,11 @@ function ApproveMatched({ count }: { count: number }) {
   return (
     <>
       <Button size="sm" variant="outline" disabled={!count || run.isPending} onClick={() => setOpen(true)}>
-        <CheckCheck aria-hidden className="h-4 w-4 shrink-0" /> Approve {n} matched
+        <RefreshCw aria-hidden className="h-4 w-4 shrink-0" /> Sync {n} matched
       </Button>
       <ConfirmDialog open={open} onOpenChange={(o) => !o && !run.isPending && setOpen(false)} pending={run.isPending}
-        title={`Approve ${n} matched record${count === 1 ? "" : "s"}?`} confirmLabel={`Approve ${n}`}
-        description={`Approves ${n} pending record${count === 1 ? "" : "s"} that match the client directory: exact email matches, and domain matches that point to one company. Domains shared by several companies stay pending. Approved records still need Publish to reach the clients table.`}
+        title={`Sync ${n} matched candidate${count === 1 ? "" : "s"} with the client database?`} confirmLabel={`Sync ${n}`}
+        description={`Approves ${n} pending candidate${count === 1 ? "" : "s"} that match the client database uploaded in the Client Directory: exact email matches, and domain matches that point to one company. Domains shared by several companies stay pending. Synced candidates still need Publish to reach the clients table.`}
         onConfirm={() => run.mutate()} />
     </>
   );
