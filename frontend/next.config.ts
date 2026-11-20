@@ -5,6 +5,8 @@ import type { NextConfig } from "next";
 const API_URL = process.env.SCRAPER_API_URL ?? "http://127.0.0.1:8765";
 
 const nextConfig: NextConfig = {
+  // Publish is one long synchronous request; the default 30s proxy timeout resets the socket (ECONNRESET).
+  experimental: { proxyTimeout: 10 * 60 * 1000 },
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
