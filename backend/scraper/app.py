@@ -899,6 +899,31 @@ def bulk_candidates(body: BulkIn):
     return {"done": done, "failed": failed}
 
 
+@app.post("/api/candidates/approve-matched", dependencies=[Depends(auth.require_route("review"))])
+def approve_matched():
+    approved, skipped = 0, []
+    with db.connect() as conn:
+        conn.execute(master.LOCK)
+        if not master.available(conn):
+            return {"approved": 0, "skipped": []}
+        rows = conn.execute(
+            f"SELECT * FROM candidates WHERE {master.APPROVABLE} ORDER BY id FOR UPDATE").fetchall()
+        for cand in rows:
+            try:
+                _approve(conn, cand, _extracted_client(cand["fields"]))
+            except (HTTPException, ValidationError, TypeError, AttributeError) as exc:
+                if isinstance(exc, HTTPException):
+                    error = str(exc.detail)
+                elif isinstance(exc, ValidationError):
+                    error = str(exc)
+                else:
+                    error = "invalid extracted field shapes"
+                skipped.append({"id": cand["id"], "error": error})
+            else:
+                approved += 1
+    return {"approved": approved, "skipped": skipped}
+
+
 def _previous_target(conn, cand: dict) -> set[str]:
     return {_get(conn, cand["merged_into"])["email_key"]} if cand["merged_into"] else set()
 

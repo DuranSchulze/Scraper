@@ -9,6 +9,8 @@ from .merge import FREE_MAIL
 FREE_MAIL_PROVIDERS = ("yahoo", "ymail", "rocketmail", "hotmail", "outlook", "live", "msn", "gmail", "googlemail",
                        "aol", "icloud", "me", "mac", "proton", "protonmail", "gmx", "mail", "zoho", "yandex")
 LOCK = "SELECT pg_advisory_xact_lock(783214902)"
+APPROVABLE = ("review_state='pending' AND (master_match='email'"
+              " OR (master_match='domain' AND cardinality(master_ids)=1))")
 _missing_logged = False
 
 
@@ -66,4 +68,6 @@ def summary(conn):
     tagged_at = conn.execute("SELECT tagged_at FROM directory_tag_state").fetchone()["tagged_at"]
     if tagged_at is not None:
         tagged_at = tagged_at.astimezone(timezone.utc)
-    return {"available": ready, **totals, **counts(conn), "tagged_at": tagged_at}
+    approvable = conn.execute(
+        f"SELECT count(*) AS n FROM candidates WHERE {APPROVABLE}").fetchone()["n"] if ready else 0
+    return {"available": ready, **totals, **counts(conn), "approvable": approvable, "tagged_at": tagged_at}

@@ -52,7 +52,7 @@ def test_directory_email_domain_precedence_and_pending_only(conn, directory):
     }
     assert {t: conn.execute(f"SELECT * FROM {t} ORDER BY id").fetchall() for t in before} == before
     assert master.summary(conn) == {"available": True, "companies": 3, "contacts": 6,
-                                    "email": 3, "domain": 1, "none": 3,
+                                    "email": 3, "domain": 1, "none": 3, "approvable": 3,
                                     "tagged_at": master.summary(conn)["tagged_at"]}
     assert master.summary(conn)["tagged_at"].utcoffset().total_seconds() == 0
 
@@ -119,6 +119,10 @@ def test_absent_directory_clears_all_tags_logs_once_and_serves_empty_names(conn,
     conn.execute("UPDATE candidates SET master_match='domain',master_ids=ARRAY[999]")
     conn.commit()
     assert all(r["master_names"] == [] for r in authenticated_client.get("/api/candidates").json())
+    assert authenticated_client.get("/api/master/summary").json()["approvable"] == 0
+    assert authenticated_client.post("/api/candidates/approve-matched", headers={"X-Local-GUI": "1"}).json() == {
+        "approved": 0, "skipped": []}
+    assert all(tag == ("domain", [999]) for tag in tags(conn).values())
     monkeypatch.setattr(master, "_missing_logged", False)
     with caplog.at_level(logging.WARNING, logger="scraper.master"):
         master.rematch(conn, ["a@company.test"])
@@ -127,7 +131,8 @@ def test_absent_directory_clears_all_tags_logs_once_and_serves_empty_names(conn,
     assert sum("Client Directory tables unavailable" in r.message for r in caplog.records) == 1
     conn.commit()
     assert authenticated_client.get("/api/master/summary").json() == {
-        "available": False, "companies": 0, "contacts": 0, "email": 0, "domain": 0, "none": 2, "tagged_at": None}
+        "available": False, "companies": 0, "contacts": 0, "email": 0, "domain": 0, "none": 2,
+        "approvable": 0, "tagged_at": None}
 
 
 def test_summary_route_contract_permissions_and_removed_endpoints(conn, directory, authenticated_client):
@@ -138,7 +143,8 @@ def test_summary_route_contract_permissions_and_removed_endpoints(conn, director
     summary = authenticated_client.get("/api/master/summary")
     assert summary.status_code == 200
     assert summary.json() == {"available": True, "companies": 1, "contacts": 1,
-                              "email": 1, "domain": 0, "none": 0, "tagged_at": summary.json()["tagged_at"]}
+                              "email": 1, "domain": 0, "none": 0, "approvable": 1,
+                              "tagged_at": summary.json()["tagged_at"]}
     assert datetime.fromisoformat(summary.json()["tagged_at"]).utcoffset().total_seconds() == 0
     for method, path in (("GET", "/api/master"), ("GET", "/api/master/rows"), ("POST", "/api/master/import")):
         assert authenticated_client.request(method, path, headers={"X-Local-GUI": "1"}).status_code == 404

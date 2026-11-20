@@ -126,6 +126,7 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
             ("GET", "/api/candidates/facets", None),
             ("GET", "/api/candidates/timeline", None), ("GET", "/api/master/summary", None),
             ("POST", "/api/candidates/bulk", {"ids": [cid], "action": "approve"}),
+            ("POST", "/api/candidates/approve-matched", None),
             ("POST", f"/api/candidates/{cid}/approve", edited()),
             ("POST", f"/api/candidates/{cid}/reject", None),
             ("POST", f"/api/candidates/{cid}/reopen", None),
@@ -603,6 +604,61 @@ def test_bulk_approve_matches_single_untouched_draft(conn, full):
     bulk = local.get(f"/api/candidates/{b}").json()
     assert bulk["reviewed"] == single["reviewed"]
     assert bulk["reviewed_by"] == single["reviewed_by"] and bulk["reviewed_at"]
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_approve_matched_uses_summary_selection(conn, directory, malformed):
+    first, second = directory([("Alpha", []), ("Beta", [])])
+    exact = insert_review_candidate(conn, "exact@co.test", {"name": "  Exact  "},
+                                    match="email", master_ids=[first, second])
+    skipped = []
+    if malformed:
+        bad = insert_review_candidate(conn, "bad@co.test", {"name": 123}, match="email", master_ids=[first])
+        skipped = [{"id": bad, "error": "invalid extracted field shapes"}]
+    domain = insert_review_candidate(conn, "domain@co.test", match="domain", master_ids=[second])
+    shared = insert_review_candidate(conn, "shared@co.test", match="domain", master_ids=[first, second])
+    untagged = insert_review_candidate(conn, "untagged@co.test")
+    rejected = insert_review_candidate(conn, "rejected@co.test", state="rejected", match="email", master_ids=[first])
+    conn.commit()
+    query = "SELECT * FROM candidates WHERE id=%s"
+    untouched = [shared, untagged, rejected] + [entry["id"] for entry in skipped]
+    before = [conn.execute(query, (cid,)).fetchone() for cid in untouched]
+
+    path = "/api/candidates/approve-matched"
+    assert local.post(path).status_code == 403
+    assert TestClient(app, base_url="http://localhost").post(path, headers=GUI).status_code == 401
+    count = local.get("/api/master/summary").json()["approvable"]
+    response = local.post(path, headers=GUI)
+    assert count == 2 + len(skipped)
+    assert response.status_code == 200
+    assert response.json() == {"approved": count - len(skipped), "skipped": skipped}
+    assert local.get("/api/master/summary").json()["approvable"] == len(skipped)
+    assert [conn.execute(query, (cid,)).fetchone() for cid in untouched] == before
+    for cid in (exact, domain):
+        row = conn.execute(query, (cid,)).fetchone()
+        assert row["review_state"] == "approved"
+        assert row["master_match"] is None and row["master_ids"] is None
+        assert row["reviewed"] and row["reviewed_by"] and row["reviewed_at"]
+    assert conn.execute(query, (exact,)).fetchone()["reviewed"]["name"] == "Exact"
+    if not malformed:
+        assert local.post(path, headers=GUI).json() == {"approved": 0, "skipped": []}
+
+
+def test_approve_matched_database_error_rolls_back_batch(conn, directory):
+    company, = directory([("Company", [])])
+    first = insert_review_candidate(conn, "first@co.test", match="email", master_ids=[company])
+    last = insert_review_candidate(conn, "last@co.test", match="email", master_ids=[company])
+    conn.execute("ALTER TABLE candidates ADD CONSTRAINT injected_match_failure CHECK "
+                 "(email_key <> 'last@co.test' OR review_state <> 'approved')")
+    conn.commit()
+    with TestClient(app, base_url="http://localhost", cookies=local.cookies, raise_server_exceptions=False) as client:
+        response = client.post("/api/candidates/approve-matched", headers=GUI)
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Internal server error"}
+    assert conn.execute(
+        "SELECT DISTINCT review_state,master_match,master_ids,reviewed FROM candidates WHERE id=ANY(%s)",
+        ([first, last],)).fetchall() == [
+            {"review_state": "pending", "master_match": "email", "master_ids": [company], "reviewed": None}]
 
 
 def test_bulk_mixed_batch_failures_do_not_stop_later_records(conn):
