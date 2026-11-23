@@ -3,8 +3,10 @@
 Sheets are read as GOOGLE_ADMIN_EMAIL, so each sheet must be shared with that account.
 """
 
+from datetime import datetime, timezone
+
 from .. import db
-from ..config import env
+from ..config import env, load_rules
 from ..google_client import execute, service
 
 
@@ -20,7 +22,7 @@ def rows_to_records(rows: list[list[str]]) -> list[tuple[int, dict]]:
     return out
 
 
-def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None) -> int:
+def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None, *, on_changed=None) -> int:
     from .. import pipeline
 
     sh = service("sheets", env("GOOGLE_ADMIN_EMAIL"))
@@ -28,16 +30,17 @@ def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None) -> in
     for sid in sheet_ids:
         meta = execute(sh.spreadsheets().get(
             spreadsheetId=sid, fields="properties.title,sheets.properties.title"))
-        current_ids = []
+        items = []
         for tab in (s["properties"]["title"] for s in meta["sheets"]):
             rng = "'" + tab.replace("'", "''") + "'"
             rows = execute(sh.spreadsheets().values().get(spreadsheetId=sid, range=rng)).get("values", [])
             for row_no, record in rows_to_records(rows):
                 source_id = f"{sid}:{tab}:{row_no}"
-                current_ids.append(source_id)
-                db.upsert_raw(conn, "sheets", "", source_id, {
-                    "sheet": meta["properties"]["title"], "tab": tab, "row": row_no, "record": record})
-                n += 1
+                items.append((source_id, {
+                    "sheet": meta["properties"]["title"], "tab": tab, "row": row_no, "record": record}))
+        current_ids = [source_id for source_id, _ in items]
+        changed = db.upsert_raw_many(conn, "sheets", "", items)
+        n += len(items)
         # Only remove rows absent from a completely fetched sheet.
         keys = {r["key"] for r in conn.execute(
             "SELECT s.key FROM signals s JOIN raw_items r ON r.id=s.raw_item_id"
@@ -45,8 +48,13 @@ def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None) -> in
             (f"{sid}:", current_ids))}
         conn.execute("DELETE FROM raw_items WHERE source='sheets' AND starts_with(source_id,%s)"
                      " AND NOT (source_id=ANY(%s))", (f"{sid}:", current_ids))
+        if on_changed is not None and keys:
+            pipeline.rebuild(conn, keys, load_rules(), datetime.now(timezone.utc))
         conn.commit()
-        pipeline.run_extract(log, keys=keys, checkpoint=checkpoint)
+        if on_changed is None:
+            pipeline.run_extract(log, keys=keys, checkpoint=checkpoint)
+        else:
+            on_changed(changed)
         log(f"sheet {meta['properties']['title']}: done")
         checkpoint()
     log(f"sheets: {n} rows")

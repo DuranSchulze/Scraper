@@ -193,7 +193,8 @@ def test_reviewed_records_are_not_overwritten(conn, state):
     assert row["review_state"] == state
 
 
-def test_parser_failure_keeps_signals_and_retries_next_run(conn, monkeypatch):
+@pytest.mark.parametrize("full", [False, True])
+def test_parser_failure_keeps_signals_and_retries_only_on_change_or_full(conn, monkeypatch, full):
     item = seed(conn)
     pipeline.run_extract(lambda _: None)
     before = conn.execute("SELECT * FROM signals").fetchall()
@@ -207,14 +208,91 @@ def test_parser_failure_keeps_signals_and_retries_next_run(conn, monkeypatch):
     pipeline.run_extract(lambda _: None)
     assert calls == [item]
     row = conn.execute("SELECT * FROM raw_items").fetchone()
-    assert row["extracted_at"] is None and "fixture parser failure" in row["extract_error"]
+    assert row["extracted_at"] and "fixture parser failure" in row["extract_error"]
     assert conn.execute("SELECT * FROM signals").fetchall() == before
     assert candidates(conn)["bob@client.test"]["fields"]["name"]["value"] == "Bob"
-    monkeypatch.setattr(pipeline, "extract_item", original)
     pipeline.run_extract(lambda _: None)
+    assert calls == [item]
+    if not full:
+        seed(conn, name="Changed again")
+        assert conn.execute("SELECT extracted_at, extract_error FROM raw_items").fetchone() == {
+            "extracted_at": None, "extract_error": None}
+    monkeypatch.setattr(pipeline, "extract_item", original)
+    pipeline.run_extract(lambda _: None, full=full)
     row = conn.execute("SELECT * FROM raw_items").fetchone()
     assert row["extracted_at"] and row["extract_error"] is None
-    assert candidates(conn)["bob@client.test"]["fields"]["name"]["value"] == "Changed"
+    assert candidates(conn)["bob@client.test"]["fields"]["name"]["value"] == ("Changed" if full else "Changed again")
+
+
+@pytest.mark.parametrize("stop", [False, True])
+def test_scrape_extracts_current_rows_first_and_resumes_backlog(conn, monkeypatch, stop):
+    from scraper.app import JobLog
+
+    def items(prefix, count):
+        return [(f"{prefix}{i}", {"sheet": "T", "tab": "A", "row": i + 2,
+                                  "record": {"Email": f"{prefix}{i}@client.test"}}) for i in range(count)]
+
+    old = sorted(db.upsert_raw_many(conn, "sheets", "", items("backlog", 1000)))
+    conn.commit()
+    monkeypatch.setenv("EXTRACT_BACKLOG_MINUTES", "1")
+    monkeypatch.setattr(pipeline, "BATCH", 5)
+    clock, attempts, new, lines, snapshots = [0], [], [], [], []
+    monkeypatch.setattr(pipeline, "monotonic", lambda: clock[0])
+    original = pipeline.extract_item
+
+    def fetch(connection, mailbox, *args, on_changed, **kwargs):
+        changed = db.upsert_raw_many(connection, "sheets", "", items("new", 5))
+        connection.commit()
+        new.extend(sorted(changed))
+        on_changed(changed)
+
+    def extract(row, *args):
+        attempts.append(row["id"])
+        if row["id"] in (old[4], old[9]):
+            clock[0] += 60
+        return original(row, *args)
+
+    def checkpoint():
+        if stop and attempts == new + old[:5]:
+            raise db.JobStopped("test stop")
+
+    class Log(JobLog):
+        def __call__(self, line):
+            lines.append(line)
+
+        def progress(self, stage, done, total, *, conn=None, **fields):
+            super().progress(stage, done, total, conn=conn, **fields)
+            if fields:
+                snapshots.append(conn.execute("SELECT progress FROM jobs WHERE id=%s", (self.job_id,))
+                                 .fetchone()["progress"])
+
+    def run(check=lambda: None):
+        job = conn.execute("INSERT INTO jobs (name, status) VALUES ('scrape','running') RETURNING id").fetchone()["id"]
+        conn.commit()
+        try:
+            pipeline.run_scrape(["gmail"], ["a"], "2025-01-01", False, Log(job), checkpoint=check)
+        finally:
+            conn.execute("UPDATE jobs SET status='done' WHERE id=%s", (job,))
+            conn.commit()
+
+    monkeypatch.setattr(pipeline.gmail, "fetch_mailbox", fetch)
+    monkeypatch.setattr(pipeline, "extract_item", extract)
+    if stop:
+        with pytest.raises(db.JobStopped):
+            run(checkpoint)
+        assert any("backlog: pass stopped at checkpoint (test stop)" in line for line in lines)
+    else:
+        run()
+        assert any("backlog: pass time limit reached" in line for line in lines)
+    assert attempts == new + old[:5]
+    assert db.get_cursor(conn, pipeline.BACKLOG_SOURCE, "") == str(old[4])
+    assert len(candidates(conn)) == 10
+    run()
+    assert attempts == new + old[:10]
+    assert db.get_cursor(conn, pipeline.BACKLOG_SOURCE, "") == str(old[9])
+    assert [(p["done"], p["total"], p["backlog_done"], p["backlog_total"]) for p in snapshots] == [
+        (5, 5, 0, 1000), (5, 5, 5, 1000), (0, 0, 0, 995), (0, 0, 5, 995),
+    ]
 
 
 def test_crash_rolls_back_markers_signals_and_people_of_failed_batch(conn, monkeypatch):
@@ -840,7 +918,7 @@ def test_stop_during_final_extract_leaves_fetched_mailboxes_done(conn, monkeypat
         connections.append(connection)
         connection.commit()
         barrier.wait(timeout=5)
-    def extract(log, *, checkpoint):
+    def extract(log, *, checkpoint, raw_ids):
         assert len(connections) == 2 and all(c.closed for c in connections)
         extracting.append(True)
         holding.set()
@@ -970,7 +1048,9 @@ def test_progress_full_reset_batch_retry_and_failed_items(conn, monkeypatch):
     assert attempts == [2, 2]
     assert all(0 <= p["done"] <= p["total"] for p in snapshots)
     assert len({p["started_at"] for p in snapshots}) == 1
-    assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 2
+    assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 3
+    assert conn.execute("SELECT count(*) AS n FROM signals").fetchone()["n"] == 2
+    assert conn.execute("SELECT extract_error FROM raw_items WHERE source_id='bad'").fetchone()["extract_error"]
 
 
 def test_fetch_progress_counts_resumed_and_failed_mailboxes_through_sheets(conn, monkeypatch):
@@ -1021,9 +1101,9 @@ def test_sheets_only_and_zero_item_stage_progress(conn, monkeypatch):
     stages = []
     original = api.JobLog.progress
 
-    def progress(logger, stage, done, total, *, conn=None):
-        stages.append((stage, done, total))
-        original(logger, stage, done, total, conn=conn)
+    def progress(logger, stage, done, total, *, conn=None, **fields):
+        stages.append((stage, done, total, fields))
+        original(logger, stage, done, total, conn=conn, **fields)
 
     def fetch(connection, *args, **kwargs):
         p = conn.execute("SELECT progress FROM jobs ORDER BY id DESC LIMIT 1").fetchone()["progress"]
@@ -1033,7 +1113,9 @@ def test_sheets_only_and_zero_item_stage_progress(conn, monkeypatch):
     monkeypatch.setattr(api.JobLog, "progress", progress)
     monkeypatch.setattr(pipeline.sheets, "fetch_sheets", fetch)
     api.start_job("scrape", {"sources": ["sheets"], "mailboxes": [], "since": "2020-01-01", "full": False})
-    assert stages == [("fetch", 0, 0), ("fetch", 0, 0), ("extract", 0, 0), ("tag", 0, 1), ("tag", 1, 1)]
+    assert stages == [("fetch", 0, 0, {}), ("fetch", 0, 0, {}), ("extract", 0, 0, {}),
+                      ("extract", 0, 0, {"backlog_done": 0, "backlog_total": 0}),
+                      ("tag", 0, 1, {}), ("tag", 1, 1, {})]
     stages.clear()
     api.start_job("extract", {"full": False})
-    assert stages == [("extract", 0, 0), ("extract", 0, 0), ("tag", 0, 1), ("tag", 1, 1)]
+    assert stages == [("extract", 0, 0, {}), ("extract", 0, 0, {}), ("tag", 0, 1, {}), ("tag", 1, 1, {})]

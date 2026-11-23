@@ -150,9 +150,11 @@ class JobLog:
     def __call__(self, msg: str) -> None:
         log(self.job_id, msg)
 
-    def progress(self, stage, done, total, *, conn=None) -> None:
-        value = Jsonb({"stage": stage, "done": done, "total": total,
-                       "started_at": datetime.now(timezone.utc).isoformat()})
+    def progress(self, stage, done, total, *, conn=None, backlog_done=None, backlog_total=None) -> None:
+        progress = {"stage": stage, "done": done, "total": total, "started_at": datetime.now(timezone.utc).isoformat()}
+        if backlog_total is not None:
+            progress.update(backlog_done=backlog_done, backlog_total=backlog_total)
+        value = Jsonb(progress)
         sql = ("UPDATE jobs SET progress=CASE WHEN progress->>'stage'=%s THEN"
                " %s::jsonb || jsonb_build_object('started_at',progress->'started_at') ELSE %s::jsonb END"
                " WHERE id=%s AND status='running'")

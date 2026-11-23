@@ -33,8 +33,17 @@ def sheet_api(monkeypatch):
     return state
 
 
-def test_sheet_diff_identical_changed_removed_and_shifted_rows(conn, monkeypatch, sheet_api):
-    sheets.fetch_sheets(conn, ["s"], lambda _: None)
+@pytest.mark.parametrize("scrape", [False, True])
+def test_sheet_diff_identical_changed_removed_and_shifted_rows(conn, monkeypatch, sheet_api, scrape):
+    monkeypatch.setenv("DRIVE_SHEET_IDS", "s")
+
+    def fetch():
+        if scrape:
+            pipeline.run_scrape(["sheets"], [], "2025-01-01", False, lambda _: None)
+        else:
+            sheets.fetch_sheets(conn, ["s"], lambda _: None)
+
+    fetch()
     before = conn.execute("SELECT * FROM raw_items ORDER BY source_id").fetchall()
     original = pipeline.extract_item
     seen = []
@@ -42,26 +51,26 @@ def test_sheet_diff_identical_changed_removed_and_shifted_rows(conn, monkeypatch
         seen.append(row["id"])
         return original(row, *args)
     monkeypatch.setattr(pipeline, "extract_item", extract)
-    sheets.fetch_sheets(conn, ["s"], lambda _: None)
+    fetch()
     assert conn.execute("SELECT * FROM raw_items ORDER BY source_id").fetchall() == before and seen == []
     sheet_api["rows"][1][0] = "A edited"
-    sheets.fetch_sheets(conn, ["s"], lambda _: None)
+    fetch()
     assert seen == [before[0]["id"]]
     sheet_api["rows"] = [["Name", "Email"], ["B", "b@client.test"]]
     seen.clear()
-    sheets.fetch_sheets(conn, ["s"], lambda _: None)
+    fetch()
     rows = conn.execute("SELECT * FROM raw_items").fetchall()
     assert len(rows) == 1 and rows[0]["id"] == before[0]["id"]
     assert seen == [before[0]["id"]]
     assert [r["email_key"] for r in conn.execute("SELECT email_key FROM candidates")] == ["b@client.test"]
     sheet_api["fail"] = True
     with pytest.raises(RuntimeError):
-        sheets.fetch_sheets(conn, ["s"], lambda _: None)
+        fetch()
     conn.rollback()
     assert conn.execute("SELECT * FROM raw_items").fetchall() == rows
 
 
-def test_stop_inside_sheet_extraction_keeps_commits_and_never_fetches_later_sheet(conn, monkeypatch, sheet_api):
+def test_stop_inside_scrape_extract_keeps_committed_sheets_and_batch(conn, monkeypatch, sheet_api):
     from scraper import app as api
 
     monkeypatch.setenv("DRIVE_SHEET_IDS", "first,second")
@@ -75,8 +84,8 @@ def test_stop_inside_sheet_extraction_keeps_commits_and_never_fetches_later_shee
     monkeypatch.setattr(api.JobLog, "checkpoint", stop_after_batch)
     monkeypatch.setattr(api, "_launch_job", api._run_job)
     api.start_job("scrape", {"sources": ["sheets"], "mailboxes": [], "since": "2025-01-01", "full": False})
-    assert "second" not in sheet_api["calls"]
+    assert sheet_api["calls"] == ["first", "first", "second", "second"]
     assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "stopped"
-    assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 2
+    assert conn.execute("SELECT count(*) AS n FROM raw_items").fetchone()["n"] == 4
     assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 1
     assert not any("finished" in r["line"] for r in conn.execute("SELECT line FROM job_log"))

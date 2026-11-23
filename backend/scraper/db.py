@@ -63,15 +63,15 @@ def set_cursor(conn, source: str, mailbox: str, cursor: str) -> None:
     )
 
 
-def missing_ids(conn, source: str, mailbox: str, ids: list[str], min_version: int = 1) -> list[str]:
+def missing_ids(conn, source: str, mailbox: str, ids: list[str], min_version: int = 1, *, refresh=()) -> list[str]:
     """Ids not yet stored (or stored with an older payload version), in input order."""
     have = {
         r["source_id"]
         for r in conn.execute(
             "SELECT source_id FROM raw_items WHERE source = %s AND mailbox = %s AND source_id = ANY(%s)"
-            " AND coalesce((payload->>'v')::int, 1) >= %s"
+            " AND coalesce((payload->>'v')::int, 1) >= %s AND NOT (source_id=ANY(%s))"
             " UNION SELECT source_id FROM gone_items WHERE source=%s AND mailbox=%s AND source_id=ANY(%s)",
-            (source, mailbox, ids, min_version, source, mailbox, ids),
+            (source, mailbox, ids, min_version, list(refresh), source, mailbox, ids),
         )
     }
     return [i for i in ids if i not in have]
@@ -91,8 +91,33 @@ UPSERT_RAW = (
     "INSERT INTO raw_items (source, mailbox, source_id, payload) VALUES (%s, %s, %s, %s)"
     " ON CONFLICT (source, mailbox, source_id)"
     # A changed payload must be extracted again.
-    " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now(), extracted_at = NULL"
-    " WHERE raw_items.payload IS DISTINCT FROM EXCLUDED.payload"
+    " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now(), extracted_at = NULL, extract_error = NULL"
+)
+
+
+def _gmail_material_sql(payload):
+    def pick(path, default):
+        return f"coalesce({payload}{path}, '{default}'::jsonb)"
+
+    fields = [f"{payload} ? 'direction'", f"{payload}->'direction'", f"{payload}->'internal_date'",
+              f"jsonb_typeof({payload}->'headers')"]
+    fields += [pick(f"->'{field}'", default) for field, default in (
+        ("body", '\"\"'), ("thread_id", '\"\"'), ("mailbox", '\"\"'), ("labels", "[]"), ("attachment_text", "{}"))]
+    fields += [pick(f"#>'{{headers,{header}}}'", '\"no\"' if header == "auto-submitted" else '\"\"')
+               for header in ("from", "to", "cc", "delivered-to", "subject", "list-unsubscribe", "list-id",
+                              "precedence", "auto-submitted")]
+    attachments = pick("->'attachments'", "[]")
+    fields.append(
+        f"CASE WHEN jsonb_typeof({attachments})='array' THEN to_jsonb(ARRAY(SELECT "
+        f"jsonb_build_array(a->'filename', a->'mime', a->'size') FROM jsonb_array_elements({attachments})"
+        f" WITH ORDINALITY AS parts(a, n) ORDER BY n)) ELSE {attachments} END")
+    return f"jsonb_build_array({', '.join(fields)})"
+
+
+GMAIL_CHANGED = f"{_gmail_material_sql('raw_items.payload')} IS DISTINCT FROM {_gmail_material_sql('EXCLUDED.payload')}"
+UPDATE_GMAIL_METADATA = (
+    "UPDATE raw_items SET payload=%s WHERE source=%s AND mailbox=%s AND source_id=%s"
+    " AND payload IS DISTINCT FROM %s"
 )
 
 
@@ -106,13 +131,26 @@ def _strip_nuls(value):
     return value
 
 
-def upsert_raw(conn, source: str, mailbox: str, source_id: str, payload: dict) -> None:
-    conn.execute(UPSERT_RAW, (source, mailbox, source_id, Jsonb(_strip_nuls(payload))))
+def upsert_raw(conn, source: str, mailbox: str, source_id: str, payload: dict) -> int | None:
+    return next(iter(upsert_raw_many(conn, source, mailbox, [(source_id, payload)])), None)
 
 
-def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict]]) -> None:
+def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict]]) -> set[int]:
+    if not items:
+        return set()
+    if source == "gmail" and len({sid for sid, _ in items}) != len(items):
+        return {raw_id for item in items for raw_id in upsert_raw_many(conn, source, mailbox, [item])}
+    changes = GMAIL_CHANGED if source == "gmail" else "raw_items.payload IS DISTINCT FROM EXCLUDED.payload"
+    args = [(source, mailbox, sid, Jsonb(_strip_nuls(p))) for sid, p in items]
+    # The conflict check locks existing rows even when the change only updates metadata.
     with conn.cursor() as cur:
-        cur.executemany(UPSERT_RAW, [(source, mailbox, sid, Jsonb(_strip_nuls(p))) for sid, p in items])
+        cur.executemany(f"{UPSERT_RAW} WHERE {changes} RETURNING id", args, returning=True)
+        results = [result.fetchone() for result in cur.results()]
+        if source == "gmail":
+            cur.executemany(UPDATE_GMAIL_METADATA, [
+                (p, src, mb, sid, p) for (src, mb, sid, p), row in zip(args, results) if row is None
+            ])
+    return {row["id"] for row in results if row is not None}
 
 
 def interrupt_stale(conn) -> None:

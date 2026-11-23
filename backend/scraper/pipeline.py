@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Event, Lock
 import time
+from time import monotonic
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -17,6 +18,7 @@ from .sources import contacts, gmail, sheets
 
 
 BATCH = 500
+BACKLOG_SOURCE = "extract_backlog"
 
 
 def rebuild_targets(keys, merged: dict[str, str]) -> dict[str, set[str]]:
@@ -65,10 +67,10 @@ def _failure(log, count: int = 1) -> None:
         callback(count)
 
 
-def _progress(log, stage, done, total, *, conn=None):
+def _progress(log, stage, done, total, *, conn=None, **fields):
     callback = getattr(log, "progress", None)
     if callback:
-        callback(stage, done, total, conn=conn)
+        callback(stage, done, total, conn=conn, **fields)
 
 
 def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log, *,
@@ -77,6 +79,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
     env_int("SCRAPE_MESSAGE_WORKERS", gmail.WORKERS, 1, 25, log)
     stopped = Event()
     finished_mailboxes = set()
+    changed_ids = set()
     progress_lock = Lock()
     resolved = []
 
@@ -96,6 +99,10 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
         if callback:
             callback(mb, status, error)
 
+    def on_changed(ids):
+        with progress_lock:
+            changed_ids.update(ids)
+
     def mailbox_task(mb):
         step = "connect"
         completed = False
@@ -103,8 +110,10 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
             task_checkpoint()
             with db.connect() as conn:
                 succeeded = True
-                for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log, checkpoint=task_checkpoint)),
-                                    ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full, checkpoint=task_checkpoint))):
+                for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log,
+                                                                         checkpoint=task_checkpoint, on_changed=on_changed)),
+                                    ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full,
+                                                                                 checkpoint=task_checkpoint, on_changed=on_changed))):
                     if name not in sources:
                         continue
                     step = name
@@ -165,33 +174,70 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
             with db.connect() as conn:
                 conn.commit()
                 task_checkpoint()
-                sheets.fetch_sheets(conn, ids, log, checkpoint=task_checkpoint)
+                sheets.fetch_sheets(conn, ids, log, checkpoint=task_checkpoint, on_changed=on_changed)
         else:
             log("sheets: DRIVE_SHEET_IDS is empty, skipped")
     task_checkpoint()
-    run_extract(log, checkpoint=task_checkpoint)
+    run_extract(log, checkpoint=task_checkpoint, raw_ids=changed_ids)
 
 
-def count_pending(conn) -> int:
-    return conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"]
+def count_pending(conn, *, eligible_only=False) -> int:
+    criterion = " AND extract_error IS NULL" if eligible_only else ""
+    return conn.execute(f"SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL{criterion}").fetchone()["n"]
 
 
-def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) -> None:
+def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None, raw_ids=None) -> None:
     rules = load_rules()
     internal = set(env_list("INTERNAL_DOMAINS"))
     if not internal:
         raise RuntimeError("INTERNAL_DOMAINS is empty; staff would be listed as clients")
+    run_progress = _extract_pass(log, rules, internal, checkpoint, full=full, keys=keys, raw_ids=raw_ids)
+    if raw_ids is not None:
+        minutes = env_int("EXTRACT_BACKLOG_MINUTES", 20, 0, 1440)
+        _extract_pass(log, rules, internal, checkpoint, backlog_deadline=monotonic() + minutes * 60,
+                      run_progress=run_progress)
+    checkpoint()
+    _progress(log, "tag", 0, 1)
+    with db.connect() as conn:
+        master.rematch(conn)
+        matched = master.counts(conn)
+        _progress(log, "tag", 1, 1, conn=conn)
+    log(f"tag: {matched['email']} email, {matched['domain']} domain matches")
+    succeeded, failed, _ = run_progress
+    log(f"extract: done ({succeeded} items, {failed} failed)")
+
+
+def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_ids=None,
+                  backlog_deadline=None, run_progress=None):
+    backlog = backlog_deadline is not None
+    phase = "backlog" if backlog else "extract" if raw_ids is None else "scrape extract"
+    started, rebuild_seconds = monotonic(), 0.0
+    outcome = "finished"
     succeeded = failed = total_signals = last_id = 0
     rebuild_keys = set(keys)
     extract_total = None
+    pending_filter = "extracted_at IS NULL AND extract_error IS NULL"
+    filters = ()
+    if raw_ids is not None:
+        pending_filter += " AND id=ANY(%s)"
+        filters = (sorted(raw_ids),)
+
+    def progress(conn, done):
+        if backlog:
+            run_succeeded, run_failed, run_total = run_progress
+            _progress(log, "extract", run_succeeded + run_failed, run_total, conn=conn,
+                      backlog_done=done, backlog_total=extract_total)
+        else:
+            _progress(log, "extract", done, extract_total, conn=conn)
 
     def one_pass():
-        nonlocal succeeded, failed, total_signals, last_id, full, extract_total
+        nonlocal succeeded, failed, total_signals, last_id, full, extract_total, rebuild_seconds, outcome
         with db.connect() as conn:
             # Also recover pending keys left without signals by an interrupted full reset.
-            rebuild_keys.update(r["email_key"] for r in conn.execute(
-                "SELECT c.email_key FROM candidates c WHERE c.review_state='pending'"
-                " AND NOT EXISTS (SELECT 1 FROM signals s WHERE s.key=c.email_key)"))
+            if not backlog:
+                rebuild_keys.update(r["email_key"] for r in conn.execute(
+                    "SELECT c.email_key FROM candidates c WHERE c.review_state='pending'"
+                    " AND NOT EXISTS (SELECT 1 FROM signals s WHERE s.key=c.email_key)"))
             if full:
                 rebuild_keys.update(r["key"] for r in conn.execute(
                     "SELECT key FROM signals UNION SELECT email_key AS key FROM candidates WHERE review_state='pending'"))
@@ -204,13 +250,30 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                     reset_done()
                 checkpoint()
             if extract_total is None:
-                extract_total = count_pending(conn)
-            _progress(log, "extract", succeeded + failed, extract_total, conn=conn)
+                if backlog:
+                    last_id = int(db.get_cursor(conn, BACKLOG_SOURCE, "") or 0)
+                    # A row behind the cursor can become pending after an earlier interrupted scrape.
+                    if last_id and not conn.execute(
+                        f"SELECT 1 FROM raw_items WHERE {pending_filter} AND id>%s LIMIT 1", (last_id,)
+                    ).fetchone():
+                        first = conn.execute(f"SELECT min(id) AS id FROM raw_items WHERE {pending_filter}").fetchone()["id"]
+                        if first is not None:
+                            last_id = first - 1
+                if backlog or raw_ids is not None:
+                    extract_total = conn.execute(f"SELECT count(*) AS n FROM raw_items WHERE {pending_filter} AND id>%s",
+                                                 (*filters, last_id)).fetchone()["n"]
+                else:
+                    extract_total = count_pending(conn, eligible_only=True)
+            progress(conn, succeeded + failed)
             conn.commit()
-            while True:
+            while succeeded + failed < extract_total:
+                # shortcut: the budget is checked between durable batches, add in-batch cancellation if a hard cutoff is needed
+                if backlog and monotonic() >= backlog_deadline:
+                    outcome = "time limit reached"
+                    break
                 rows = conn.execute(
-                    "SELECT id, source, payload FROM raw_items WHERE extracted_at IS NULL AND id>%s"
-                    " ORDER BY id LIMIT %s", (last_id, BATCH)).fetchall()
+                    f"SELECT id, source, payload FROM raw_items WHERE {pending_filter} AND id>%s"
+                    " ORDER BY id LIMIT %s FOR UPDATE", (*filters, last_id, BATCH)).fetchall()
                 if not rows:
                     break
                 ids = [r["id"] for r in rows]
@@ -224,7 +287,8 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                     except JobStopped:
                         raise
                     except Exception as exc:
-                        conn.execute("UPDATE raw_items SET extract_error=%s WHERE id=%s", (repr(exc), row["id"]))
+                        conn.execute("UPDATE raw_items SET extracted_at=now(), extract_error=%s WHERE id=%s",
+                                     (repr(exc), row["id"]))
                         continue
                     successful.append(row["id"])
                     affected.update(old_keys.get(row["id"], set()))
@@ -234,8 +298,13 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                 with conn.cursor() as cur:
                     cur.executemany("INSERT INTO signals (raw_item_id, key, data) VALUES (%s,%s,%s)", signals)
                 conn.execute("UPDATE raw_items SET extracted_at=now(), extract_error=NULL WHERE id=ANY(%s)", (successful,))
-                rebuild(conn, affected, rules, datetime.now(timezone.utc))
-                _progress(log, "extract", succeeded + failed + len(rows), extract_total, conn=conn)
+                if affected:
+                    rebuild_started = monotonic()
+                    rebuild(conn, affected, rules, datetime.now(timezone.utc))
+                    rebuild_seconds += monotonic() - rebuild_started
+                if backlog:
+                    db.set_cursor(conn, BACKLOG_SOURCE, "", str(rows[-1]["id"]))
+                progress(conn, succeeded + failed + len(rows))
                 # Signals, markers and candidates commit together; a failed batch is retried.
                 conn.commit()
                 _failure(log, len(rows) - len(successful))
@@ -243,30 +312,43 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                 succeeded += len(successful)
                 total_signals += len(signals)
                 last_id = rows[-1]["id"]
-                log(f"extract: {succeeded} items, {total_signals} signals, {failed} failed")
+                done = succeeded + failed
+                elapsed = max(monotonic() - started, 0.001)
+                label = f"backlog {done}/{extract_total}" if backlog else phase
+                log(f"{label}: {succeeded} items, {total_signals} signals, {failed} failed"
+                    f" ({done / elapsed:.1f} rows/s, {rebuild_seconds:.1f}s rebuilding)")
                 checkpoint()
             if rebuild_keys:
+                rebuild_started = monotonic()
                 rebuild(conn, rebuild_keys, rules, datetime.now(timezone.utc))
+                rebuild_seconds += monotonic() - rebuild_started
             conn.commit()
 
     drops = 0
-    while True:
-        done_before = succeeded + failed
-        try:
-            one_pass()
-            break
-        except psycopg.OperationalError as exc:
-            # Only the uncommitted batch is lost; a new pass resumes from extracted_at markers.
-            drops = drops + 1 if succeeded + failed == done_before else 1
-            if drops > 3:
-                raise
-            log(f"extract: database connection lost ({exc.__class__.__name__}); reconnecting and retrying the batch")
-            time.sleep(5 * drops)
-    checkpoint()
-    _progress(log, "tag", 0, 1)
-    with db.connect() as conn:
-        master.rematch(conn)
-        matched = master.counts(conn)
-        _progress(log, "tag", 1, 1, conn=conn)
-    log(f"tag: {matched['email']} email, {matched['domain']} domain matches")
-    log(f"extract: done ({succeeded} items, {failed} failed)")
+    try:
+        if backlog:
+            checkpoint()
+        while True:
+            done_before = succeeded + failed
+            try:
+                one_pass()
+                break
+            except psycopg.OperationalError as exc:
+                # Only the uncommitted batch is lost; a new pass resumes from extracted_at markers.
+                drops = drops + 1 if succeeded + failed == done_before else 1
+                if drops > 3:
+                    raise
+                log(f"{phase}: database connection lost ({exc.__class__.__name__}); reconnecting and retrying the batch")
+                time.sleep(5 * drops)
+    except JobStopped as exc:
+        outcome = f"stopped at checkpoint ({exc or 'stop requested or job interrupted'})"
+        raise
+    except BaseException as exc:
+        outcome = type(exc).__name__
+        raise
+    finally:
+        elapsed = monotonic() - started
+        throughput = (succeeded + failed) / max(elapsed, 0.001)
+        log(f"{phase}: pass {outcome}; {succeeded + failed} attempted in {elapsed:.1f}s"
+            f" ({throughput:.1f} rows/s, {rebuild_seconds:.1f}s rebuilding)")
+    return succeeded, failed, extract_total

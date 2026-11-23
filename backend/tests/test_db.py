@@ -191,10 +191,11 @@ def test_raw_helpers_replace_and_invalidate_extraction(pg_url):
     with db.connect() as conn:
         db.upsert_raw_many(conn, "gmail", "a", [("m", {"v": 1}), ("n", {"v": 2})])
         conn.execute("UPDATE raw_items SET extracted_at=now()")
+        marker = conn.execute("SELECT extracted_at FROM raw_items WHERE source_id='m'").fetchone()["extracted_at"]
         assert db.missing_ids(conn, "gmail", "a", ["m", "n", "new"], 2) == ["m", "new"]
-        db.upsert_raw(conn, "gmail", "a", "m", {"v": 2})
+        assert db.upsert_raw(conn, "gmail", "a", "m", {"v": 2}) is None
         assert db.missing_ids(conn, "gmail", "a", ["m", "n"], 2) == []
-        assert conn.execute("SELECT extracted_at FROM raw_items WHERE source_id='m'").fetchone()["extracted_at"] is None
+        assert conn.execute("SELECT extracted_at FROM raw_items WHERE source_id='m'").fetchone()["extracted_at"] == marker
         db.upsert_raw_many(conn, "gmail", "a", [("n", {"v": 2, "body": "changed"})])
         assert conn.execute("SELECT extracted_at FROM raw_items WHERE source_id='n'").fetchone()["extracted_at"] is None
 
@@ -389,6 +390,22 @@ def test_unchanged_raw_payload_preserves_extraction_and_fetch_timestamps(pg_url,
         after = conn.execute("SELECT * FROM raw_items").fetchone()
         assert after["id"] == before["id"] and after["extracted_at"] is None
         assert after["fetched_at"] > before["fetched_at"]
+
+
+def test_gmail_material_order_requeues_failed_extraction(pg_url):
+    from scraper import db
+
+    db.migrate()
+    with db.connect() as conn:
+        attachments = [{"filename": name, "mime": "application/pdf", "size": 1} for name in ("a", "b")]
+        payload = {"labels": ["one", "two"], "attachments": attachments}
+        raw_id = db.upsert_raw(conn, "gmail", "a", "m", payload)
+        for changed in ({**payload, "labels": ["two", "one"]},
+                        {**payload, "labels": ["two", "one"], "attachments": attachments[::-1]}):
+            conn.execute("UPDATE raw_items SET extracted_at=now(), extract_error='retry me'")
+            assert db.upsert_raw(conn, "gmail", "a", "m", changed) == raw_id
+            assert conn.execute("SELECT extracted_at, extract_error FROM raw_items").fetchone() == {
+                "extracted_at": None, "extract_error": None}
 
 
 def test_reset_refuses_paused_job(pg_url):

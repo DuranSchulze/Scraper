@@ -137,12 +137,17 @@ def fetch_message(mailbox: str, mid: str, label_names: dict, rules: dict, *, on_
     return payload
 
 
-def _history_ids(gm, start: str, *, on_rate_limit=None) -> list[str]:
-    ids = []
+def _history_ids(gm, start: str, *, on_rate_limit=None) -> tuple[list[str], set[str]]:
+    ids, refresh = [], set()
     for h in pages(lambda t: gm.users().history().list(
-            userId="me", startHistoryId=start, historyTypes=["messageAdded"], pageToken=t), "history", on_rate_limit=on_rate_limit):
-        ids += [m["message"]["id"] for m in h.get("messagesAdded", [])]
-    return list(dict.fromkeys(ids))
+            userId="me", startHistoryId=start, historyTypes=["messageAdded", "labelAdded", "labelRemoved"],
+            pageToken=t), "history", on_rate_limit=on_rate_limit):
+        ids.extend(m["message"]["id"] for m in h.get("messagesAdded", []))
+        for event in ("labelsAdded", "labelsRemoved"):
+            changed = [m["message"]["id"] for m in h.get(event, [])]
+            ids.extend(changed)
+            refresh.update(changed)
+    return list(dict.fromkeys(ids)), refresh
 
 
 def _all_ids(gm, since: str, *, on_rate_limit=None) -> list[str]:
@@ -151,7 +156,7 @@ def _all_ids(gm, since: str, *, on_rate_limit=None) -> list[str]:
         userId="me", q=q, maxResults=500, pageToken=t), "messages", on_rate_limit=on_rate_limit)]
 
 
-def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None) -> int:
+def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None, *, on_changed=None) -> int:
     """Store new messages of one mailbox. Returns count stored."""
     workers = env_int("SCRAPE_MESSAGE_WORKERS", WORKERS, 1, 25)
     retries = cumulative_retries = handled = total = 0
@@ -172,11 +177,11 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
         start_history = execute(gm.users().getProfile(userId="me"), on_rate_limit=rate_limit_retry)["historyId"]
         label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"), on_rate_limit=rate_limit_retry)["labels"]}
 
-        ids = None
+        ids, refresh = None, set()
         cursor = None if full else db.get_cursor(conn, "gmail", mailbox)
         if cursor:
             try:
-                ids = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
+                ids, refresh = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
             except HttpError as e:
                 if e.resp.status != 404:
                     raise
@@ -185,7 +190,7 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
             ids = _all_ids(gm, since, on_rate_limit=rate_limit_retry)
 
         ids = list(dict.fromkeys(ids + db.outdated_gmail_ids(conn, mailbox, PAYLOAD_VERSION)))
-        new = db.missing_ids(conn, "gmail", mailbox, ids, PAYLOAD_VERSION)
+        new = db.missing_ids(conn, "gmail", mailbox, ids, PAYLOAD_VERSION, refresh=refresh)
         total = len(new)
         report()
         log(f"{mailbox}: {len(ids)} messages found, {len(new)} to download"
@@ -197,12 +202,14 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                 chunk = new[i:i + CHUNK]
                 payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules, on_rate_limit=rate_limit_retry), chunk))
                 items = [(p["id"], p) for p in payloads if p]
-                db.upsert_raw_many(conn, "gmail", mailbox, items)
+                changed = db.upsert_raw_many(conn, "gmail", mailbox, items)
                 with conn.cursor() as cur:
                     cur.executemany(
                         "INSERT INTO gone_items (source, mailbox, source_id) VALUES ('gmail',%s,%s) ON CONFLICT DO NOTHING",
                         [(mailbox, mid) for mid, payload in zip(chunk, payloads) if payload is None])
                 conn.commit()
+                if on_changed is not None:
+                    on_changed(changed)
                 stored += len(items)
                 handled += len(chunk)
                 report()

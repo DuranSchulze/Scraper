@@ -18,7 +18,7 @@ def person_payload(p: dict, kind: str) -> dict:
     }
 
 
-def fetch_contacts(conn, mailbox: str, log, full: bool = False, checkpoint=lambda: None) -> int:
+def fetch_contacts(conn, mailbox: str, log, full: bool = False, checkpoint=lambda: None, *, on_changed=None) -> int:
     marker = db.get_cursor(conn, "contacts", mailbox)
     if not full and marker and datetime.now(timezone.utc) - datetime.fromisoformat(marker) < timedelta(hours=24):
         conn.commit()
@@ -30,13 +30,13 @@ def fetch_contacts(conn, mailbox: str, log, full: bool = False, checkpoint=lambd
         resourceName="people/me", personFields=PERSON_FIELDS, pageSize=1000, pageToken=t), "connections")
     other = pages(lambda t: ppl.otherContacts().list(
         readMask="names,emailAddresses,phoneNumbers", pageSize=1000, pageToken=t), "otherContacts")
-    n = 0
-    for kind, people in (("contact", saved), ("other", other)):
-        for p in people:
-            db.upsert_raw(conn, "contacts", mailbox, p["resourceName"], person_payload(p, kind))
-            n += 1
+    items = [(p["resourceName"], person_payload(p, kind))
+             for kind, people in (("contact", saved), ("other", other)) for p in people]
+    changed = db.upsert_raw_many(conn, "contacts", mailbox, items)
     db.set_cursor(conn, "contacts", mailbox, datetime.now(timezone.utc).isoformat())
     conn.commit()
-    log(f"{mailbox}: {n} contacts")
+    if on_changed is not None:
+        on_changed(changed)
+    log(f"{mailbox}: {len(items)} contacts")
     checkpoint()
-    return n
+    return len(items)
