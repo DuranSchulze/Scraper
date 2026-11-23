@@ -295,6 +295,122 @@ def test_scrape_extracts_current_rows_first_and_resumes_backlog(conn, monkeypatc
     ]
 
 
+@pytest.fixture
+def sheet_scrape(monkeypatch):
+    from scraper import app as api
+
+    monkeypatch.setenv("DRIVE_SHEET_IDS", "fixture")
+    monkeypatch.setattr(api, "_launch_job", lambda *args: None)
+    items = {}
+    params = {"sources": ["sheets"], "mailboxes": [], "since": "2025-01-01", "full": False}
+
+    def fetch(conn, sheet_ids, log, *, checkpoint, on_changed, job_id):
+        changed = db.upsert_raw_many(conn, "sheets", "", list(items.items()), job_id=job_id)
+        conn.commit()
+        on_changed(changed)
+
+    def run(resume_id=None):
+        jid = api.start_job("scrape", dict(params), resume_id=resume_id)
+        logger = api.JobLog(jid)
+        pipeline.run_scrape(**params, log=logger, checkpoint=logger.checkpoint)
+        return jid
+
+    monkeypatch.setattr(pipeline.sheets, "fetch_sheets", fetch)
+    return items, run, api._finish_job
+
+
+def sheet_item(name, email="fresh@client.test"):
+    return {"sheet": "T", "tab": "A", "row": 2, "record": {"Name": name, "Email": email}}
+
+
+def test_running_and_stopped_scrapes_keep_new_until_successor_completes(conn, sheet_scrape, authenticated_client):
+    from datetime import datetime
+
+    items, run, finish = sheet_scrape
+    items["fresh"] = sheet_item("Original")
+    first = run()
+    assert finish(first, None) == "done"
+    items["fresh"] = sheet_item("Changed")
+    second = run()
+    pending = candidates(conn)["fresh@client.test"]
+    assert pending["pending_scrape_job"] == second and pending["last_scrape_job"] == first
+    cid = pending["id"]
+    assert authenticated_client.get(f"/api/candidates/{cid}").json()["is_new"] is True
+    assert finish(second, None, stopped=True) == "stopped"
+    assert candidates(conn)["fresh@client.test"]["last_scrape_job"] == first
+    third = run(resume_id=second)
+    assert finish(third, None, stopped=True) == "stopped"
+    fourth = run(resume_id=third)
+    assert candidates(conn)["fresh@client.test"]["pending_scrape_job"] == second
+    assert finish(fourth, None) == "done"
+    row = candidates(conn)["fresh@client.test"]
+    assert row["pending_scrape_job"] is None and row["last_scrape_job"] == fourth
+    detail = authenticated_client.get(f"/api/candidates/{cid}").json()
+    assert detail["is_new"] is True and datetime.fromisoformat(detail["last_scraped_at"]) == row["last_scraped_at"]
+
+    pipeline.run_extract(lambda _: None, full=True)
+    assert candidates(conn)["fresh@client.test"]["last_scrape_job"] == fourth
+    assert candidates(conn)["fresh@client.test"]["pending_scrape_job"] is None
+    zero = run()
+    assert finish(zero, None) == "done"
+    assert authenticated_client.get(f"/api/candidates/{cid}").json()["is_new"] is False
+    assert candidates(conn)["fresh@client.test"]["last_scrape_job"] == fourth
+
+
+def test_merge_moves_pending_stamp_to_survivor_before_completion(conn, sheet_scrape, authenticated_client):
+    seed(conn, sid="destination", email="target@client.test", name="Target")
+    pipeline.run_extract(lambda _: None)
+    items, run, finish = sheet_scrape
+    items["source"] = sheet_item("Source", email="source@client.test")
+    job = run()
+    rows = candidates(conn)
+    source, target = rows["source@client.test"]["id"], rows["target@client.test"]["id"]
+    assert rows["source@client.test"]["pending_scrape_job"] == job
+    response = authenticated_client.post(f"/api/candidates/{source}/merge", headers={"X-Local-GUI": "1"},
+                                         json={"into_id": target})
+    assert response.status_code == 200
+    assert candidates(conn)["target@client.test"]["pending_scrape_job"] == job
+    assert candidates(conn)["source@client.test"]["pending_scrape_job"] is None
+    assert finish(job, None) == "done"
+    assert candidates(conn)["target@client.test"]["last_scrape_job"] == job
+    assert candidates(conn)["source@client.test"]["last_scrape_job"] is None
+    items["source"] = sheet_item("Source Updated", email="source@client.test")
+    later = run()
+    assert candidates(conn)["target@client.test"]["pending_scrape_job"] == later
+    assert candidates(conn)["source@client.test"]["pending_scrape_job"] is None
+    assert finish(later, None) == "done"
+
+
+def test_removal_and_unchanged_signals_leave_stamp_empty(conn, sheet_scrape):
+    items, run, finish = sheet_scrape
+    for sid in ("remove", "keep"):
+        db.upsert_raw(conn, "sheets", "", sid, sheet_item("Same"))
+    conn.commit()
+    pipeline.run_extract(lambda _: None)
+    items.update(remove={**sheet_item("Same"), "record": {}}, keep={**sheet_item("Same"), "unused": True})
+    job = run()
+    assert finish(job, None) == "done"
+    row = candidates(conn)["fresh@client.test"]
+    assert row["pending_scrape_job"] is None and row["last_scrape_job"] is None
+    assert conn.execute("SELECT count(*) AS n FROM signals").fetchone()["n"] == 1
+
+
+def test_resume_recovers_attributed_raw_rows_committed_before_extraction(conn, sheet_scrape):
+    from scraper import app as api
+
+    _, run, finish = sheet_scrape
+    first = api.start_job("scrape", {"sources": ["sheets"], "mailboxes": [], "since": "2025-01-01", "full": False})
+    db.upsert_raw(conn, "sheets", "", "inherited", sheet_item("Fetched before Stop"), job_id=first)
+    db.upsert_raw(conn, "sheets", "", "unrelated", sheet_item("Older", "older@client.test"))
+    conn.commit()
+    assert finish(first, None, stopped=True) == "stopped"
+    successor = run(resume_id=first)
+    assert finish(successor, None) == "done"
+    rows = candidates(conn)
+    assert rows["fresh@client.test"]["last_scrape_job"] == successor
+    assert rows["older@client.test"]["last_scrape_job"] is None
+
+
 def test_crash_rolls_back_markers_signals_and_people_of_failed_batch(conn, monkeypatch):
     for i in range(501):
         db.upsert_raw(conn, "sheets", "", str(i), {"sheet": "T", "tab": "A", "row": i + 2,
@@ -964,7 +1080,7 @@ def test_stop_during_final_extract_leaves_fetched_mailboxes_done(conn, monkeypat
         connections.append(connection)
         connection.commit()
         barrier.wait(timeout=5)
-    def extract(log, *, checkpoint, raw_ids):
+    def extract(log, *, checkpoint, raw_ids, scrape_job_id):
         assert len(connections) == 2 and all(c.closed for c in connections)
         extracting.append(True)
         holding.set()

@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
-from psycopg import Error as PostgresError
+from psycopg import Error as PostgresError, IsolationLevel
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -119,7 +119,8 @@ def configure_middleware(application):
         # Outermost so preflights do not reach the GUI header or authentication checks.
         application.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
                                    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-                                   allow_headers=["Content-Type", "X-Local-GUI", "X-Expected-User"])
+                                   allow_headers=["Content-Type", "X-Local-GUI", "X-Expected-User"],
+                                   expose_headers=["X-Total-Count", "X-Scrape-Job"])
 
 
 configure_middleware(app)
@@ -279,6 +280,7 @@ def _finish_job(job_id: int, error: str | None, stopped: bool = False) -> str | 
             (stopped, error, stopped, error, error, job_id),
         ).fetchone()
         if row and row["completed"]:
+            conn.execute(master.LOCK)
             db.publish_scrape_completion(conn, job_id, row["lineage"], row["finished_at"])
     return row["status"] if row else None
 
@@ -483,12 +485,17 @@ def extract(body: ExtractIn):
     return {"started": True}
 
 
+def _latest_scrape(conn):
+    return conn.execute("SELECT id,finished_at FROM jobs WHERE completed ORDER BY id DESC LIMIT 1").fetchone()
+
+
 @app.get("/api/status")
 def status(user=Depends(auth.current_user)):
     scraping = "scraping" in user["routes"]
     with db.connect() as conn:
         db.interrupt_stale(conn)
         job = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+        latest_scrape = _latest_scrape(conn)
         lines = conn.execute("SELECT line FROM job_log WHERE job_id=%s ORDER BY id DESC LIMIT 500",
                              (job["id"],)).fetchall() if job and scraping else []
         counts = {r["review_state"]: r["n"] for r in conn.execute(
@@ -506,6 +513,8 @@ def status(user=Depends(auth.current_user)):
             "job_id": job["id"] if job else None, "job_status": job["status"] if job else None,
             "job_params": job["params"] if job else {}, "job_failures": job["failures"] if job else 0,
             "job_started_at": job["started_at"] if job else None, "job_finished_at": job["finished_at"] if job else None,
+            "last_complete_scrape_job": latest_scrape["id"] if latest_scrape else None,
+            "last_complete_scrape_at": latest_scrape["finished_at"] if latest_scrape else None,
             "job_progress": job["progress"] if scraping and job and job["status"] in ("running", "paused") else None}
     if not scraping:
         for key in ("log", "job_params", "error"):
@@ -556,13 +565,15 @@ def job_log(job_id: int, mailbox: str = "", limit: int = Query(default=1000, ge=
 @app.get("/api/master/summary", dependencies=[Depends(auth.require_route("review"))])
 def master_summary():
     with db.connect() as conn:
+        conn.isolation_level = IsolationLevel.REPEATABLE_READ
         return master.summary(conn)
 
 
 def _candidate_where(state: str = "pending", q: str = "", status: str = "", department: str = "", stage: str = "",
                      mailbox: str = "", service: str = "", domain: str = "",
                      has_phone: Literal["", "true", "false"] = "", has_amount: Literal["", "true", "false"] = "",
-                     date_from: str = "", date_to: str = "", match: Literal["", "email", "domain", "none", "any"] = ""):
+                     date_from: str = "", date_to: str = "", match: Literal["", "email", "domain", "none", "any"] = "",
+                     new: bool = False):
     sql = " FROM candidates WHERE review_state=%s"
     args = [state]
     if q:
@@ -598,12 +609,20 @@ def _candidate_where(state: str = "pending", q: str = "", status: str = "", depa
                 raise HTTPException(400, f"{key} must be YYYY-MM-DD") from None
             sql += f" AND left(fields->'last_contact'->>'value',10) {operator} %s"
             args.append(value)
-    if match == "none":
-        sql += " AND (review_state<>'pending' OR master_match IS NULL)"
+    return sql, args, match if state == "pending" else "", new
+
+
+def _review_where(selected, latest_id, match_sql):
+    sql, filters, match, new = selected
+    args = list(filters)
+    if match == "any":
+        sql += f" AND ({match_sql}) IN ('email','domain')"
     elif match:
-        sql += " AND review_state='pending' AND master_match" + (" IS NOT NULL" if match == "any" else "=%s")
-        if match != "any":
-            args.append(match)
+        sql += f" AND ({match_sql})=%s"
+        args.append(match)
+    if new:
+        sql += " AND last_scrape_job=%s"
+        args.append(latest_id)
     return sql, args
 
 
@@ -614,10 +633,18 @@ def list_candidates(response: Response, sort: str = "last_contact", order: str =
     if sort not in {"last_contact", "first_contact"} or order not in {"asc", "desc"}:
         raise HTTPException(400, "sort must be last_contact or first_contact; order must be asc or desc")
     order_by = f" ORDER BY fields->'{sort}'->>'value' {order} NULLS LAST, id ASC"
-    sql, args = selected
     with db.connect() as conn:
+        conn.isolation_level = IsolationLevel.REPEATABLE_READ
+        latest = _latest_scrape(conn)
+        latest_id = latest["id"] if latest else None
+        if latest_id is not None:
+            response.headers["X-Scrape-Job"] = str(latest_id)
+        ready = master.available(conn)
+        match_sql = master.match_sql(ready)
+        sql, args = _review_where(selected, latest_id, match_sql)
         master_names = ("ARRAY(SELECT m.name FROM companies m WHERE c.review_state='pending'"
-                        " AND m.id=ANY(c.master_ids) ORDER BY m.id)" if master.available(conn) else "ARRAY[]::text[]")
+                        " AND c.master_evaluated_at IS NOT NULL AND c.master_match IS NOT NULL"
+                        " AND m.id=ANY(c.master_ids) ORDER BY m.id)" if ready else "ARRAY[]::text[]")
         response.headers["X-Total-Count"] = str(conn.execute("SELECT count(*) AS n" + sql, args).fetchone()["n"])
         return conn.execute(
             "WITH RECURSIVE selected AS (SELECT *" + sql +
@@ -631,8 +658,8 @@ def list_candidates(response: Response, sort: str = "last_contact", order: str =
             " count(DISTINCT s.raw_item_id) FILTER (WHERE r.source='sheets') AS sheets FROM lineage l"
             " JOIN signals s ON s.key=l.email_key JOIN raw_items r ON r.id=s.raw_item_id GROUP BY root_id)"
             " SELECT c.id,c.email_key,c.review_state,fields->'name'->>'value' AS name,"
-            " CASE WHEN c.review_state='pending' THEN c.master_match END AS master_match,"
-            + master_names + " AS master_names,"
+            f" {match_sql} AS master_match, {master_names} AS master_names,"
+            " c.last_scraped_at, coalesce(c.last_scrape_job=%s,false) AS is_new,"
             " fields->'status'->>'value' AS status,fields->'department'->>'value' AS department,"
             " coalesce((fields->'engagement_paid'->>'value')::boolean,false) AS paid,"
             " coalesce(fields->'stage'->>'value','inquiry') AS stage,"
@@ -653,19 +680,26 @@ def list_candidates(response: Response, sort: str = "last_contact", order: str =
             " jsonb_build_object('gmail',coalesce(i.gmail,0),'contacts',coalesce(i.contacts,0),"
             " 'sheets',coalesce(i.sheets,0)) AS item_sources,"
             " coalesce(i.items,0) AS items FROM selected c LEFT JOIN item_counts i ON i.root_id=c.id"
-            + order_by, [*args, size, (page - 1) * size]).fetchall()
+            + order_by, [*args, size, (page - 1) * size, latest_id]).fetchall()
 
 
 @app.get("/api/candidates/timeline", dependencies=[Depends(auth.require_route("review"))])
 def candidate_timeline(bucket: Literal["day", "week"] = "day",
-                       field: Literal["last_contact", "first_contact"] = "last_contact", selected=Depends(_candidate_where)):
-    sql, args = selected
+                       field: Literal["last_contact", "first_contact"] = "last_contact",
+                       scrape_job: int | None = Query(default=None, ge=1), selected=Depends(_candidate_where)):
     with db.connect() as conn:
+        conn.isolation_level = IsolationLevel.REPEATABLE_READ
+        latest = _latest_scrape(conn)
+        latest_id = latest["id"] if latest else None
+        if scrape_job is not None and scrape_job != latest_id:
+            return JSONResponse(status_code=409, content={"latest": latest_id})
+        match_sql = master.match_sql(master.available(conn))
+        sql, args = _review_where(selected, latest_id, match_sql)
         rows = conn.execute(
-            "SELECT left(fields->%s->>'value',10) AS day,count(*) AS total,"
-            " count(*) FILTER (WHERE review_state='pending' AND master_match='email') AS email,"
-            " count(*) FILTER (WHERE review_state='pending' AND master_match='domain') AS domain"
-            + sql + " GROUP BY 1", [field, *args]).fetchall()
+            "SELECT day,count(*) AS total,count(*) FILTER (WHERE match='email') AS email,"
+            " count(*) FILTER (WHERE match='domain') AS domain"
+            f" FROM (SELECT left(fields->%s->>'value',10) AS day, {match_sql} AS match"
+            + sql + ") selected GROUP BY 1", [field, *args]).fetchall()
     groups = {}
     for row in rows:
         try:
@@ -712,8 +746,15 @@ def _get(conn, cid: int, lock: bool = False) -> dict:
 @app.get("/api/candidates/{cid}", dependencies=[Depends(auth.require_route("review"))])
 def get_candidate(cid: int):
     with db.connect() as conn:
+        conn.isolation_level = IsolationLevel.REPEATABLE_READ
         candidate = _get(conn, cid)
-        for field in ("pending_scrape_job", "pending_scraped_at", "last_scrape_job", "last_scraped_at", "master_evaluated_at"):
+        latest = _latest_scrape(conn)
+        candidate["is_new"] = latest is not None and candidate["last_scrape_job"] == latest["id"]
+        if candidate["review_state"] != "pending" or candidate["master_evaluated_at"] is None or not master.available(conn):
+            candidate["master_match"] = candidate["master_ids"] = None
+        elif candidate["master_match"] is None:
+            candidate["master_match"] = "none"
+        for field in ("pending_scrape_job", "pending_scraped_at", "last_scrape_job", "master_evaluated_at"):
             del candidate[field]
         return candidate
 
@@ -804,7 +845,8 @@ def _approve(conn, cand: dict, c: ClientIn):
     since = min((p.date for p in reviewed.payments if p.date), default=None)
     values["client_since"] = since.isoformat() if since else None
     conn.execute(
-        "UPDATE candidates SET review_state='approved', master_match=NULL,master_ids=NULL, reviewed=%s, reviewed_by=%s,"
+        "UPDATE candidates SET review_state='approved', master_match=NULL,master_ids=NULL,master_evaluated_at=NULL,"
+        " reviewed=%s, reviewed_by=%s,"
         " reviewed_at=clock_timestamp(), updated_at=now() WHERE id=%s",
         (Jsonb(values), getuser(), cand["id"]))
 
@@ -858,7 +900,8 @@ def reject(cid: int):
 
 
 def _reject(conn, cid: int):
-    conn.execute("UPDATE candidates SET review_state='rejected', master_match=NULL,master_ids=NULL, updated_at=now() WHERE id=%s", (cid,))
+    conn.execute("UPDATE candidates SET review_state='rejected', master_match=NULL,master_ids=NULL,"
+                 " master_evaluated_at=NULL, updated_at=now() WHERE id=%s", (cid,))
 
 
 class BulkIn(BaseModel):
@@ -990,7 +1033,16 @@ def merge(cid: int, m: MergeIn):
         if dst["review_state"] == "merged":
             raise HTTPException(400, "target is itself merged; pick the record it was merged into")
         keys = {src["email_key"], dst["email_key"]} | _previous_target(conn, src)
-        conn.execute("UPDATE candidates SET review_state='merged', master_match=NULL,master_ids=NULL, merged_into=%s, updated_at=now() WHERE id=%s", (m.into_id, cid))
+        source_job, target_job = src["pending_scrape_job"], dst["pending_scrape_job"]
+        if source_job is not None:
+            active = conn.execute("SELECT id,lineage FROM jobs WHERE name='scrape' AND status IN ('running','paused')").fetchone()
+            active_ids = {active["id"], *active["lineage"]} if active else set()
+            if target_job is None or (source_job in active_ids, source_job) > (target_job in active_ids, target_job):
+                conn.execute("UPDATE candidates SET pending_scrape_job=%s,pending_scraped_at=%s WHERE id=%s",
+                             (source_job, src["pending_scraped_at"], m.into_id))
+        conn.execute("UPDATE candidates SET review_state='merged', master_match=NULL,master_ids=NULL,"
+                     " master_evaluated_at=NULL, pending_scrape_job=NULL,pending_scraped_at=NULL,"
+                     " merged_into=%s, updated_at=now() WHERE id=%s", (m.into_id, cid))
         pipeline.rebuild(conn, keys, load_rules(), datetime.now(timezone.utc))
     return {"ok": True}
 

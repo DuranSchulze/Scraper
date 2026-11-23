@@ -56,6 +56,7 @@ def test_configured_hosts_and_cors(monkeypatch, origins):
         assert denied.status_code == 400 and "access-control-allow-origin" not in denied.headers
         actual = client.post("/api/extract", headers={**GUI, "Origin": headers["Origin"]})
         assert actual.status_code == 401 and actual.headers["access-control-allow-origin"] == headers["Origin"]
+        assert "X-Scrape-Job" in actual.headers["access-control-expose-headers"]
     else:
         assert response.status_code == 403 and "access-control-allow-origin" not in response.headers
 
@@ -418,17 +419,19 @@ def details_body():
     return body
 
 
-def insert_review_candidate(conn, email, values=None, state="pending", match=None, master_ids=None):
+def insert_review_candidate(conn, email, values=None, state="pending", match=None, master_ids=None, evaluated=None):
     return conn.execute(
-        "INSERT INTO candidates(email_key,fields,review_state,master_match,master_ids) VALUES (%s,%s,%s,%s,%s) RETURNING id",
-        (email, Jsonb({key: {"value": value} for key, value in (values or {}).items()}), state, match, master_ids)).fetchone()["id"]
+        "INSERT INTO candidates(email_key,fields,review_state,master_match,master_ids,master_evaluated_at)"
+        " VALUES (%s,%s,%s,%s,%s,CASE WHEN %s THEN now() END) RETURNING id",
+        (email, Jsonb({key: {"value": value} for key, value in (values or {}).items()}), state, match, master_ids,
+         evaluated if evaluated is not None else match is not None)).fetchone()["id"]
 
 
 def test_candidate_match_names_filters_and_nonpending_mask(conn, directory):
     first, second = directory([("Zed", []), ("Alpha", [])])
     exact = insert_review_candidate(conn, "exact@co.test", match="email", master_ids=[second, first])
     domain = insert_review_candidate(conn, "domain@co.test", match="domain", master_ids=[second])
-    none = insert_review_candidate(conn, "none@co.test")
+    none = insert_review_candidate(conn, "none@co.test", evaluated=True)
     reviewed = insert_review_candidate(conn, "approved@co.test", state="approved", match="email", master_ids=[first])
     conn.commit()
     response = local.get("/api/candidates")
@@ -436,7 +439,8 @@ def test_candidate_match_names_filters_and_nonpending_mask(conn, directory):
     rows = {row["id"]: row for row in response.json()}
     assert rows[exact]["master_match"] == "email" and rows[exact]["master_names"] == ["Zed", "Alpha"]
     assert rows[domain]["master_match"] == "domain" and rows[domain]["master_names"] == ["Alpha"]
-    assert rows[none]["master_match"] is None and rows[none]["master_names"] == []
+    assert rows[none]["master_match"] == "none" and rows[none]["master_names"] == []
+    assert local.get(f"/api/candidates/{none}").json()["master_match"] == "none"
     for match, expected in (("email", {exact}), ("domain", {domain}), ("none", {none}), ("any", {exact, domain}), ("", {exact, domain, none})):
         response = local.get("/api/candidates", params={"match": match})
         assert {row["id"] for row in response.json()} == expected
@@ -444,8 +448,8 @@ def test_candidate_match_names_filters_and_nonpending_mask(conn, directory):
     row = local.get("/api/candidates?state=approved").json()[0]
     assert row["id"] == reviewed and row["master_match"] is None and row["master_names"] == []
     assert local.get("/api/candidates?state=approved&match=none").headers["X-Total-Count"] == "1"
-    for match in ("any", "email", "domain"):
-        assert local.get("/api/candidates", params={"state": "approved", "match": match}).json() == []
+    for match in ("any", "email", "domain", "none"):
+        assert local.get("/api/candidates", params={"state": "approved", "match": match}).json() == [row]
     assert local.get("/api/candidates?match=unknown").status_code == 422
     # The static timeline route must not shadow numeric candidate detail or vice versa.
     assert local.get("/api/candidates/timeline?match=any").json() == [{"bucket": None, "total": 2, "email": 1, "domain": 1}]
@@ -453,7 +457,8 @@ def test_candidate_match_names_filters_and_nonpending_mask(conn, directory):
     assert detail.status_code == 200 and detail.json()["id"] == exact
 
 
-def test_timeline_days_weeks_offsets_and_invalid_dates(conn):
+def test_timeline_days_weeks_offsets_and_invalid_dates(conn, directory):
+    directory([])
     for i, (last, match) in enumerate([
         ("2026-11-11T23:59:00-08:00", "email"), ("2026-11-13T00:15:00+14:00", "domain"),
         ("2026-12-31", "email"), ("2027-01-01", None), ("2027-01-04", "domain"),
@@ -526,6 +531,108 @@ def test_timeline_counts_are_not_limited_to_list_page(conn):
     assert len(local.get("/api/candidates").json()) == 500
     assert local.get("/api/candidates/timeline?size=1&page=999").json() == [
         {"bucket": "2026-11-12", "total": 501, "email": 0, "domain": 0}]
+
+
+def test_new_rows_empty_before_first_completed_scrape(conn):
+    cid = insert_review_candidate(conn, "early@co.test")
+    conn.commit()
+    response = local.get("/api/candidates?new=true")
+    assert response.json() == [] and response.headers["X-Total-Count"] == "0"
+    assert "X-Scrape-Job" not in response.headers
+    detail = local.get(f"/api/candidates/{cid}").json()
+    assert detail["is_new"] is False and detail["last_scraped_at"] is None
+    assert local.get("/api/candidates/timeline?new=true").json() == []
+    status = local.get("/api/status").json()
+    assert status["last_complete_scrape_job"] is None and status["last_complete_scrape_at"] is None
+
+
+def test_new_pagination_uses_one_snapshot_and_rejects_stale_timeline_pin(conn, fail_job_write):
+    shared, old, new, extra = [insert_review_candidate(conn, f"{key}@co.test", {"last_contact": "2026-11-12"})
+                               for key in ("shared", "old", "new", "extra")]
+
+    def stage(ids):
+        jid = job_row(conn, name="scrape")
+        conn.execute("UPDATE candidates SET pending_scrape_job=%s,pending_scraped_at=now() WHERE id=ANY(%s)", (jid, ids))
+        conn.commit()
+        return jid
+
+    first = stage([shared, old])
+    assert app_module._finish_job(first, None) == "done"
+    params = {"new": "true", "size": 1}
+    page = local.get("/api/candidates", params=params)
+    assert page.headers["X-Scrape-Job"] == str(first) and page.headers["X-Total-Count"] == "2"
+    assert [r["id"] for r in page.json()] == [shared]
+    timeline_query = {"new": "true", "scrape_job": first}
+    assert local.get("/api/candidates/timeline", params=timeline_query).json() == [
+        {"bucket": "2026-11-12", "total": 2, "email": 0, "domain": 0}]
+
+    second = stage([shared, new, extra])
+    completed = []
+
+    def complete_during_page_query(query, args):
+        if query.startswith("WITH RECURSIVE selected AS") and not completed:
+            completed.append(app_module._finish_job(second, None))
+        return False
+
+    fail_job_write(complete_during_page_query)
+    snapshot = local.get("/api/candidates", params={**params, "page": 2})
+    assert completed == ["done"]
+    assert snapshot.headers["X-Scrape-Job"] == str(first) and snapshot.headers["X-Total-Count"] == "2"
+    assert [r["id"] for r in snapshot.json()] == [old]
+    stale = local.get("/api/candidates/timeline", params=timeline_query)
+    assert stale.status_code == 409 and stale.json() == {"latest": second}
+    fresh = local.get("/api/candidates?new=true")
+    assert fresh.headers["X-Scrape-Job"] == str(second) and fresh.headers["X-Total-Count"] == "3"
+    assert [r["id"] for r in fresh.json()] == [shared, new, extra]
+    assert all(r["is_new"] and r["last_scraped_at"] for r in fresh.json())
+    assert local.get(f"/api/candidates/{old}").json()["is_new"] is False
+    assert local.get("/api/candidates/timeline", params={**timeline_query, "scrape_job": second}).json() == [
+        {"bucket": "2026-11-12", "total": 3, "email": 0, "domain": 0}]
+    status = local.get("/api/status").json()
+    assert status["last_complete_scrape_job"] == second
+    assert status["last_complete_scrape_at"] == fresh.json()[0]["last_scraped_at"]
+
+
+def test_ui_seed_cli_and_second_scrape(pg_url, monkeypatch):
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    from tests import seed_review
+    from test_auth import SECRET
+
+    monkeypatch.setenv("JWT_SECRET", SECRET)
+    monkeypatch.setenv("APP_URL", "")
+    monkeypatch.setenv("COOKIE_SAMESITE", "lax")
+
+    def run(*options):
+        result = subprocess.run([sys.executable, "-m", "tests.seed_review", "--db-url", pg_url, *options],
+                                cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert seed_review.EMAIL in result.stdout and seed_review.PASSWORD in result.stdout
+
+    run()
+    with TestClient(app, base_url="http://localhost") as client:
+        login = client.post("/api/auth/login", headers=GUI,
+                            json={"email": seed_review.EMAIL, "password": seed_review.PASSWORD})
+        assert login.status_code == 200 and set(login.json()["routes"]) == {"review", "scraping"}
+        first = client.get("/api/candidates?new=true&size=1")
+        assert first.headers["X-Total-Count"] == "125"
+        current = client.get("/api/candidates").json()
+        assert {row["master_match"] for row in current} == {"email", "domain", "none", None}
+        assert client.get("/api/candidates?state=approved").headers["X-Total-Count"] == "1"
+        assert client.get("/api/status").json()["extract_failed"] == 2
+        assert client.get("/api/schedule").json()["enabled"] is False
+        run("--complete-second-scrape")
+        second = client.get("/api/candidates?new=true")
+        assert second.headers["X-Scrape-Job"] != first.headers["X-Scrape-Job"]
+        assert second.headers["X-Total-Count"] == "2"
+        assert seed_review.EXACT in {row["email_key"] for row in second.json()}
+        run("--directory", "off", "--complete-second-scrape")
+        assert client.get("/api/master/summary").json()["available"] is False
+        off = client.get("/api/candidates?new=true")
+        assert off.headers["X-Scrape-Job"] == second.headers["X-Scrape-Job"]
+        assert [row["master_match"] for row in off.json()] == [None, None]
 
 
 def test_review_filters_each_and_combined_with_paging(conn):
@@ -1098,6 +1205,10 @@ def fail_job_write(monkeypatch):
         class Connection:
             def __init__(self, real): self.real = real
             @property
+            def isolation_level(self): return self.real.isolation_level
+            @isolation_level.setter
+            def isolation_level(self, value): self.real.isolation_level = value
+            @property
             def autocommit(self): return self.real.autocommit
             @autocommit.setter
             def autocommit(self, value): self.real.autocommit = value
@@ -1283,7 +1394,9 @@ def test_repeated_scrape_resume_publishes_earliest_gmail_boundary_and_promotes_l
     }
     detail = local.get(f"/api/candidates/{old_stamp}")
     assert detail.status_code == 200
-    assert not {"pending_scrape_job", "pending_scraped_at", "last_scrape_job", "last_scraped_at", "master_evaluated_at"} & detail.json().keys()
+    assert detail.json()["is_new"] is True
+    assert datetime.fromisoformat(detail.json()["last_scraped_at"]) == finished
+    assert not {"pending_scrape_job", "pending_scraped_at", "last_scrape_job", "master_evaluated_at"} & detail.json().keys()
 
 
 @pytest.mark.parametrize("outcome", ["late stop", "failed", "interrupted", "publication error"])

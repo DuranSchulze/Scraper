@@ -52,7 +52,8 @@ def test_directory_email_domain_precedence_and_pending_only(conn, directory):
     }
     assert {t: conn.execute(f"SELECT * FROM {t} ORDER BY id").fetchall() for t in before} == before
     assert master.summary(conn) == {"available": True, "companies": 3, "contacts": 6,
-                                    "email": 3, "domain": 1, "none": 3, "approvable": 3,
+                                    "email": 3, "domain": 1, "none": 3, "unevaluated": 0, "approvable": 3,
+                                    "rematch_pending": False,
                                     "tagged_at": master.summary(conn)["tagged_at"]}
     assert master.summary(conn)["tagged_at"].utcoffset().total_seconds() == 0
 
@@ -116,7 +117,7 @@ def test_absent_directory_clears_all_tags_logs_once_and_serves_empty_names(conn,
     elif present == "companies":
         conn.execute("CREATE TABLE companies(id bigint,name text)")
     candidates(conn, ["a@company.test", "b@company.test"])
-    conn.execute("UPDATE candidates SET master_match='domain',master_ids=ARRAY[999]")
+    conn.execute("UPDATE candidates SET master_match='domain',master_ids=ARRAY[999],master_evaluated_at=now()")
     conn.commit()
     assert all(r["master_names"] == [] for r in authenticated_client.get("/api/candidates").json())
     assert authenticated_client.get("/api/master/summary").json()["approvable"] == 0
@@ -128,11 +129,12 @@ def test_absent_directory_clears_all_tags_logs_once_and_serves_empty_names(conn,
         master.rematch(conn, ["a@company.test"])
         master.rematch(conn, ["a@company.test"])
     assert all(tag == (None, None) for tag in tags(conn).values())
+    assert not conn.execute("SELECT 1 FROM candidates WHERE master_evaluated_at IS NOT NULL").fetchone()
     assert sum("Client Directory tables unavailable" in r.message for r in caplog.records) == 1
     conn.commit()
     assert authenticated_client.get("/api/master/summary").json() == {
-        "available": False, "companies": 0, "contacts": 0, "email": 0, "domain": 0, "none": 2,
-        "approvable": 0, "tagged_at": None}
+        "available": False, "companies": 0, "contacts": 0, "email": 0, "domain": 0, "none": 0,
+        "unevaluated": 2, "approvable": 0, "rematch_pending": False, "tagged_at": None}
 
 
 def test_summary_route_contract_permissions_and_removed_endpoints(conn, directory, authenticated_client):
@@ -143,7 +145,8 @@ def test_summary_route_contract_permissions_and_removed_endpoints(conn, director
     summary = authenticated_client.get("/api/master/summary")
     assert summary.status_code == 200
     assert summary.json() == {"available": True, "companies": 1, "contacts": 1,
-                              "email": 1, "domain": 0, "none": 0, "approvable": 1,
+                              "email": 1, "domain": 0, "none": 0, "unevaluated": 0, "approvable": 1,
+                              "rematch_pending": False,
                               "tagged_at": summary.json()["tagged_at"]}
     assert datetime.fromisoformat(summary.json()["tagged_at"]).utcoffset().total_seconds() == 0
     for method, path in (("GET", "/api/master"), ("GET", "/api/master/rows"), ("POST", "/api/master/import")):
@@ -155,3 +158,36 @@ def test_summary_route_contract_permissions_and_removed_endpoints(conn, director
                                       (routes[0] + '@test', role)).fetchone()
         with TestClient(api.app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(user)}) as client:
             assert client.get("/api/master/summary").status_code == (200 if "review" in routes else 403)
+
+
+def test_legacy_tags_are_unevaluated_until_rematch_and_masked_after_directory_loss(conn, directory, authenticated_client):
+    company, = directory([("Company", ["owner@company.test"])])
+    candidates(conn, ["owner@company.test", "stranger@unmatched.test"])
+    cid = conn.execute("UPDATE candidates SET master_match='email',master_ids=ARRAY[%s]"
+                       " WHERE email_key='owner@company.test' RETURNING id", (company,)).fetchone()["id"]
+    conn.commit()
+    client = authenticated_client
+
+    def assert_masked():
+        rows = client.get("/api/candidates").json()
+        assert [r["master_match"] for r in rows] == [None, None]
+        assert [r["master_names"] for r in rows] == [[], []]
+        assert client.get(f"/api/candidates/{cid}").json()["master_ids"] is None
+        for match in ("email", "none", "any"):
+            assert client.get("/api/candidates", params={"match": match}).headers["X-Total-Count"] == "0"
+            assert client.get("/api/candidates/timeline", params={"match": match}).json() == []
+        assert client.get("/api/candidates/timeline").json() == [{"bucket": None, "total": 2, "email": 0, "domain": 0}]
+        summary = client.get("/api/master/summary").json()
+        assert (summary["email"], summary["none"], summary["unevaluated"], summary["approvable"]) == (0, 0, 2, 0)
+        return summary
+
+    assert assert_masked()["rematch_pending"] is True
+    master.rematch(conn)
+    conn.commit()
+    assert client.get("/api/master/summary").json()["rematch_pending"] is False
+    assert client.get("/api/candidates?match=none").json()[0]["email_key"] == "stranger@unmatched.test"
+    assert client.get(f"/api/candidates/{cid}").json()["master_match"] == "email"
+    conn.execute("DROP TABLE contacts")
+    conn.commit()
+    assert assert_masked()["available"] is False
+    assert tags(conn)["owner@company.test"] == ("email", [company])

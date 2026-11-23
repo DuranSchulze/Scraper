@@ -32,7 +32,7 @@ def rebuild_targets(keys, merged: dict[str, str]) -> dict[str, set[str]]:
     return groups
 
 
-def rebuild(conn, keys, rules: dict, now: datetime) -> None:
+def rebuild(conn, keys, rules: dict, now: datetime, *, scrape_job_id=None, fresh_keys=()) -> None:
     conn.execute(master.LOCK)
     merged = {r["email_key"]: r["target"] for r in conn.execute(
         "SELECT c.email_key, t.email_key AS target FROM candidates c"
@@ -58,6 +58,9 @@ def rebuild(conn, keys, rules: dict, now: datetime) -> None:
             " AND c.reviewed IS NULL AND c.client_id IS NULL"
             " AND NOT EXISTS (SELECT 1 FROM candidates src WHERE src.merged_into=c.id)", (absent,))
 
+    if fresh_keys:
+        conn.execute("UPDATE candidates SET pending_scrape_job=%s, pending_scraped_at=%s WHERE email_key=ANY(%s)",
+                     (scrape_job_id, now, sorted({resolve(key, merged) for key in fresh_keys})))
     master.rematch(conn, targets)
 
 
@@ -181,7 +184,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
         else:
             log("sheets: DRIVE_SHEET_IDS is empty, skipped")
     task_checkpoint()
-    run_extract(log, checkpoint=task_checkpoint, raw_ids=changed_ids)
+    run_extract(log, checkpoint=task_checkpoint, raw_ids=changed_ids, scrape_job_id=job_id)
 
 
 def count_pending(conn, *, eligible_only=False) -> int:
@@ -189,12 +192,25 @@ def count_pending(conn, *, eligible_only=False) -> int:
     return conn.execute(f"SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL{criterion}").fetchone()["n"]
 
 
-def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None, raw_ids=None) -> None:
+def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None, raw_ids=None, scrape_job_id=None) -> None:
     rules = load_rules()
     internal = set(env_list("INTERNAL_DOMAINS"))
     if not internal:
         raise RuntimeError("INTERNAL_DOMAINS is empty; staff would be listed as clients")
-    run_progress = _extract_pass(log, rules, internal, checkpoint, full=full, keys=keys, raw_ids=raw_ids)
+    qualifying_jobs = set()
+    if scrape_job_id is not None:
+        with db.connect() as conn:
+            job = conn.execute("SELECT lineage FROM jobs WHERE id=%s AND name='scrape'", (scrape_job_id,)).fetchone()
+            if job:
+                lineage = job["lineage"]
+                qualifying_jobs = {scrape_job_id, *lineage}
+                if lineage:
+                    # A stopped predecessor may have committed its fetch before it could extract.
+                    raw_ids = set(raw_ids) | {row["id"] for row in conn.execute(
+                        "SELECT id FROM raw_items WHERE extracted_at IS NULL AND extract_error IS NULL"
+                        " AND last_job=ANY(%s)", (lineage,))}
+    run_progress = _extract_pass(log, rules, internal, checkpoint, full=full, keys=keys, raw_ids=raw_ids,
+                                 scrape_job_id=scrape_job_id, qualifying_jobs=qualifying_jobs)
     if raw_ids is not None:
         minutes = env_int("EXTRACT_BACKLOG_MINUTES", 20, 0, 1440)
         _extract_pass(log, rules, internal, checkpoint, backlog_deadline=monotonic() + minutes * 60,
@@ -203,7 +219,7 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None, ra
     _progress(log, "tag", 0, 1)
     with db.connect() as conn:
         master.rematch(conn)
-        matched = master.counts(conn)
+        matched = master.counts(conn, master.available(conn))
         _progress(log, "tag", 1, 1, conn=conn)
     log(f"tag: {matched['email']} email, {matched['domain']} domain matches")
     succeeded, failed, _ = run_progress
@@ -211,7 +227,7 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None, ra
 
 
 def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_ids=None,
-                  backlog_deadline=None, run_progress=None):
+                  backlog_deadline=None, run_progress=None, scrape_job_id=None, qualifying_jobs=()):
     backlog = backlog_deadline is not None
     phase = "backlog" if backlog else "extract" if raw_ids is None else "scrape extract"
     started, rebuild_seconds = monotonic(), 0.0
@@ -219,6 +235,7 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
     succeeded = failed = total_signals = last_id = 0
     rebuild_keys = set(keys)
     extract_total = None
+    signal_data = ", data" if qualifying_jobs else ""
     pending_filter = "extracted_at IS NULL AND extract_error IS NULL"
     filters = ()
     if raw_ids is not None:
@@ -275,15 +292,15 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                     outcome = "time limit reached"
                     break
                 rows = conn.execute(
-                    f"SELECT id, source, payload FROM raw_items WHERE {pending_filter} AND id>%s"
+                    f"SELECT id, source, payload, last_job FROM raw_items WHERE {pending_filter} AND id>%s"
                     " ORDER BY id LIMIT %s FOR UPDATE", (*filters, last_id, BATCH)).fetchall()
                 if not rows:
                     break
                 ids = [r["id"] for r in rows]
-                old_keys = {}
-                for r in conn.execute("SELECT raw_item_id, key FROM signals WHERE raw_item_id=ANY(%s)", (ids,)):
-                    old_keys.setdefault(r["raw_item_id"], set()).add(r["key"])
-                affected, successful, signals = set(), [], []
+                old_signals = {}
+                for r in conn.execute(f"SELECT raw_item_id, key{signal_data} FROM signals WHERE raw_item_id=ANY(%s)", (ids,)):
+                    old_signals.setdefault(r["raw_item_id"], {}).setdefault(r["key"], []).append(r.get("data"))
+                affected, fresh, successful, signals = set(), set(), [], []
                 for row in rows:
                     try:
                         extracted = [to_json(s) for s in extract_item(row, rules, internal)]
@@ -294,8 +311,16 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                                      (repr(exc), row["id"]))
                         continue
                     successful.append(row["id"])
-                    affected.update(old_keys.get(row["id"], set()))
+                    previous = old_signals.get(row["id"], {})
+                    affected.update(previous)
                     affected.update(s["key"] for s in extracted)
+                    if row["last_job"] in qualifying_jobs:
+                        for signal in extracted:
+                            prior = previous.get(signal["key"], [])
+                            if signal in prior:
+                                prior.remove(signal)
+                            else:
+                                fresh.add(signal["key"])
                     signals.extend((row["id"], s["key"], Jsonb(s)) for s in extracted)
                 conn.execute("DELETE FROM signals WHERE raw_item_id=ANY(%s)", (successful,))
                 with conn.cursor() as cur:
@@ -303,7 +328,8 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                 conn.execute("UPDATE raw_items SET extracted_at=now(), extract_error=NULL WHERE id=ANY(%s)", (successful,))
                 if affected:
                     rebuild_started = monotonic()
-                    rebuild(conn, affected, rules, datetime.now(timezone.utc))
+                    stamps = {"scrape_job_id": scrape_job_id, "fresh_keys": fresh} if fresh else {}
+                    rebuild(conn, affected, rules, datetime.now(timezone.utc), **stamps)
                     rebuild_seconds += monotonic() - rebuild_started
                 if backlog:
                     db.set_cursor(conn, BACKLOG_SOURCE, "", str(rows[-1]["id"]))
