@@ -77,7 +77,7 @@ def test_interval_even_after_failure_and_restart(scheduled, outcome):
     assert len(launched) == 1 and launched[0][1] == "scrape"
     assert launched[0][2] == {
         "sources": ["gmail", "contacts", "sheets"], "mailboxes": [],
-        "since": "2018-01-01", "full": False, "auto": True,
+        "since": "2018-01-01", "full": False, "auto": True, "since_explicit": False,
     }
     now[0] += timedelta(minutes=15)
     api._auto_scrape(Checks())

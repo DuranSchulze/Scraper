@@ -73,6 +73,9 @@ class FakeGmail:
         self.attachment_downloads = []
         self.attachment_data = {}
         self.pages = 0
+        self.listed_ids = None
+        self.queries = []
+        self.history_calls = []
 
     def service(self, kind, mailbox):
         assert (kind, mailbox) == ("gmail", MAILBOX)
@@ -117,7 +120,10 @@ class Endpoint:
                 return {"labels": [{"id": "SENT", "name": "Sent"}]}
             if self.kind == "history":
                 assert kw["startHistoryId"] in {"old-cursor", "new-cursor"}
-                assert kw["historyTypes"] == ["messageAdded", "labelAdded", "labelRemoved"]
+                probe = kw.get("maxResults") == 1
+                self.fake.history_calls.append((kw["startHistoryId"], probe))
+                if not probe:
+                    assert kw["historyTypes"] == ["messageAdded", "labelAdded", "labelRemoved"]
                 if self.fake.expired:
                     raise HttpError(SimpleNamespace(status=404, reason="Gone"), b'{}')
                 return {"history": [{
@@ -126,9 +132,10 @@ class Endpoint:
                                        ("labelsAdded", self.fake.added_labels),
                                        ("labelsRemoved", self.fake.removed_labels))
                 }]}
-            assert self.kind == "messages" and kw["q"] == "after:2025/01/01"
+            assert self.kind == "messages"
+            self.fake.queries.append(kw["q"])
             self.fake.pages += 1
-            ids = list(self.fake.messages_data)
+            ids = list(self.fake.messages_data) if self.fake.listed_ids is None else self.fake.listed_ids
             start = int(kw.get("pageToken") or 0)
             result = {"messages": [{"id": i} for i in ids[start:start + 70]]}
             if start + 70 < len(ids):
@@ -221,7 +228,114 @@ def test_history_fallback_and_payload_upgrade(conn, monkeypatch, expired):
     assert fetch(conn) == 1
     assert fake.downloads == ["old"]
     assert fake.pages == int(expired)
+    assert fake.queries == (["after:2025/01/01"] if expired else [])
     assert conn.execute("SELECT payload->>'v' AS v FROM raw_items WHERE mailbox=%s", (MAILBOX,)).fetchone()["v"] == "2"
+
+
+@pytest.mark.parametrize("full,since,cursor,anchor,query,probe", [
+    (True, "", "valid", True, "after:2025/01/01", True),
+    (True, "2025-03-01", "expired", True, "after:2025/03/01", True),
+    (False, "2025-03-01", "valid", True, "after:2025/03/01", True),
+    (False, "2025-03-01", "expired", True, "after:2025/03/01", True),
+    (False, "2025-03-01", None, True, "after:2025/03/01", False),
+    (False, "", "valid", True, None, False),
+    (False, "", None, True, "after:1735689600", False),
+    (False, "", "expired", True, "after:1735689600", False),
+    (False, "", None, False, "after:2025/01/01", False),
+    (False, "  ", "expired", False, "after:2025/01/01", False),
+])
+def test_scrape_route_selects_gmail_query_and_saves_cursor(conn, monkeypatch, authenticated_client,
+                                                          full, since, cursor, anchor, query, probe):
+    from scraper import app as api
+
+    monkeypatch.setenv("SCRAPE_SINCE", "2025-01-01")
+    monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    msg = message("kept")
+    fake = FakeGmail([msg])
+    fake.expired = cursor == "expired"
+    monkeypatch.setattr(gmail, "service", fake.service)
+    payload = gmail.message_to_payload(msg, MAILBOX, {"SENT": "Sent"})
+    db.upsert_raw(conn, "gmail", MAILBOX, "kept", {**payload, "body": "stale"})
+    if cursor or anchor:
+        conn.execute("INSERT INTO sync_state (source,mailbox,cursor,gmail_boundary) VALUES ('gmail',%s,%s,%s)",
+                     (MAILBOX, "old-cursor" if cursor else None, "2025-01-02 08:00:00+08:00" if anchor else None))
+    conn.commit()
+
+    response = authenticated_client.post("/api/scrape", headers={"X-Local-GUI": "1"}, json={
+        "sources": ["gmail"], "mailboxes": [MAILBOX], "since": since, "full": full,
+    })
+
+    assert response.status_code == 200 and response.json() == {"started": True, "carried": 0}
+    job = conn.execute("SELECT params, completed FROM jobs").fetchone()
+    assert job["completed"] is True and job["params"]["since_explicit"] is bool(since.strip())
+    assert fake.queries == ([query] if query else [])
+    assert fake.history_calls == ([("old-cursor", probe)] if cursor else [])
+    assert fake.downloads == (["kept"] if full else [])
+    saved = conn.execute("SELECT payload->>'body' AS body FROM raw_items").fetchone()
+    assert saved["body"] == (payload["body"] if full else "stale")
+    assert db.get_cursor(conn, "gmail", MAILBOX) == ("old-cursor" if probe and cursor == "valid" else "new-cursor")
+
+
+def test_explicit_since_keeps_older_label_event_for_next_auto_scrape(conn, monkeypatch, authenticated_client):
+    from scraper import app as api
+
+    monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    old = message("old")
+    saved = gmail.message_to_payload(old, MAILBOX, {"SENT": "Sent"})
+    db.upsert_raw(conn, "gmail", MAILBOX, "old", saved)
+    db.set_cursor(conn, "gmail", MAILBOX, "old-cursor")
+    conn.commit()
+    old["labelIds"] = []
+    fake = FakeGmail([old, {**message("recent"), "internalDate": "1740960000000"}])
+    fake.listed_ids = ["recent"]
+    fake.history_ids = []
+    fake.removed_labels = ["old"]
+    monkeypatch.setattr(gmail, "service", fake.service)
+    params = {"sources": ["gmail"], "mailboxes": [MAILBOX], "since": "2025-03-01", "full": False}
+
+    response = authenticated_client.post("/api/scrape", headers={"X-Local-GUI": "1"}, json=params)
+    assert response.status_code == 200
+    assert fake.downloads == ["recent"] and fake.queries == ["after:2025/03/01"]
+    assert db.get_cursor(conn, "gmail", MAILBOX) == "old-cursor"
+    auto_id = api.start_job("scrape", {**params, "since": "2025-01-01", "auto": True}, carry=True)
+    assert conn.execute("SELECT completed FROM jobs WHERE id=%s", (auto_id,)).fetchone()["completed"] is True
+    assert fake.downloads == ["recent", "old"] and fake.queries == ["after:2025/03/01"]
+    assert fake.history_calls == [("old-cursor", True), ("old-cursor", False)]
+    assert db.get_cursor(conn, "gmail", MAILBOX) == "new-cursor"
+    assert conn.execute("SELECT payload->'labels' AS labels FROM raw_items WHERE source_id='old'").fetchone()["labels"] == []
+
+
+@pytest.mark.parametrize("boundary,expected", [
+    ("2025-01-02 08:00:00+08:00", "after:1735689600"),
+    (None, "after:2025/01/01"),
+])
+def test_explicit_since_keeps_fallback_boundary_if_retained_cursor_expires(conn, monkeypatch, authenticated_client,
+                                                                            boundary, expected):
+    from scraper import app as api
+
+    monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    fake = FakeGmail([])
+    monkeypatch.setattr(gmail, "service", fake.service)
+    conn.execute("INSERT INTO sync_state (source,mailbox,cursor,gmail_boundary) VALUES ('gmail',%s,'old-cursor',%s)",
+                 (MAILBOX, boundary))
+    conn.commit()
+
+    params = {"sources": ["gmail"], "mailboxes": [MAILBOX], "since": "2025-03-01", "full": False}
+    response = authenticated_client.post("/api/scrape", headers={"X-Local-GUI": "1"}, json=params)
+    assert response.status_code == 200
+    saved = conn.execute("SELECT cursor, gmail_boundary IS NOT DISTINCT FROM %s::timestamptz AS same_boundary"
+                         " FROM sync_state WHERE source='gmail'", (boundary,)).fetchone()
+    assert saved == {"cursor": "old-cursor", "same_boundary": True}
+
+    fake.expired = True
+    auto_id = api.start_job("scrape", {**params, "since": "2025-01-01", "auto": True}, carry=True)
+    assert conn.execute("SELECT completed FROM jobs WHERE id=%s", (auto_id,)).fetchone()["completed"] is True
+    assert fake.history_calls == [("old-cursor", True), ("old-cursor", False)]
+    assert fake.queries == ["after:2025/03/01", expected]
+    assert db.get_cursor(conn, "gmail", MAILBOX) == "new-cursor"
 
 
 def test_scrape_refreshes_version_and_history_without_reextracting_metadata(conn, monkeypatch):
@@ -359,6 +473,7 @@ def test_deleted_message_tombstone_prevents_refetch_and_keeps_existing_payload(c
     conn.commit()
     fake.removed_labels = ["gone"]
     assert fetch(conn) == 0
+    assert fetch(conn, full=True) == 0
     assert fake.downloads == ["gone"]
     assert conn.execute("SELECT * FROM raw_items").fetchall() == before
     assert conn.execute("SELECT * FROM signals").fetchall() == signals

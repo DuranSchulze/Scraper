@@ -293,7 +293,8 @@ def _run_job(job_id: int, name: str, params: dict) -> None:
         if name == "scrape":
             pipeline.run_scrape(**{key: params[key] for key in ("sources", "mailboxes", "since", "full")},
                                 log=logger, checkpoint=logger.checkpoint,
-                                done_mailboxes=params.get("done_mailboxes", []))
+                                done_mailboxes=params.get("done_mailboxes", []),
+                                since_explicit=params.get("since_explicit", False))
         elif name == "extract":
             pipeline.run_extract(logger, full=params.get("full", False) and not params.get("full_reset_done", False),
                                  checkpoint=logger.checkpoint)
@@ -338,6 +339,8 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
                     lineage.update([*previous["lineage"], resume_id])
                 if name == "extract" and params.get("full_reset_done"):
                     params["full"] = False
+            if name == "scrape":
+                params["since_explicit"] = bool(params.get("since_explicit") and not params.get("auto"))
             if carry or (resume_id is not None and name == "scrape"):
                 previous_jobs = conn.execute(
                     "SELECT id,params,lineage FROM jobs WHERE name='scrape'"
@@ -350,10 +353,12 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
                 done_mailboxes = set(params.get("done_mailboxes", []))
                 match_keys = ("since", "sources", "mailboxes", "full") if resume_id is not None else ("since", "sources", "mailboxes")
                 for previous in previous_jobs:
-                    if all(previous["params"].get(key) == params.get(key) for key in match_keys):
+                    prior = previous["params"]
+                    if (prior.get("since_explicit", False) == params["since_explicit"]
+                            and all(prior.get(key) == params.get(key) for key in match_keys)):
                         carried_ids.append(previous["id"])
                         lineage.update([*previous["lineage"], previous["id"]])
-                        done_mailboxes.update(previous["params"].get("done_mailboxes", []))
+                        done_mailboxes.update(prior.get("done_mailboxes", []))
                 if carried_ids:
                     params["done_mailboxes"] = sorted(done_mailboxes)
             job_id = conn.execute("INSERT INTO jobs (name, params, status, lineage) VALUES (%s,%s,'running',%s) RETURNING id",
@@ -458,10 +463,12 @@ class ScrapeIn(BaseModel):
 
 @app.post("/api/scrape", dependencies=[Depends(auth.require_route("scraping"))])
 def scrape(body: ScrapeIn):
-    since = body.since or env("SCRAPE_SINCE", "2018-01-01")
+    explicit_since = body.since.strip()
+    since = explicit_since or env("SCRAPE_SINCE") or "2018-01-01"
     datetime.strptime(since, "%Y-%m-%d")  # validate before starting
     mailboxes = [m.strip().lower() for m in body.mailboxes if m.strip()]
-    params = {"sources": body.sources, "mailboxes": mailboxes, "since": since, "full": body.full}
+    params = {"sources": body.sources, "mailboxes": mailboxes, "since": since,
+              "full": body.full, "since_explicit": bool(explicit_since)}
     start_job("scrape", params, carry=not body.full and not body.fresh)
     return {"started": True, "carried": len(params.get("done_mailboxes", []))}
 

@@ -952,7 +952,7 @@ def test_failed_job_can_be_resumed(conn, monkeypatch):
     monkeypatch.setattr(app_module, "_launch_job", lambda *_: None, raising=False)
     assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 200
     rows = conn.execute("SELECT * FROM jobs ORDER BY id").fetchall()
-    assert rows[0]["status"] == "done" and rows[1]["params"] == params
+    assert rows[0]["status"] == "done" and rows[1]["params"] == {**params, "since_explicit": False}
 
 
 def test_resume_while_running_keeps_interrupted_row_and_scrape_params(conn, monkeypatch):
@@ -966,7 +966,7 @@ def test_resume_while_running_keeps_interrupted_row_and_scrape_params(conn, monk
     conn.commit()
     assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 200
     successor = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
-    assert successor["name"] == "scrape" and successor["params"] == params
+    assert successor["name"] == "scrape" and successor["params"] == {**params, "since_explicit": False}
     assert local.post(f"/api/jobs/{jid}/resume").status_code == 403
 
 
@@ -1212,18 +1212,23 @@ def test_paused_job_blocks_start_and_heartbeats_and_stales_like_running(conn, mo
 
 
 @pytest.mark.parametrize("status", ["stopped", "interrupted"])
-def test_resume_maps_known_params_and_keeps_done_mailbox_lineage(conn, monkeypatch, status):
+@pytest.mark.parametrize("since_explicit", [None, True])
+def test_resume_maps_known_params_and_keeps_done_mailbox_lineage(conn, monkeypatch, status, since_explicit):
     params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False,
               "done_mailboxes": ["a"], "irrelevant_metadata": True, "full_reset_done": True}
+    if since_explicit:
+        params["since_explicit"] = True
     jid = job_row(conn, status=status, name="scrape", params=params)
     seen = []
-    def runner(sources, mailboxes, since, full, log, *, checkpoint, done_mailboxes):
-        seen.append((sources, mailboxes, since, full, done_mailboxes))
+    def runner(sources, mailboxes, since, full, log, *, checkpoint, done_mailboxes, since_explicit):
+        seen.append((sources, mailboxes, since, full, done_mailboxes, since_explicit))
         checkpoint()
     monkeypatch.setattr(pipeline, "run_scrape", runner)
     monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
     assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 200
-    assert seen == [(["gmail"], ["a", "b"], "2020-01-01", False, ["a"])]
+    assert seen == [(["gmail"], ["a", "b"], "2020-01-01", False, ["a"], bool(since_explicit))]
+    saved = conn.execute("SELECT params FROM jobs ORDER BY id DESC LIMIT 1").fetchone()["params"]
+    assert saved["since_explicit"] is bool(since_explicit)
     assert local.post(f"/api/jobs/{jid}/resume", headers=GUI).status_code == 400
 
 
@@ -1380,7 +1385,7 @@ def test_scrape_carries_union_and_seeds_skipped_board(conn, monkeypatch, overlap
     expected = sorted(set(first + second))
     assert response.status_code == 200 and response.json() == {'started': True, 'carried': len(expected)}
     new = conn.execute('SELECT * FROM jobs ORDER BY id DESC LIMIT 1').fetchone()
-    assert new['params'] == {**params, 'done_mailboxes': expected}
+    assert new['params'] == {**params, 'done_mailboxes': expected, 'since_explicit': False}
     old = conn.execute('SELECT status,control,error FROM jobs WHERE id=ANY(%s)', (old_ids,)).fetchall()
     assert old == [{'status': 'done', 'control': None, 'error': f"continued as job {new['id']}"}] * 2
     board = local.get('/api/jobs/latest/mailboxes').json()
@@ -1392,22 +1397,36 @@ def test_scrape_carries_union_and_seeds_skipped_board(conn, monkeypatch, overlap
 @pytest.mark.parametrize('key,value', [('since', '2019-01-01'), ('sources', ['contacts']), ('mailboxes', ['other@test'])])
 def test_scrape_carry_skips_mismatched_params(conn, monkeypatch, key, value):
     params = {'sources': ['gmail'], 'mailboxes': ['a@test'], 'since': '2020-01-01', 'full': False}
-    matched = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['a@test']})
-    mismatch = job_row(conn, status='failed', name='scrape', params={**params, key: value, 'done_mailboxes': ['other@test']})
+    matched = job_row(conn, status='stopped', name='scrape', params={**params, 'since_explicit': True, 'done_mailboxes': ['a@test']})
+    mismatch = job_row(conn, status='failed', name='scrape', params={**params, 'since_explicit': True,
+                                                                  key: value, 'done_mailboxes': ['other@test']})
     monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
     assert local.post('/api/scrape', headers=GUI, json=params).json()['carried'] == 1
     assert conn.execute('SELECT status FROM jobs WHERE id=%s', (matched,)).fetchone()['status'] == 'done'
     assert conn.execute('SELECT status FROM jobs WHERE id=%s', (mismatch,)).fetchone()['status'] == 'failed'
 
 
+def test_explicit_since_equal_to_default_does_not_carry_auto_mailbox(conn, monkeypatch):
+    params = {"sources": ["gmail"], "mailboxes": ["a@test"], "since": "2020-01-01"}
+    monkeypatch.setenv("SCRAPE_SINCE", params["since"])
+    old = job_row(conn, status="stopped", name="scrape", params={**params, "auto": True,
+                  "since_explicit": False, "done_mailboxes": ["a@test"]})
+    monkeypatch.setattr(app_module, "_launch_job", lambda *args: None)
+    response = local.post("/api/scrape", headers=GUI, json=params)
+    assert response.status_code == 200 and response.json() == {"started": True, "carried": 0}
+    new = conn.execute("SELECT params,lineage FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
+    assert new["params"] == {**params, "full": False, "since_explicit": True} and new["lineage"] == []
+    assert conn.execute("SELECT status FROM jobs WHERE id=%s", (old,)).fetchone()["status"] == "stopped"
+
+
 @pytest.mark.parametrize('status,error', [('done', None), ('done_with_errors', None), ('done', 'resumed as job 99')])
 def test_scrape_carry_stops_at_completed_scrape_even_with_other_params(conn, monkeypatch, status, error):
     params = {'sources': ['gmail'], 'mailboxes': ['a@test', 'b@test'], 'since': '2020-01-01'}
-    old = job_row(conn, status='interrupted', name='scrape', params={**params, 'done_mailboxes': ['a@test']})
+    old = job_row(conn, status='interrupted', name='scrape', params={**params, 'since_explicit': True, 'done_mailboxes': ['a@test']})
     boundary = job_row(conn, status=status, name='scrape', params={'sources': ['contacts']})
     conn.execute('UPDATE jobs SET error=%s WHERE id=%s', (error, boundary))
     conn.commit()
-    recent = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['b@test']})
+    recent = job_row(conn, status='stopped', name='scrape', params={**params, 'since_explicit': True, 'done_mailboxes': ['b@test']})
     job_row(conn, status='done', name='extract')  # other job kinds do not end the chain
     monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
     assert local.post('/api/scrape', headers=GUI, json=params).json()['carried'] == 1
@@ -1422,11 +1441,11 @@ def test_scrape_carry_stops_at_completed_scrape_even_with_other_params(conn, mon
 def test_scrape_without_chain_or_with_explicit_reset_carries_nothing(conn, monkeypatch, flags):
     params = {'sources': ['gmail'], 'mailboxes': ['a@test'], 'since': '2020-01-01'}
     if flags:
-        old = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['a@test']})
+        old = job_row(conn, status='stopped', name='scrape', params={**params, 'since_explicit': True, 'done_mailboxes': ['a@test']})
     monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
     assert local.post('/api/scrape', headers=GUI, json={**params, **flags}).json() == {'started': True, 'carried': 0}
     latest = conn.execute('SELECT params FROM jobs ORDER BY id DESC LIMIT 1').fetchone()['params']
-    assert latest == {**params, 'full': flags.get('full', False)}
+    assert latest == {**params, 'full': flags.get('full', False), 'since_explicit': True}
     if flags:
         assert conn.execute('SELECT status FROM jobs WHERE id=%s', (old,)).fetchone()['status'] == 'stopped'
 
@@ -1444,7 +1463,7 @@ def test_scrape_carry_conflict_preserves_old_jobs(conn, monkeypatch, status):
 
 def test_scrape_carry_marking_failure_rolls_back_new_job(conn, monkeypatch, fail_job_write):
     params = {'sources': ['gmail'], 'mailboxes': ['a@test'], 'since': '2020-01-01'}
-    old = job_row(conn, status='stopped', name='scrape', params={**params, 'done_mailboxes': ['a@test']})
+    old = job_row(conn, status='stopped', name='scrape', params={**params, 'since_explicit': True, 'done_mailboxes': ['a@test']})
     fail_job_write(lambda query, args: query.startswith("UPDATE jobs SET status='done', control=NULL"))
     monkeypatch.setattr(app_module, '_launch_job', lambda *args: pytest.fail('must not launch'))
     with pytest.raises(OperationalError, match='transient write failure'):
@@ -1469,7 +1488,7 @@ def test_resume_scrape_merges_older_union_and_preserves_full(conn, monkeypatch, 
     monkeypatch.setattr(app_module, '_launch_job', lambda *args: launched.append(args))
     response = local.post(f'/api/jobs/{target}/resume', headers=GUI)
     new = conn.execute('SELECT * FROM jobs ORDER BY id DESC LIMIT 1').fetchone()
-    expected = {**params, 'done_mailboxes': sorted(set(first + last))}
+    expected = {**params, 'done_mailboxes': sorted(set(first + last)), 'since_explicit': False}
     assert response.status_code == 200 and response.json() == {'started': True, 'job_id': new['id']}
     assert new['params'] == expected
     assert launched == [(new['id'], 'scrape', expected)]
@@ -1481,7 +1500,7 @@ def test_resume_scrape_merges_older_union_and_preserves_full(conn, monkeypatch, 
 
 
 @pytest.mark.parametrize('key,value', [('since', '2019-01-01'), ('sources', ['contacts']),
-                                       ('mailboxes', ['other@test']), ('full', True)])
+                                       ('mailboxes', ['other@test']), ('full', True), ('since_explicit', True)])
 def test_resume_scrape_excludes_other_settings_and_job_kinds(conn, monkeypatch, key, value):
     params = {'sources': ['gmail'], 'mailboxes': ['a@test', 'b@test'], 'since': '2020-01-01', 'full': False}
     ignored = [job_row(conn, status='stopped', name=name, params={**params, **changes, 'done_mailboxes': ['a@test']})
@@ -1490,7 +1509,7 @@ def test_resume_scrape_excludes_other_settings_and_job_kinds(conn, monkeypatch, 
     monkeypatch.setattr(app_module, '_launch_job', lambda *args: None)
     assert local.post(f'/api/jobs/{target}/resume', headers=GUI).status_code == 200
     assert conn.execute('SELECT params FROM jobs ORDER BY id DESC LIMIT 1').fetchone()['params'] == {
-        **params, 'done_mailboxes': ['b@test']}
+        **params, 'done_mailboxes': ['b@test'], 'since_explicit': False}
     assert [r['status'] for r in conn.execute('SELECT status FROM jobs WHERE id=ANY(%s)', (ignored,))] == ['stopped'] * 2
 
 

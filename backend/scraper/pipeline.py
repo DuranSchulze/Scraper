@@ -74,7 +74,7 @@ def _progress(log, stage, done, total, *, conn=None, **fields):
 
 
 def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool, log, *,
-               checkpoint=lambda: None, done_mailboxes=()) -> None:
+               checkpoint=lambda: None, done_mailboxes=(), since_explicit=False) -> None:
     parallel = env_int("SCRAPE_PARALLEL_MAILBOXES", 4, 1, 8, log)
     env_int("SCRAPE_MESSAGE_WORKERS", gmail.WORKERS, 1, 25, log)
     stopped = Event()
@@ -113,7 +113,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
                 succeeded = True
                 for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log,
                                                                          checkpoint=task_checkpoint, on_changed=on_changed,
-                                                                         job_id=job_id)),
+                                                                         job_id=job_id, since_explicit=since_explicit)),
                                     ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full,
                                                                                  checkpoint=task_checkpoint, on_changed=on_changed,
                                                                                  job_id=job_id))):

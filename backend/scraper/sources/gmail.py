@@ -151,13 +151,13 @@ def _history_ids(gm, start: str, *, on_rate_limit=None) -> tuple[list[str], set[
     return list(dict.fromkeys(ids)), refresh
 
 
-def _all_ids(gm, since: str, *, on_rate_limit=None) -> list[str]:
-    q = f"after:{since.replace('-', '/')}"
+def _all_ids(gm, after: str, *, on_rate_limit=None) -> list[str]:
     return [m["id"] for m in pages(lambda t: gm.users().messages().list(
-        userId="me", q=q, maxResults=500, pageToken=t), "messages", on_rate_limit=on_rate_limit)]
+        userId="me", q=f"after:{after}", maxResults=500, pageToken=t), "messages", on_rate_limit=on_rate_limit)]
 
 
-def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None, *, on_changed=None, job_id=None) -> int:
+def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None, *,
+                  on_changed=None, job_id=None, since_explicit=False) -> int:
     """Store new messages of one mailbox. Returns count stored."""
     workers = env_int("SCRAPE_MESSAGE_WORKERS", WORKERS, 1, 25)
     retries = cumulative_retries = handled = total = 0
@@ -180,18 +180,35 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
         label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"), on_rate_limit=rate_limit_retry)["labels"]}
 
         ids, refresh = None, set()
-        cursor = None if full else db.get_cursor(conn, "gmail", mailbox)
+        date_limited = full or since_explicit
+        state = conn.execute("SELECT cursor, gmail_boundary FROM sync_state WHERE source='gmail' AND mailbox=%s",
+                             (mailbox,)).fetchone() or {}
+        cursor = state.get("cursor")
         if cursor:
             try:
-                ids, refresh = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
+                if date_limited:
+                    # Validate the cursor without consuming history outside this date window.
+                    execute(gm.users().history().list(userId="me", startHistoryId=cursor, maxResults=1),
+                            on_rate_limit=rate_limit_retry)
+                else:
+                    ids, refresh = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
             except HttpError as e:
                 if e.resp.status != 404:
                     raise
-                log(f"{mailbox}: history expired, doing full scan")
+                cursor = None
+                log(f"{mailbox}: history expired, listing messages by date")
         if ids is None:
-            ids = _all_ids(gm, since, on_rate_limit=rate_limit_retry)
+            anchor = state.get("gmail_boundary")
+            after = since.replace("-", "/")
+            if anchor is not None and not date_limited:
+                after = str(int(anchor.timestamp()) - 86400)
+            ids = _all_ids(gm, after, on_rate_limit=rate_limit_retry)
+            if full:
+                refresh = set(ids)
 
-        ids = list(dict.fromkeys(ids + db.outdated_gmail_ids(conn, mailbox, PAYLOAD_VERSION)))
+        if not date_limited:
+            ids += db.outdated_gmail_ids(conn, mailbox, PAYLOAD_VERSION)
+        ids = list(dict.fromkeys(ids))
         new = db.missing_ids(conn, "gmail", mailbox, ids, PAYLOAD_VERSION, refresh=refresh)
         total = len(new)
         report()
@@ -218,8 +235,11 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                 log(f"{mailbox}: {stored}/{len(new)}" + (f", {retries} rate-limit retries" if retries else ""))
                 retries = 0
                 checkpoint()
-        # Cursor saved only after every message is stored, so a crash just resumes.
-        db.set_cursor(conn, "gmail", mailbox, str(start_history))
+        # A date-limited listing can miss older mail, so keep the saved coverage with its cursor.
+        if date_limited and cursor:
+            boundary = state.get("gmail_boundary")
+        else:
+            db.set_cursor(conn, "gmail", mailbox, str(start_history))
         if job_id is not None:
             db.record_gmail_success(conn, job_id, mailbox, boundary)
         conn.commit()
