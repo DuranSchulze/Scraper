@@ -172,6 +172,10 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
     run_extract(log, checkpoint=task_checkpoint)
 
 
+def count_pending(conn) -> int:
+    return conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"]
+
+
 def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) -> None:
     rules = load_rules()
     internal = set(env_list("INTERNAL_DOMAINS"))
@@ -200,7 +204,7 @@ def run_extract(log, full: bool = False, *, keys=(), checkpoint=lambda: None) ->
                     reset_done()
                 checkpoint()
             if extract_total is None:
-                extract_total = conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"]
+                extract_total = count_pending(conn)
             _progress(log, "extract", succeeded + failed, extract_total, conn=conn)
             conn.commit()
             while True:

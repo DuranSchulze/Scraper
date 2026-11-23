@@ -8,6 +8,7 @@ from test_auth import authenticated_client
 from psycopg.types.json import Jsonb
 
 from scraper import db, pipeline
+from scraper.scripts.backlog_report import report
 from scraper.sources import sheets
 
 
@@ -30,6 +31,38 @@ def seed(conn, sid="s:Clients:2", email="bob@client.test", name="Bob"):
 
 def candidates(conn):
     return {r["email_key"]: r for r in conn.execute("SELECT * FROM candidates")}
+
+
+def test_backlog_report_groups_pending_rows_and_projects_backfill(conn, capsys):
+    with conn.cursor() as cur:
+        cur.executemany("""
+            INSERT INTO raw_items (source, mailbox, source_id, payload, fetched_at, extract_error, extracted_at)
+            VALUES (%s, '', %s, %s, now() - %s::interval, %s, CASE WHEN %s THEN now() END)
+        """, [
+            ("gmail", "recent", Jsonb({"v": 2}), "6 hours", None, False),
+            ("gmail", "recent2", Jsonb({"v": 2}), "6 hours", None, False),
+            ("gmail", "week", Jsonb({"v": 1}), "3 days", "parser error", False),
+            ("gmail", "old", Jsonb({}), "8 days", None, False),
+            ("contacts", "legacy", Jsonb({}), "8 days", "parser error", False),
+            ("sheets", "current", Jsonb({}), "3 days", None, False),
+            ("gmail", "done", Jsonb({"v": 1}), "3 days", "parser error", True),
+        ])
+    conn.commit()
+
+    report("seeded test DB")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[:2] == ["Data source: seeded test DB", "Pending rows: 6"]
+    assert lines[3:] == [
+        "source\textract_error\tage\tgmail_v\trows",
+        "contacts\tpresent\t7d+\t-\t1",
+        "gmail\tabsent\t0-1d\t2\t2",
+        "gmail\tabsent\t7d+\tmissing\t1",
+        "gmail\tpresent\t1-7d\t1\t1",
+        "sheets\tabsent\t1-7d\t-\t1",
+        "Expected first-run pending rows after phase 2 backfill: 4",
+    ]
+    assert pipeline.count_pending(conn) == 6
 
 
 def test_rebuild_targets_includes_merged_ancestors():
