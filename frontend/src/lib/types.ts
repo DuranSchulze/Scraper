@@ -34,7 +34,11 @@ export type Status = {
   last_complete_scrape_at: string | null;
 };
 
-export type JobProgress = { stage: "fetch" | "extract" | "tag"; done: number; total: number; started_at: string };
+export type JobProgress = {
+  stage: "fetch" | "extract" | "tag"; done: number; total: number; started_at: string;
+  /** Present while the time-boxed backlog pass drains older unextracted items. */
+  backlog_done?: number; backlog_total?: number;
+};
 
 /** Client Directory master list (shared companies + contacts tables) and the pending tags made from it. */
 export type MasterSummary = {

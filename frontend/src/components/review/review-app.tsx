@@ -36,7 +36,8 @@ const MATCH_OPTIONS = [
   { value: "email", label: "Exact email" }, { value: "domain", label: "Same domain" }, { value: "none", label: "Not in directory" },
 ];
 const BUCKETS: { value: Bucket; label: string }[] = [{ value: "day", label: "Day" }, { value: "week", label: "Week" }];
-const RESETS_PAGE = new Set<string>(["state", "sort", "order", ...FILTER_KEYS]);
+const TOGGLES = ["new", "has_phone", "has_amount"] as const;
+const RESETS_PAGE =new Set<string>(["state", "sort", "order", ...FILTER_KEYS]);
 const any = (label: string, values: string[] = []) => [{ value: "", label }, ...values.map((v) => ({ value: v, label: v }))];
 
 export function ReviewApp() {
@@ -47,6 +48,8 @@ export function ReviewApp() {
     ...Object.fromEntries(FILTER_KEYS.map((k) => [k, params.get(k) || ""])) as Record<(typeof FILTER_KEYS)[number], string>,
     // Directory matching exists only for pending records; a match in the URL of another tab is ignored.
     ...(state !== "pending" && { match: "" }),
+    // Toggles are on only for "true"; ?new=false and the like count as off everywhere.
+    ...Object.fromEntries(TOGGLES.map((k) => [k, params.get(k) === "true" ? "true" : ""])),
     // Unknown URL values fall back to the API default (newest last contact first) instead of a 400.
     sort: params.get("sort") === "first_contact" ? "first_contact" : "last_contact",
     order: params.get("order") === "asc" ? "asc" : "desc",

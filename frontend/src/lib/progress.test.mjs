@@ -18,3 +18,9 @@ test("stageView: counts, unknown totals, never a full bar while running", () => 
   assert.deepEqual(stageView({ stage: "extract", done: 0, total: 0, started_at: at }), { label: "Extracting records", count: "", value: null });
   assert.equal(stageView({ stage: "tag", done: 0, total: 1, started_at: at }).count, "");
 });
+
+test("stageView: backlog pass advances while this run's count stays fixed", () => {
+  const at = "2026-11-13T00:00:00Z";
+  const view = stageView({ stage: "extract", done: 5, total: 5, started_at: at, backlog_done: 250, backlog_total: 1000 });
+  assert.deepEqual(view, { label: "Extracting older backlog", count: "250/1,000 backlog items", value: 25 });
+});

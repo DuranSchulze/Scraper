@@ -16,6 +16,12 @@ const STAGE = {
 
 /** Label, count text and bar value for a running stage. `value` is null while the total is unknown (indeterminate bar). */
 export function stageView(p: JobProgress) {
+  // The backlog pass runs after this run's own items; its count moves while done/total stay fixed.
+  if (p.stage === "extract" && p.backlog_total) {
+    const value = Math.min(99, Math.floor(((p.backlog_done ?? 0) / p.backlog_total) * 100));
+    return { label: "Extracting older backlog",
+      count: `${(p.backlog_done ?? 0).toLocaleString("en-US")}/${p.backlog_total.toLocaleString("en-US")} backlog items`, value };
+  }
   const stage = STAGE[p.stage];
   const known = p.total > 0;
   // A stage still working never shows a full bar: cap at 99% until the next stage takes over.
