@@ -66,6 +66,7 @@ class FakeGmail:
         self.removed_labels = []
         self.latency = latency
         self.expired = False
+        self.history_error = None
         self.fail_id = None
         self.missing = set()
         self.created = []
@@ -126,6 +127,8 @@ class Endpoint:
                     assert kw["historyTypes"] == ["messageAdded", "labelAdded", "labelRemoved"]
                 if self.fake.expired:
                     raise HttpError(SimpleNamespace(status=404, reason="Gone"), b'{}')
+                if self.fake.history_error:
+                    raise HttpError(SimpleNamespace(status=self.fake.history_error, reason="Unavailable"), b'{}')
                 return {"history": [{
                     event: [{"message": {"id": i}} for i in ids]
                     for event, ids in (("messagesAdded", self.fake.history_ids),
@@ -336,6 +339,89 @@ def test_explicit_since_keeps_fallback_boundary_if_retained_cursor_expires(conn,
     assert fake.history_calls == [("old-cursor", True), ("old-cursor", False)]
     assert fake.queries == ["after:2025/03/01", expected]
     assert db.get_cursor(conn, "gmail", MAILBOX) == "new-cursor"
+
+
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("anchor,expected", [("2025-01-02 08:00:00+08:00", "1735689600"), (None, "2025/01/01")])
+def test_replacement_cursor_keeps_catchup_for_mail_outside_requested_dates(
+        conn, monkeypatch, authenticated_client, full, anchor, expected):
+    from scraper import app as api
+
+    monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    changed = message("changed")
+    db.upsert_raw(conn, "gmail", MAILBOX, "changed", gmail.message_to_payload(changed, MAILBOX, {"SENT": "Sent"}))
+    conn.execute("INSERT INTO sync_state (source,mailbox,cursor,gmail_boundary) VALUES ('gmail',%s,%s,%s)",
+                 (MAILBOX, "old-cursor" if full else None, anchor))
+    conn.commit()
+    changed["labelIds"] = []
+    old = {**message("unseen-february"), "internalDate": "1738368000000"}
+    recent = {**message("recent"), "internalDate": "1740960000000"}
+    fake = FakeGmail([old, recent, changed])
+    fake.expired = full
+    fake.listed_ids = ["recent"]
+    fake.history_ids = []
+    monkeypatch.setattr(gmail, "service", fake.service)
+    params = {"sources": ["gmail"], "mailboxes": [MAILBOX], "since": "2025-03-01", "full": full}
+
+    response = authenticated_client.post("/api/scrape", headers={"X-Local-GUI": "1"}, json=params)
+    assert response.status_code == 200
+    assert fake.downloads == ["recent"] and fake.queries == ["after:2025/03/01"]
+    assert db.get_cursor(conn, "gmail", MAILBOX) == "new-cursor"
+    saved = conn.execute("SELECT gmail_boundary IS NOT DISTINCT FROM %s::timestamptz AS same"
+                         " FROM sync_state WHERE source='gmail'", (anchor,)).fetchone()
+    assert saved["same"]
+    floor = expected if anchor else ""
+    assert db.get_cursor(conn, "gmail_catchup", MAILBOX) == floor
+
+    fake.expired = False
+    fake.listed_ids = ["unseen-february", "recent"]
+    fake.removed_labels = ["changed"]
+    auto = {**params, "since": "2025-01-01", "full": False, "auto": True}
+    if full:
+        fake.fail_id = "unseen-february"
+        failed = api.start_job("scrape", dict(auto), carry=True)
+        assert conn.execute("SELECT status FROM jobs WHERE id=%s", (failed,)).fetchone()["status"] == "done_with_errors"
+        assert db.get_cursor(conn, "gmail_catchup", MAILBOX) == floor
+        fake.fail_id = None
+    fake.downloads.clear()
+    caught_up = api.start_job("scrape", dict(auto), carry=True)
+    assert conn.execute("SELECT status FROM jobs WHERE id=%s", (caught_up,)).fetchone()["status"] == "done"
+    assert fake.queries[-1] == f"after:{expected}"
+    assert fake.history_calls[-1] == ("new-cursor", False)
+    assert set(fake.downloads) == {"unseen-february", "changed"}
+    assert conn.execute("SELECT payload->'labels' AS labels FROM raw_items WHERE source_id='changed'").fetchone()["labels"] == []
+    assert db.get_cursor(conn, "gmail_catchup", MAILBOX) is None
+    queries = list(fake.queries)
+    api.start_job("scrape", dict(auto), carry=True)
+    assert fake.queries == queries
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_date_limited_scan_lists_when_history_probe_fails(conn, monkeypatch, authenticated_client, full):
+    from scraper import app as api
+
+    monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    execute = gmail.execute
+    monkeypatch.setattr(gmail, "execute", lambda request, **kwargs: execute(request, tries=1, **kwargs))
+    fake = FakeGmail([message("current")])
+    fake.history_error = 503
+    monkeypatch.setattr(gmail, "service", fake.service)
+    conn.execute("INSERT INTO sync_state (source,mailbox,cursor,gmail_boundary)"
+                 " VALUES ('gmail',%s,'old-cursor','2025-01-02 00:00:00+00')", (MAILBOX,))
+    conn.commit()
+
+    response = authenticated_client.post("/api/scrape", headers={"X-Local-GUI": "1"}, json={
+        "sources": ["gmail"], "mailboxes": [MAILBOX], "since": "2025-03-01", "full": full,
+    })
+    assert response.status_code == 200
+    assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "done"
+    assert fake.history_calls == [("old-cursor", True)] and fake.queries == ["after:2025/03/01"]
+    assert fake.downloads == ["current"]
+    assert conn.execute("SELECT cursor, extract(epoch FROM gmail_boundary) AS boundary FROM sync_state"
+                        " WHERE source='gmail'").fetchone() == {"cursor": "old-cursor", "boundary": 1735776000}
+    assert db.get_cursor(conn, "gmail_catchup", MAILBOX) is None
 
 
 def test_scrape_refreshes_version_and_history_without_reextracting_metadata(conn, monkeypatch):

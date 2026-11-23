@@ -184,6 +184,9 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
         state = conn.execute("SELECT cursor, gmail_boundary FROM sync_state WHERE source='gmail' AND mailbox=%s",
                              (mailbox,)).fetchone() or {}
         cursor = state.get("cursor")
+        anchor = state.get("gmail_boundary")
+        coverage_floor = str(int(anchor.timestamp()) - 86400) if anchor is not None else ""
+        catchup = db.get_cursor(conn, "gmail_catchup", mailbox)
         if cursor:
             try:
                 if date_limited:
@@ -192,17 +195,20 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                             on_rate_limit=rate_limit_retry)
                 else:
                     ids, refresh = _history_ids(gm, cursor, on_rate_limit=rate_limit_retry)
-            except HttpError as e:
-                if e.resp.status != 404:
+            except (HttpError, OSError) as e:
+                if isinstance(e, HttpError) and e.resp.status == 404:
+                    cursor = None
+                    log(f"{mailbox}: history expired, listing messages by date")
+                elif not date_limited:
                     raise
-                cursor = None
-                log(f"{mailbox}: history expired, listing messages by date")
-        if ids is None:
-            anchor = state.get("gmail_boundary")
+                else:
+                    reason = f"HTTP {e.resp.status}" if isinstance(e, HttpError) else type(e).__name__
+                    log(f"{mailbox}: history probe failed ({reason}), keeping the cursor and listing by date")
+        if ids is None or (not date_limited and catchup is not None):
             after = since.replace("-", "/")
-            if anchor is not None and not date_limited:
-                after = str(int(anchor.timestamp()) - 86400)
-            ids = _all_ids(gm, after, on_rate_limit=rate_limit_retry)
+            if not date_limited:
+                after = (coverage_floor if catchup is None else catchup) or after
+            ids = (ids or []) + _all_ids(gm, after, on_rate_limit=rate_limit_retry)
             if full:
                 refresh = set(ids)
 
@@ -235,11 +241,15 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                 log(f"{mailbox}: {stored}/{len(new)}" + (f", {retries} rate-limit retries" if retries else ""))
                 retries = 0
                 checkpoint()
-        # A date-limited listing can miss older mail, so keep the saved coverage with its cursor.
-        if date_limited and cursor:
-            boundary = state.get("gmail_boundary")
-        else:
+        if not date_limited or not cursor:
             db.set_cursor(conn, "gmail", mailbox, str(start_history))
+        if date_limited:
+            # Replacing a cursor after a narrow listing leaves older mail for the next incremental run.
+            if not cursor and catchup is None:
+                db.set_cursor(conn, "gmail_catchup", mailbox, coverage_floor)
+            boundary = anchor
+        elif catchup is not None:
+            conn.execute("DELETE FROM sync_state WHERE source='gmail_catchup' AND mailbox=%s", (mailbox,))
         if job_id is not None:
             db.record_gmail_success(conn, job_id, mailbox, boundary)
         conn.commit()
