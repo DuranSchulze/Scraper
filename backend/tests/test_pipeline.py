@@ -503,6 +503,52 @@ def test_job_counts_failed_mailbox_then_continues_and_extracts_good_one(conn, mo
     assert any("bad@acme.test gmail: FAILED" in r["line"] for r in conn.execute("SELECT line FROM job_log"))
 
 
+@pytest.mark.parametrize("contacts_fail", [False, True])
+def test_mixed_scrape_attributes_current_rows_and_publishes_gmail_boundary(conn, monkeypatch, contacts_fail):
+    from scraper import app as api
+    from test_gmail import FakeGmail, MAILBOX, message
+
+    old = seed(conn)
+    fake = FakeGmail([message("current")])
+    monkeypatch.setattr(pipeline.gmail, "service", fake.service)
+
+    def contacts_service(*args, **kwargs):
+        if contacts_fail:
+            raise RuntimeError("contacts unavailable")
+        return object()
+
+    contact = {"resourceName": "people/one", "emailAddresses": [{"value": "contact@client.test"}]}
+    monkeypatch.setattr(pipeline.contacts, "service", contacts_service)
+    monkeypatch.setattr(pipeline.contacts, "pages", lambda _, kind: [contact] if kind == "connections" else [])
+    monkeypatch.setattr(api, "_launch_job", api._run_job)
+    jid = api.start_job("scrape", {"sources": ["gmail", "contacts"], "mailboxes": [MAILBOX],
+                                  "since": "2025-01-01", "full": False})
+    job = conn.execute("SELECT status, completed, params, finished_at FROM jobs WHERE id=%s", (jid,)).fetchone()
+    assert job["status"] == ("done_with_errors" if contacts_fail else "done") and job["completed"] is True
+    assert job["params"].get("done_mailboxes", []) == ([] if contacts_fail else [MAILBOX])
+    mailbox = conn.execute("SELECT status, gmail_ok, gmail_boundary FROM job_mailboxes WHERE job_id=%s",
+                           (jid,)).fetchone()
+    assert mailbox["status"] == ("failed" if contacts_fail else "done") and mailbox["gmail_ok"] is True
+    assert mailbox["gmail_boundary"] < job["finished_at"]
+    anchor = conn.execute("SELECT cursor, gmail_complete_at, gmail_boundary FROM sync_state WHERE source='gmail'").fetchone()
+    assert anchor == {"cursor": "new-cursor", "gmail_complete_at": job["finished_at"],
+                      "gmail_boundary": mailbox["gmail_boundary"]}
+    assert conn.execute("SELECT id, last_job FROM raw_items WHERE id=%s AND extracted_at IS NOT NULL",
+                        (old,)).fetchone() == {"id": old, "last_job": None}
+    attributed = {row["source"]: row["last_job"] for row in conn.execute("SELECT source, last_job FROM raw_items WHERE id<>%s", (old,))}
+    assert attributed == ({"gmail": jid} if contacts_fail else {"gmail": jid, "contacts": jid})
+
+
+def test_contacts_attribution_preserves_unchanged_rows(conn, monkeypatch):
+    monkeypatch.setattr(pipeline.contacts, "service", lambda *_: object())
+    contact = {"resourceName": "people/one", "names": [{"displayName": "First"}]}
+    monkeypatch.setattr(pipeline.contacts, "pages", lambda _, kind: [contact] if kind == "connections" else [])
+    for job_id, name, owner in [(1, "First", 1), (2, "First", 1), (3, "Changed", 3)]:
+        contact["names"][0]["displayName"] = name
+        pipeline.contacts.fetch_contacts(conn, "a", lambda _: None, full=True, job_id=job_id)
+        assert conn.execute("SELECT last_job FROM raw_items").fetchone()["last_job"] == owner
+
+
 def test_extraction_failures_make_job_done_with_errors(conn, monkeypatch):
     from scraper import app as app_module
 

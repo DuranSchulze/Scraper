@@ -187,10 +187,13 @@ def test_scrape_already_chains_incremental_extract(scheduled, monkeypatch):
     # Empty sources exercise the real scrape -> extract chain without accessing external services.
     params = {"sources": [], "mailboxes": [], "since": "2018-01-01", "full": False}
     jid = api.start_job("scrape", params)
+    with db.connect() as conn:
+        conn.execute("INSERT INTO candidates (email_key) VALUES ('unchanged@client.test')")
     api._run_job(jid, "scrape", params)
     with db.connect() as conn:
-        job = conn.execute("SELECT status,error FROM jobs WHERE id=%s", (jid,)).fetchone()
-        assert job["status"] == "done", job
+        job = conn.execute("SELECT status,error,completed FROM jobs WHERE id=%s", (jid,)).fetchone()
+        assert job == {"status": "done", "error": None, "completed": True}
+        assert conn.execute("SELECT last_scrape_job FROM candidates").fetchone()["last_scrape_job"] is None
     assert extracted == [False] and len(launched) == 1
 
 

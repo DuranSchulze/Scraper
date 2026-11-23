@@ -6,6 +6,7 @@ import io
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from email.utils import parseaddr
 
 from googleapiclient.errors import HttpError
@@ -156,7 +157,7 @@ def _all_ids(gm, since: str, *, on_rate_limit=None) -> list[str]:
         userId="me", q=q, maxResults=500, pageToken=t), "messages", on_rate_limit=on_rate_limit)]
 
 
-def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None, *, on_changed=None) -> int:
+def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=lambda: None, *, on_changed=None, job_id=None) -> int:
     """Store new messages of one mailbox. Returns count stored."""
     workers = env_int("SCRAPE_MESSAGE_WORKERS", WORKERS, 1, 25)
     retries = cumulative_retries = handled = total = 0
@@ -174,6 +175,7 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
     try:
         rules = load_rules()
         gm = service("gmail", mailbox)
+        boundary = datetime.now(timezone.utc)
         start_history = execute(gm.users().getProfile(userId="me"), on_rate_limit=rate_limit_retry)["historyId"]
         label_names = {l["id"]: l["name"] for l in execute(gm.users().labels().list(userId="me"), on_rate_limit=rate_limit_retry)["labels"]}
 
@@ -202,7 +204,7 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                 chunk = new[i:i + CHUNK]
                 payloads = list(pool.map(lambda mid: fetch_message(mailbox, mid, label_names, rules, on_rate_limit=rate_limit_retry), chunk))
                 items = [(p["id"], p) for p in payloads if p]
-                changed = db.upsert_raw_many(conn, "gmail", mailbox, items)
+                changed = db.upsert_raw_many(conn, "gmail", mailbox, items, job_id=job_id)
                 with conn.cursor() as cur:
                     cur.executemany(
                         "INSERT INTO gone_items (source, mailbox, source_id) VALUES ('gmail',%s,%s) ON CONFLICT DO NOTHING",
@@ -218,6 +220,8 @@ def fetch_mailbox(conn, mailbox: str, since: str, full: bool, log, checkpoint=la
                 checkpoint()
         # Cursor saved only after every message is stored, so a crash just resumes.
         db.set_cursor(conn, "gmail", mailbox, str(start_history))
+        if job_id is not None:
+            db.record_gmail_success(conn, job_id, mailbox, boundary)
         conn.commit()
         checkpoint()
         return stored

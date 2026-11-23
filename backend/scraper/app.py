@@ -273,8 +273,13 @@ def _finish_job(job_id: int, error: str | None, stopped: bool = False) -> str | 
             "UPDATE jobs SET status=CASE WHEN %s OR control='stop' THEN 'stopped'"
             " WHEN %s::text IS NOT NULL THEN 'failed'"
             " WHEN failures>0 THEN 'done_with_errors' ELSE 'done' END,"
+            " completed=(name='scrape' AND NOT %s AND control IS DISTINCT FROM 'stop' AND %s::text IS NULL),"
             " control=NULL, error=%s, finished_at=clock_timestamp(), heartbeat_at=clock_timestamp()"
-            " WHERE id=%s AND status IN ('running','paused') RETURNING status", (stopped, error, error, job_id)).fetchone()
+            " WHERE id=%s AND status IN ('running','paused') RETURNING status, completed, lineage, finished_at",
+            (stopped, error, stopped, error, error, job_id),
+        ).fetchone()
+        if row and row["completed"]:
+            db.publish_scrape_completion(conn, job_id, row["lineage"], row["finished_at"])
     return row["status"] if row else None
 
 
@@ -299,6 +304,9 @@ def _run_job(job_id: int, name: str, params: dict) -> None:
         stopped = True
     except Exception as exc:
         error = repr(exc)
+    except BaseException as exc:
+        error = repr(exc)
+        raise
     finally:
         heartbeat_stop.set()
         heartbeat.join(timeout=1)
@@ -320,16 +328,19 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
     try:
         with db.connect() as conn:
             carried_ids = []
+            lineage = set()
             if resume_id is not None:
                 previous = conn.execute("SELECT * FROM jobs WHERE id=%s FOR UPDATE", (resume_id,)).fetchone()
                 if not previous or previous["status"] not in ("interrupted", "stopped", "failed"):
                     raise HTTPException(400, "job is not interrupted, stopped or failed")
                 name, params = previous["name"], dict(previous["params"])
+                if name == "scrape":
+                    lineage.update([*previous["lineage"], resume_id])
                 if name == "extract" and params.get("full_reset_done"):
                     params["full"] = False
             if carry or (resume_id is not None and name == "scrape"):
                 previous_jobs = conn.execute(
-                    "SELECT id,params FROM jobs WHERE name='scrape'"
+                    "SELECT id,params,lineage FROM jobs WHERE name='scrape'"
                     " AND status IN ('interrupted','stopped','failed')"
                     " AND (%s::bigint IS NULL OR id<%s)"
                     " AND id > COALESCE((SELECT max(id) FROM jobs WHERE name='scrape'"
@@ -341,11 +352,12 @@ def start_job(name: str, params: dict, *, resume_id: int | None = None, carry: b
                 for previous in previous_jobs:
                     if all(previous["params"].get(key) == params.get(key) for key in match_keys):
                         carried_ids.append(previous["id"])
+                        lineage.update([*previous["lineage"], previous["id"]])
                         done_mailboxes.update(previous["params"].get("done_mailboxes", []))
                 if carried_ids:
                     params["done_mailboxes"] = sorted(done_mailboxes)
-            job_id = conn.execute("INSERT INTO jobs (name, params, status) VALUES (%s,%s,'running') RETURNING id",
-                                  (name, Jsonb(params))).fetchone()["id"]
+            job_id = conn.execute("INSERT INTO jobs (name, params, status, lineage) VALUES (%s,%s,'running',%s) RETURNING id",
+                                  (name, Jsonb(params), sorted(lineage))).fetchone()["id"]
             initial_mailboxes = set(params.get("mailboxes", [])) if name == "scrape" else set()
             JobLog(job_id).progress("fetch" if name == "scrape" else "extract",
                                     len(initial_mailboxes.intersection(params.get("done_mailboxes", []))),
@@ -693,7 +705,10 @@ def _get(conn, cid: int, lock: bool = False) -> dict:
 @app.get("/api/candidates/{cid}", dependencies=[Depends(auth.require_route("review"))])
 def get_candidate(cid: int):
     with db.connect() as conn:
-        return _get(conn, cid)
+        candidate = _get(conn, cid)
+        for field in ("pending_scrape_job", "pending_scraped_at", "last_scrape_job", "last_scraped_at", "master_evaluated_at"):
+            del candidate[field]
+        return candidate
 
 
 class AmountIn(BaseModel):

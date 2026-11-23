@@ -22,7 +22,7 @@ def rows_to_records(rows: list[list[str]]) -> list[tuple[int, dict]]:
     return out
 
 
-def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None, *, on_changed=None) -> int:
+def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None, *, on_changed=None, job_id=None) -> int:
     from .. import pipeline
 
     sh = service("sheets", env("GOOGLE_ADMIN_EMAIL"))
@@ -39,7 +39,7 @@ def fetch_sheets(conn, sheet_ids: list[str], log, checkpoint=lambda: None, *, on
                 items.append((source_id, {
                     "sheet": meta["properties"]["title"], "tab": tab, "row": row_no, "record": record}))
         current_ids = [source_id for source_id, _ in items]
-        changed = db.upsert_raw_many(conn, "sheets", "", items)
+        changed = db.upsert_raw_many(conn, "sheets", "", items, job_id=job_id)
         n += len(items)
         # Only remove rows absent from a completely fetched sheet.
         keys = {r["key"] for r in conn.execute(

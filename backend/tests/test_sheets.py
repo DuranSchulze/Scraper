@@ -37,35 +37,41 @@ def sheet_api(monkeypatch):
 def test_sheet_diff_identical_changed_removed_and_shifted_rows(conn, monkeypatch, sheet_api, scrape):
     monkeypatch.setenv("DRIVE_SHEET_IDS", "s")
 
-    def fetch():
-        if scrape:
-            pipeline.run_scrape(["sheets"], [], "2025-01-01", False, lambda _: None)
-        else:
-            sheets.fetch_sheets(conn, ["s"], lambda _: None)
+    def fetch(job_id):
+        def log(line):
+            pass
 
-    fetch()
+        log.job_id = job_id
+        if scrape:
+            pipeline.run_scrape(["sheets"], [], "2025-01-01", False, log)
+        else:
+            sheets.fetch_sheets(conn, ["s"], log, job_id=job_id)
+
+    fetch(1)
     before = conn.execute("SELECT * FROM raw_items ORDER BY source_id").fetchall()
+    assert {row["last_job"] for row in before} == {1}
     original = pipeline.extract_item
     seen = []
     def extract(row, *args):
         seen.append(row["id"])
         return original(row, *args)
     monkeypatch.setattr(pipeline, "extract_item", extract)
-    fetch()
+    fetch(2)
     assert conn.execute("SELECT * FROM raw_items ORDER BY source_id").fetchall() == before and seen == []
     sheet_api["rows"][1][0] = "A edited"
-    fetch()
+    fetch(3)
     assert seen == [before[0]["id"]]
     sheet_api["rows"] = [["Name", "Email"], ["B", "b@client.test"]]
     seen.clear()
-    fetch()
+    fetch(4)
     rows = conn.execute("SELECT * FROM raw_items").fetchall()
     assert len(rows) == 1 and rows[0]["id"] == before[0]["id"]
+    assert rows[0]["last_job"] == 4
     assert seen == [before[0]["id"]]
     assert [r["email_key"] for r in conn.execute("SELECT email_key FROM candidates")] == ["b@client.test"]
     sheet_api["fail"] = True
     with pytest.raises(RuntimeError):
-        fetch()
+        fetch(5)
     conn.rollback()
     assert conn.execute("SELECT * FROM raw_items").fetchall() == rows
 

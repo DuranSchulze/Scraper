@@ -1240,6 +1240,83 @@ def test_late_stop_wins_terminal_transition_and_never_logs_finished(conn, monkey
     assert not any("finished" in line for line in lines)
 
 
+@pytest.mark.parametrize("carry", [False, True])
+def test_repeated_scrape_resume_publishes_earliest_gmail_boundary_and_promotes_lineage(conn, monkeypatch, carry):
+    monkeypatch.setattr(app_module, "_launch_job", lambda *args: None)
+    params = {"sources": ["gmail"], "mailboxes": ["a", "b"], "since": "2020-01-01", "full": False}
+    first = job_row(conn, status="stopped", name="scrape", params=params)
+    early = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    later = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    db.set_cursor(conn, "gmail", "a", "latest-history")
+    db.record_gmail_success(conn, first, "a", early)
+    old_stamp = conn.execute("INSERT INTO candidates (email_key,pending_scrape_job,pending_scraped_at)"
+                             " VALUES ('lineage@client.test',%s,%s) RETURNING id", (first, early)).fetchone()["id"]
+    conn.commit()
+
+    second = app_module.start_job("scrape", params, carry=True) if carry else app_module.start_job("", {}, resume_id=first)
+    db.record_gmail_success(conn, second, "a", later)
+    db.set_cursor(conn, "gmail", "b", "second-history")
+    db.record_gmail_success(conn, second, "b", later)
+    conn.commit()
+    assert app_module._finish_job(second, None, stopped=True) == "stopped"
+    third = app_module.start_job("", {}, resume_id=second)
+    assert conn.execute("SELECT lineage FROM jobs WHERE id=%s", (third,)).fetchone()["lineage"] == [first, second]
+    assert conn.execute("SELECT gmail_complete_at FROM sync_state WHERE mailbox='a'").fetchone()["gmail_complete_at"] is None
+    assert conn.execute("SELECT last_scrape_job FROM candidates WHERE id=%s", (old_stamp,)).fetchone()["last_scrape_job"] is None
+
+    assert app_module._finish_job(third, None) == "done"
+    jobs = conn.execute("SELECT completed, finished_at FROM jobs ORDER BY id").fetchall()
+    assert [job["completed"] for job in jobs] == [False, False, True]
+    finished = jobs[-1]["finished_at"]
+    assert conn.execute("SELECT mailbox,cursor,gmail_complete_at,gmail_boundary FROM sync_state ORDER BY mailbox").fetchall() == [
+        {"mailbox": "a", "cursor": "latest-history", "gmail_complete_at": finished, "gmail_boundary": early},
+        {"mailbox": "b", "cursor": "second-history", "gmail_complete_at": finished, "gmail_boundary": later},
+    ]
+    assert conn.execute("SELECT pending_scrape_job,pending_scraped_at,last_scrape_job,last_scraped_at"
+                        " FROM candidates WHERE id=%s", (old_stamp,)).fetchone() == {
+        "pending_scrape_job": None, "pending_scraped_at": None, "last_scrape_job": third, "last_scraped_at": finished,
+    }
+    detail = local.get(f"/api/candidates/{old_stamp}")
+    assert detail.status_code == 200
+    assert not {"pending_scrape_job", "pending_scraped_at", "last_scrape_job", "last_scraped_at", "master_evaluated_at"} & detail.json().keys()
+
+
+@pytest.mark.parametrize("outcome", ["late stop", "failed", "interrupted", "publication error"])
+def test_incomplete_scrape_publishes_neither_boundary_nor_stamp(conn, fail_job_write, outcome):
+    jid = job_row(conn, name="scrape", stale=outcome == "interrupted")
+    previous = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    boundary = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    conn.execute("INSERT INTO sync_state (source,mailbox,cursor,gmail_complete_at,gmail_boundary)"
+                 " VALUES ('gmail','a','history',%s,%s)", (previous, previous))
+    conn.execute("INSERT INTO candidates (email_key,pending_scrape_job,pending_scraped_at)"
+                 " VALUES ('pending@client.test',%s,%s)", (jid, boundary))
+    db.record_gmail_success(conn, jid, "a", boundary)
+    if outcome == "late stop":
+        conn.execute("UPDATE jobs SET control='stop' WHERE id=%s", (jid,))
+    if outcome == "interrupted":
+        db.interrupt_stale(conn)
+    conn.commit()
+
+    if outcome == "publication error":
+        fail_job_write(lambda sql, args: sql.startswith("UPDATE candidates SET last_scrape_job"))
+        with pytest.raises(OperationalError):
+            app_module._finish_job(jid, None)
+        status = "running"
+    else:
+        result = app_module._finish_job(jid, "failed" if outcome == "failed" else None)
+        status = {"late stop": "stopped", "failed": "failed", "interrupted": "interrupted"}[outcome]
+        assert result == (None if outcome == "interrupted" else status)
+    assert conn.execute("SELECT status,completed FROM jobs WHERE id=%s", (jid,)).fetchone() == {
+        "status": status, "completed": False,
+    }
+    assert conn.execute("SELECT gmail_complete_at,gmail_boundary FROM sync_state").fetchone() == {
+        "gmail_complete_at": previous, "gmail_boundary": previous,
+    }
+    assert conn.execute("SELECT pending_scrape_job,last_scrape_job FROM candidates").fetchone() == {
+        "pending_scrape_job": jid, "last_scrape_job": None,
+    }
+
+
 def test_mailbox_board_order_latest_and_logs(conn):
     assert local.get('/api/jobs/latest/mailboxes').json()['job_id'] is None
     assert local.get('/api/jobs/latest/mailboxes').json()['synced_before'] == 0
@@ -1497,7 +1574,8 @@ def test_candidate_counts_merge_chain_shared_items_and_cap(conn):
 
 
 def test_progress_write_failure_never_fails_scrape(conn, monkeypatch, fail_job_write, capsys):
-    fail_job_write(lambda query, args: 'job_mailboxes' in query)
+    fail_job_write(lambda query, args: query.startswith(('INSERT INTO job_mailboxes', 'UPDATE job_mailboxes'))
+                   and 'gmail_ok' not in query)
     monkeypatch.setattr(pipeline.gmail, 'fetch_mailbox', lambda *args, **kwargs: None)
     monkeypatch.setattr(app_module, '_launch_job', app_module._run_job)
     jid = app_module.start_job('scrape', {'sources': ['gmail'], 'mailboxes': ['a'], 'since': '2020-01-01', 'full': False})

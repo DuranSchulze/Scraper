@@ -63,6 +63,31 @@ def set_cursor(conn, source: str, mailbox: str, cursor: str) -> None:
     )
 
 
+def record_gmail_success(conn, job_id, mailbox, boundary) -> None:
+    conn.execute(
+        "INSERT INTO job_mailboxes (job_id, mailbox, status, gmail_ok, gmail_boundary)"
+        " VALUES (%s, %s, 'running', true, %s) ON CONFLICT (job_id, mailbox) DO UPDATE"
+        " SET gmail_ok=true, gmail_boundary=least(job_mailboxes.gmail_boundary, EXCLUDED.gmail_boundary)",
+        (job_id, mailbox, boundary),
+    )
+
+
+def publish_scrape_completion(conn, job_id, lineage, finished_at) -> None:
+    job_ids = [*lineage, job_id]
+    conn.execute(
+        "INSERT INTO sync_state (source, mailbox, gmail_complete_at, gmail_boundary)"
+        " SELECT 'gmail', mailbox, %s, min(gmail_boundary) FROM job_mailboxes"
+        " WHERE job_id=ANY(%s) AND gmail_ok GROUP BY mailbox"
+        " ON CONFLICT (source, mailbox) DO UPDATE SET gmail_complete_at=EXCLUDED.gmail_complete_at,"
+        " gmail_boundary=EXCLUDED.gmail_boundary", (finished_at, job_ids),
+    )
+    conn.execute(
+        "UPDATE candidates SET last_scrape_job=%s, last_scraped_at=%s,"
+        " pending_scrape_job=NULL, pending_scraped_at=NULL WHERE pending_scrape_job=ANY(%s)",
+        (job_id, finished_at, job_ids),
+    )
+
+
 def missing_ids(conn, source: str, mailbox: str, ids: list[str], min_version: int = 1, *, refresh=()) -> list[str]:
     """Ids not yet stored (or stored with an older payload version), in input order."""
     have = {
@@ -88,10 +113,11 @@ def outdated_gmail_ids(conn, mailbox: str, min_version: int) -> list[str]:
 
 
 UPSERT_RAW = (
-    "INSERT INTO raw_items (source, mailbox, source_id, payload) VALUES (%s, %s, %s, %s)"
+    "INSERT INTO raw_items (source, mailbox, source_id, payload, last_job) VALUES (%s, %s, %s, %s, %s)"
     " ON CONFLICT (source, mailbox, source_id)"
     # A changed payload must be extracted again.
-    " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now(), extracted_at = NULL, extract_error = NULL"
+    " DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now(), extracted_at = NULL, extract_error = NULL,"
+    " last_job = EXCLUDED.last_job"
 )
 
 
@@ -131,24 +157,24 @@ def _strip_nuls(value):
     return value
 
 
-def upsert_raw(conn, source: str, mailbox: str, source_id: str, payload: dict) -> int | None:
-    return next(iter(upsert_raw_many(conn, source, mailbox, [(source_id, payload)])), None)
+def upsert_raw(conn, source: str, mailbox: str, source_id: str, payload: dict, *, job_id=None) -> int | None:
+    return next(iter(upsert_raw_many(conn, source, mailbox, [(source_id, payload)], job_id=job_id)), None)
 
 
-def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict]]) -> set[int]:
+def upsert_raw_many(conn, source: str, mailbox: str, items: list[tuple[str, dict]], *, job_id=None) -> set[int]:
     if not items:
         return set()
     if source == "gmail" and len({sid for sid, _ in items}) != len(items):
-        return {raw_id for item in items for raw_id in upsert_raw_many(conn, source, mailbox, [item])}
+        return {raw_id for item in items for raw_id in upsert_raw_many(conn, source, mailbox, [item], job_id=job_id)}
     changes = GMAIL_CHANGED if source == "gmail" else "raw_items.payload IS DISTINCT FROM EXCLUDED.payload"
-    args = [(source, mailbox, sid, Jsonb(_strip_nuls(p))) for sid, p in items]
+    args = [(source, mailbox, sid, Jsonb(_strip_nuls(p)), job_id) for sid, p in items]
     # The conflict check locks existing rows even when the change only updates metadata.
     with conn.cursor() as cur:
         cur.executemany(f"{UPSERT_RAW} WHERE {changes} RETURNING id", args, returning=True)
         results = [result.fetchone() for result in cur.results()]
         if source == "gmail":
             cur.executemany(UPDATE_GMAIL_METADATA, [
-                (p, src, mb, sid, p) for (src, mb, sid, p), row in zip(args, results) if row is None
+                (p, src, mb, sid, p) for (src, mb, sid, p, _), row in zip(args, results) if row is None
             ])
     return {row["id"] for row in results if row is not None}
 

@@ -80,6 +80,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
     stopped = Event()
     finished_mailboxes = set()
     changed_ids = set()
+    job_id = getattr(log, "job_id", None)
     progress_lock = Lock()
     resolved = []
 
@@ -111,9 +112,11 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
             with db.connect() as conn:
                 succeeded = True
                 for name, fetch in (("gmail", lambda: gmail.fetch_mailbox(conn, mb, since, full, log,
-                                                                         checkpoint=task_checkpoint, on_changed=on_changed)),
+                                                                         checkpoint=task_checkpoint, on_changed=on_changed,
+                                                                         job_id=job_id)),
                                     ("contacts", lambda: contacts.fetch_contacts(conn, mb, log, full=full,
-                                                                                 checkpoint=task_checkpoint, on_changed=on_changed))):
+                                                                                 checkpoint=task_checkpoint, on_changed=on_changed,
+                                                                                 job_id=job_id))):
                     if name not in sources:
                         continue
                     step = name
@@ -174,7 +177,7 @@ def run_scrape(sources: list[str], mailboxes: list[str], since: str, full: bool,
             with db.connect() as conn:
                 conn.commit()
                 task_checkpoint()
-                sheets.fetch_sheets(conn, ids, log, checkpoint=task_checkpoint, on_changed=on_changed)
+                sheets.fetch_sheets(conn, ids, log, checkpoint=task_checkpoint, on_changed=on_changed, job_id=job_id)
         else:
             log("sheets: DRIVE_SHEET_IDS is empty, skipped")
     task_checkpoint()
