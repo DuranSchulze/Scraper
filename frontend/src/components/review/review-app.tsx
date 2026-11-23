@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AtSign, BookUser, RefreshCw, Search, X } from "lucide-react";
+import { AtSign, BookUser, RefreshCw, Search, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
-import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, masterSummaryQuery, PAGE_SIZE, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
+import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, MORE_KEYS, masterSummaryQuery, PAGE_SIZE, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/shell/page-header";
@@ -20,8 +21,10 @@ import { RecordDetail } from "./record-detail";
 import { RecordsTable } from "./records-table";
 
 // Filter pills (vault filter-pill-set): idle muted, active tinted primary.
-const PILL = "h-8 w-auto min-w-32 rounded-full bg-muted/40 text-sm";
-const PILL_ON = "border-primary bg-primary/10 text-primary-text";
+const PILL = "h-8 w-auto min-w-32 rounded-full border-transparent bg-muted/40 text-sm";
+const PILL_ON = "bg-[color-mix(in_oklab,var(--primary)_16%,transparent)] text-primary-text";
+// Toggle and popover chips: tonal surface, no outline; lift on hover, press on click.
+const CHIP = "h-8 rounded-full border-transparent bg-muted/40 font-normal transition-transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.97] motion-reduce:transform-none";
 const STATE_OPTIONS = [
   { value: "pending", label: "Pending" }, { value: "approved", label: "Confirmed" },
   { value: "rejected", label: "Rejected" }, { value: "merged", label: "Merged" },
@@ -38,9 +41,12 @@ const any = (label: string, values: string[] = []) => [{ value: "", label }, ...
 
 export function ReviewApp() {
   const router = useRouter(), pathname = usePathname(), params = useSearchParams();
+  const state = params.get("state") || "pending";
   const filters: Filters = {
-    state: params.get("state") || "pending",
+    state,
     ...Object.fromEntries(FILTER_KEYS.map((k) => [k, params.get(k) || ""])) as Record<(typeof FILTER_KEYS)[number], string>,
+    // Directory matching exists only for pending records; a match in the URL of another tab is ignored.
+    ...(state !== "pending" && { match: "" }),
     // Unknown URL values fall back to the API default (newest last contact first) instead of a 400.
     sort: params.get("sort") === "first_contact" ? "first_contact" : "last_contact",
     order: params.get("order") === "asc" ? "asc" : "desc",
@@ -54,7 +60,18 @@ export function ReviewApp() {
   const pos = selectedId ? ids.indexOf(selectedId) : -1;
   const { data: facets } = useQuery(facetsQuery(filters.state));
   const filtered = FILTER_KEYS.some((k) => filters[k]);
-  const toggle = (k: "has_phone" | "has_amount") => setParams({ [k]: filters[k] ? null : "true" });
+  const moreCount = MORE_KEYS.filter((k) => filters[k]).length;
+  const toggle = (k: "has_phone" | "has_amount" | "new") => setParams({ [k]: filters[k] ? null : "true" });
+
+  // A newly completed scrape changes which records are "New": refresh an open list.
+  const qc = useQueryClient();
+  const lastScrape = status?.last_complete_scrape_job;
+  const seenScrape = useRef(lastScrape);
+  useEffect(() => {
+    if (lastScrape === undefined) return;
+    if (seenScrape.current !== undefined && seenScrape.current !== lastScrape) qc.invalidateQueries({ queryKey: ["candidates"] });
+    seenScrape.current = lastScrape;
+  }, [lastScrape, qc]);
 
   const href = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
@@ -95,20 +112,8 @@ export function ReviewApp() {
       <PageHeader title="Review" description="Records grouped by date, tagged when a client directory contact has the same email or company domain. Shortcuts in a record: A approve, R reject, J / K next / previous." />
       <DirectoryLine />
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div role="group" aria-label="Review state" className="inline-flex max-w-full overflow-x-auto rounded-full border bg-muted/40 p-0.5">
-          {STATE_OPTIONS.map((o) => {
-            const active = filters.state === o.value;
-            const n = status?.candidates[o.value as ReviewState];
-            return (
-              <button key={o.value} type="button" aria-pressed={active} onClick={() => setParams({ state: o.value === "pending" ? null : o.value, id: null })}
-                className={cn("inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
-                  active ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
-                {o.label}
-                {n != null && <span className={cn("rounded-full px-1.5 text-xs tabular-nums", active ? "bg-primary/10 text-primary-text" : "bg-muted")}>{n.toLocaleString()}</span>}
-              </button>
-            );
-          })}
-        </div>
+        <StateTabs value={filters.state} counts={status?.candidates}
+          onChange={(v) => setParams({ state: v === "pending" ? null : v, id: null, ...(v !== "pending" && { match: null }) })} />
         <div role="group" aria-label="Group records by" className="inline-flex rounded-full bg-muted/40 p-0.5">
           {BUCKETS.map((b) => (
             <button key={b.value} type="button" aria-pressed={bucket === b.value} onClick={() => setParams({ bucket: b.value === "day" ? null : b.value })}
@@ -120,34 +125,53 @@ export function ReviewApp() {
         </div>
       </div>
       <div role="group" aria-label="Filters" className="flex flex-wrap items-center gap-2">
-        <Pick label="Client directory match" value={filters.match} options={MATCH_OPTIONS} onChange={(v) => setParams({ match: v })}
-          className={cn(PILL, "max-w-56", filters.match && PILL_ON)} />
-        <Pick label="Stage" value={filters.stage} options={STAGE_OPTIONS} onChange={(v) => setParams({ stage: v })}
-          className={cn(PILL, filters.stage && PILL_ON)} />
-        <Pick label="Status" value={filters.status} options={STATUS_OPTIONS} onChange={(v) => setParams({ status: v })}
-          className={cn(PILL, filters.status && PILL_ON)} />
-        <Pick label="Department" value={filters.department} options={any("Any department", facets?.departments)}
-          onChange={(v) => setParams({ department: v })} className={cn(PILL, "max-w-56", filters.department && PILL_ON)} />
-        <Pick label="Staff mailbox" value={filters.mailbox} options={any("Any mailbox", facets?.mailboxes)}
-          onChange={(v) => setParams({ mailbox: v })} className={cn(PILL, "max-w-64", filters.mailbox && PILL_ON)} />
-        <Pick label="Service" value={filters.service} options={any("Any service", facets?.services)}
-          onChange={(v) => setParams({ service: v })} className={cn(PILL, "max-w-64", filters.service && PILL_ON)} />
-        <div className="relative">
-          <AtSign aria-hidden className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 shrink-0 -translate-y-1/2 text-muted-foreground" />
-          <Input aria-label="Email domain" placeholder="company.com" value={domain} onChange={(e) => setDomain(e.target.value)}
-            className={cn("h-8 w-40 rounded-full pl-9", domain && PILL_ON)} />
-        </div>
+        <Button size="sm" variant="ghost" aria-pressed={!!filters.new} onClick={() => toggle("new")}
+          className={cn(CHIP, filters.new && PILL_ON)}>
+          <Sparkles aria-hidden className="h-4 w-4 shrink-0" /> New only
+        </Button>
+        {filters.state === "pending" && (
+          <Pick label="Client directory match" value={filters.match} options={MATCH_OPTIONS} onChange={(v) => setParams({ match: v })}
+            className={cn(PILL, "max-w-56", filters.match && PILL_ON)} />
+        )}
         <DateRangeFilter from={filters.date_from} to={filters.date_to}
           onChange={(from, to) => setParams({ date_from: from, date_to: to })}
-          className={cn("h-8 rounded-full bg-muted/40 font-normal", (filters.date_from || filters.date_to) && PILL_ON)} />
-        {(["has_phone", "has_amount"] as const).map((k) => (
-          <Button key={k} size="sm" variant="outline" aria-pressed={!!filters[k]} onClick={() => toggle(k)}
-            className={cn("h-8 rounded-full bg-muted/40 font-normal", filters[k] && PILL_ON)}>
-            {k === "has_phone" ? "Has phone" : "Has amount"}
-          </Button>
-        ))}
+          className={cn(CHIP, (filters.date_from || filters.date_to) && PILL_ON)} />
+        <Popover>
+          <PopoverTrigger render={<Button size="sm" variant="ghost" className={cn(CHIP, moreCount > 0 && PILL_ON)} />}
+            aria-label={moreCount ? `More filters, ${moreCount} active` : "More filters"}>
+            <SlidersHorizontal aria-hidden className="h-4 w-4 shrink-0" /> More filters
+            {moreCount > 0 && <span className="rounded-full bg-primary px-1.5 text-xs font-semibold text-primary-foreground tabular-nums">{moreCount}</span>}
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-80 gap-3 p-3">
+            <div className="grid grid-cols-2 gap-2">
+              <Pick label="Stage" value={filters.stage} options={STAGE_OPTIONS} onChange={(v) => setParams({ stage: v })}
+                className={cn(PILL, "w-full min-w-0", filters.stage && PILL_ON)} />
+              <Pick label="Status" value={filters.status} options={STATUS_OPTIONS} onChange={(v) => setParams({ status: v })}
+                className={cn(PILL, "w-full min-w-0", filters.status && PILL_ON)} />
+            </div>
+            <Pick label="Department" value={filters.department} options={any("Any department", facets?.departments)}
+              onChange={(v) => setParams({ department: v })} className={cn(PILL, "w-full", filters.department && PILL_ON)} />
+            <Pick label="Staff mailbox" value={filters.mailbox} options={any("Any mailbox", facets?.mailboxes)}
+              onChange={(v) => setParams({ mailbox: v })} className={cn(PILL, "w-full", filters.mailbox && PILL_ON)} />
+            <Pick label="Service" value={filters.service} options={any("Any service", facets?.services)}
+              onChange={(v) => setParams({ service: v })} className={cn(PILL, "w-full", filters.service && PILL_ON)} />
+            <div className="relative">
+              <AtSign aria-hidden className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 shrink-0 -translate-y-1/2 text-muted-foreground" />
+              <Input aria-label="Email domain" placeholder="company.com" value={domain} onChange={(e) => setDomain(e.target.value)}
+                className={cn("h-8 w-full rounded-full border-transparent bg-muted/40 pl-9", domain && PILL_ON)} />
+            </div>
+            <div className="flex gap-2">
+              {(["has_phone", "has_amount"] as const).map((k) => (
+                <Button key={k} size="sm" variant="ghost" aria-pressed={!!filters[k]} onClick={() => toggle(k)}
+                  className={cn(CHIP, "flex-1", filters[k] && PILL_ON)}>
+                  {k === "has_phone" ? "Has phone" : "Has amount"}
+                </Button>
+              ))}
+            </div>
+          </PopoverContent>
+        </Popover>
         {filtered && (
-          <Button size="sm" variant="outline" className="h-8 rounded-full text-muted-foreground hover:border-destructive/40 hover:text-destructive"
+          <Button size="sm" variant="ghost" className="h-8 rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
             onClick={() => { setQ(""); setDomain(""); setParams(Object.fromEntries(FILTER_KEYS.map((k) => [k, null]))); }}>
             <X className="h-4 w-4 shrink-0" /> Clear filters
           </Button>
@@ -177,6 +201,45 @@ export function ReviewApp() {
                 )}
               </SheetContent>
             </Sheet>
+    </div>
+  );
+}
+
+/** Pending / Confirmed / Rejected / Merged: a solid brand pill slides under the selected tab. */
+function StateTabs({ value, counts, onChange }: {
+  value: string; counts?: Partial<Record<ReviewState, number>>; onChange: (v: string) => void;
+}) {
+  const refs = useRef(new Map<string, HTMLButtonElement>());
+  const [box, setBox] = useState<{ left: number; width: number } | null>(null);
+  // Measure the selected tab; counts change its width, so remeasure when they arrive.
+  useLayoutEffect(() => {
+    const el = refs.current.get(value);
+    if (el) setBox({ left: el.offsetLeft, width: el.offsetWidth });
+  }, [value, counts]);
+  return (
+    <div role="group" aria-label="Review state" className="relative inline-flex max-w-full overflow-x-auto rounded-full bg-muted/60 p-1">
+      {box && (
+        <span aria-hidden style={{ left: box.left, width: box.width }}
+          className="absolute top-1 bottom-1 rounded-full bg-primary shadow-sm transition-[left,width] duration-300 ease-out motion-reduce:transition-none" />
+      )}
+      {STATE_OPTIONS.map((o) => {
+        const active = value === o.value;
+        const n = counts?.[o.value as ReviewState];
+        return (
+          <button key={o.value} type="button" aria-pressed={active} onClick={() => onChange(o.value)}
+            ref={(el) => { if (el) refs.current.set(o.value, el); else refs.current.delete(o.value); }}
+            className={cn("relative z-10 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-sm transition-[color,transform] duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:scale-[0.97] motion-reduce:transform-none",
+              active ? "font-semibold text-primary-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>
+            {o.label}
+            {n != null && (
+              <span className={cn("rounded-full px-1.5 text-xs tabular-nums",
+                active ? "bg-[color-mix(in_oklab,var(--primary-foreground)_16%,transparent)]" : "bg-[color-mix(in_oklab,var(--muted-foreground)_16%,transparent)]")}>
+                {n.toLocaleString()}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

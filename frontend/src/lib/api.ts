@@ -57,8 +57,8 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return data as T;
 }
 
-/** Like request(), but also returns the X-Total-Count header (number of rows across all pages). */
-async function requestWithTotal<T>(path: string): Promise<{ rows: T; total: number }> {
+/** Like request(), but also returns X-Total-Count (rows across all pages) and X-Scrape-Job (the scrape "New" refers to). */
+async function requestWithTotal<T>(path: string): Promise<{ rows: T; total: number; scrapeJob: number | null }> {
   const res = await fetch(path, { headers: { "X-Local-GUI": "1" } });
   if (!res.ok) {
     // Re-ask through request() for its error message; if that retry succeeds, still fail so the query retries
@@ -67,7 +67,8 @@ async function requestWithTotal<T>(path: string): Promise<{ rows: T; total: numb
     throw new ApiError(res.status, res.statusText || "Request failed");
   }
   const rows = (await res.json()) as T;
-  return { rows, total: Number(res.headers.get("X-Total-Count") ?? (rows as unknown[]).length) };
+  return { rows, total: Number(res.headers.get("X-Total-Count") ?? (rows as unknown[]).length),
+    scrapeJob: Number(res.headers.get("X-Scrape-Job")) || null };
 }
 
 export const post = <T = { ok: boolean }>(path: string, body?: unknown) =>
@@ -77,10 +78,12 @@ export type SortKey = "last_contact" | "first_contact";
 export type Filters = {
   state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc"; page: number;
   mailbox: string; service: string; domain: string; has_phone: string; has_amount: string; date_from: string; date_to: string;
-  match: string;
+  match: string; new: string;
 };
 /** Filter keys kept in the URL; empty means "no filter" (the API ignores empty values). */
-export const FILTER_KEYS = ["stage", "status", "department", "mailbox", "service", "domain", "has_phone", "has_amount", "date_from", "date_to", "match", "q"] as const;
+export const FILTER_KEYS = ["stage", "status", "department", "mailbox", "service", "domain", "has_phone", "has_amount", "date_from", "date_to", "match", "new", "q"] as const;
+/** Filters tucked into the "More filters" popover; the rest stay on the bar. */
+export const MORE_KEYS = ["stage", "status", "department", "mailbox", "service", "domain", "has_phone", "has_amount"] as const;
 import type { Bucket } from "./timeline";
 export type { Bucket };
 export type Facets = { departments: string[]; mailboxes: string[]; services: string[] };
@@ -101,7 +104,7 @@ export const keys = {
   roles: ["roles"] as const,
   schedule: ["schedule"] as const,
   // Under "candidates", so every review action that refreshes the list refreshes the section counts too.
-  timeline: (f: Filters, bucket: Bucket) => ["candidates", "timeline", f, bucket] as const,
+  timeline: (f: Filters, bucket: Bucket, scrapeJob: number | null) => ["candidates", "timeline", f, bucket, scrapeJob] as const,
   // Under "candidates" too: a job ending or a review action refreshes it.
   master: ["candidates", "master-summary"] as const,
 };
@@ -126,18 +129,24 @@ export const statusQuery = queryOptions({
   retry: false,
 });
 
+/** Query string without empty values: typed API params (e.g. new: bool) reject "". */
+const qs = (o: Record<string, string>) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== ""));
+
 export const candidatesQuery = (f: Filters) => queryOptions({
   queryKey: keys.candidates(f),
-  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + new URLSearchParams({ ...f, page: String(f.page), size: String(PAGE_SIZE) })),
+  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + qs({ ...f, page: String(f.page), size: String(PAGE_SIZE) })),
   placeholderData: (prev) => prev,
 });
 
 /** Section counts for the review timeline: same filters as the list, every page, grouped by the sort field's date. */
-export const timelineQuery = (f: Filters, bucket: Bucket) => queryOptions({
-  queryKey: keys.timeline(f, bucket),
+// Pinned to the list's scrape: a 409 means a newer scrape completed in between, so list and timeline refetch together.
+export const timelineQuery = (f: Filters, bucket: Bucket, scrapeJob: number | null) => queryOptions({
+  queryKey: keys.timeline(f, bucket, scrapeJob),
   // Page and order don't change section totals; the API ignores them.
-  queryFn: () => request<TimelineBucket[]>("/api/candidates/timeline?" + new URLSearchParams({ ...f, page: String(f.page), field: f.sort, bucket })),
+  queryFn: () => request<TimelineBucket[]>("/api/candidates/timeline?" + qs({
+    ...f, page: String(f.page), field: f.sort, bucket, ...(scrapeJob ? { scrape_job: String(scrapeJob) } : {}) })),
   placeholderData: (prev) => prev,
+  retry: (n, e) => !(e instanceof ApiError && e.status === 409) && n < 3,
 });
 
 export const masterSummaryQuery = queryOptions({

@@ -29,6 +29,9 @@ export type Status = {
   job_finished_at: string | null;
   /** Stage of the running or paused job; null when idle or without the Scraping page. */
   job_progress: JobProgress | null;
+  /** Latest scrape that genuinely completed; "New" records belong to it. */
+  last_complete_scrape_job: number | null;
+  last_complete_scrape_at: string | null;
 };
 
 export type JobProgress = { stage: "fetch" | "extract" | "tag"; done: number; total: number; started_at: string };
@@ -65,6 +68,10 @@ export type CandidateRow = {
   master_names: string[];
   /** Mailboxes this record was found in, busiest first. */
   mailboxes: string[];
+  /** Got new or changed data in the latest completed scrape. */
+  is_new: boolean;
+  /** When the scrape that last brought new data for this record finished. */
+  last_scraped_at: string | null;
 };
 
 export type MailboxState = "pending" | "running" | "done" | "failed" | "skipped";
@@ -140,6 +147,7 @@ export type Role = RoleRef & { routes: RouteKey[]; locked: boolean; users: numbe
 export type User = { id: number; email: string; name: string; role: RoleRef; routes: RouteKey[] };
 export type Account = User & { active: boolean; created_at: string };
 
-export type MasterMatch = "email" | "domain";
+/** "none": a pending record checked against the directory with no match. null: not checked, or not pending. */
+export type MasterMatch = "email" | "domain" | "none";
 /** One section of the review timeline: counts across every page for one day (or ISO week, keyed by its Monday). */
 export type TimelineBucket = { bucket: string | null; total: number; email: number; domain: number };

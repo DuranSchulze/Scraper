@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Inbox, Loader2, Mail, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Inbox, Loader2, Mail, Sparkles, UserX, X } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { candidatesQuery, keys, PAGE_SIZE, post, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
+import { ApiError, candidatesQuery, keys, PAGE_SIZE, post, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow, TimelineBucket } from "@/lib/types";
 import { sections } from "@/lib/timeline";
@@ -54,6 +54,8 @@ export function pageList(page: number, pages: number): (number | "…")[] {
   return keep.flatMap((p, i) => i === 0 || p - keep[i - 1] === 1 ? [p] : p - keep[i - 1] === 2 ? [p - 1, p] : ["…" as const, p]);
 }
 
+// Local time: when the user's own scrape finished.
+const SCRAPED = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
 const DATE_LABEL = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const sectionLabel = (key: string | null, bucket: Bucket) =>
   key === null ? "No date" : `${bucket === "week" ? "Week of " : ""}${DATE_LABEL.format(new Date(`${key}T00:00:00Z`))}`;
@@ -80,7 +82,16 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
     );
   };
   const { data, error, isPending, isPlaceholderData } = useQuery(candidatesQuery(filters));
-  const { data: timeline } = useQuery(timelineQuery(filters, bucket));
+  const { data: timeline, error: timelineError } = useQuery({ ...timelineQuery(filters, bucket, data?.scrapeJob ?? null), enabled: !!data });
+  const qc = useQueryClient();
+  // A newer scrape completed between the list and timeline reads: refetch the list only. Its new X-Scrape-Job
+  // re-keys the timeline; refetching everything would rerun the stale timeline and cancel the list fetch (a loop).
+  const stale = timelineError instanceof ApiError && timelineError.status === 409;
+  const listKey = keys.candidates(filters);
+  useEffect(() => {
+    if (stale) qc.invalidateQueries({ queryKey: listKey, exact: true }, { cancelRefetch: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new 409 should trigger this
+  }, [stale, qc]);
   const totals = new Map<string | null, TimelineBucket>((timeline ?? []).map((b) => [b.bucket, b]));
   // A new page or filter is loading over the previous result: show skeletons, not the old rows (they looked frozen).
   // Same-page background refreshes are not placeholder data, so they never flash.
@@ -103,7 +114,6 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
     if (on) next.add(id); else next.delete(id);
     setTicked(next);
   };
-  const qc = useQueryClient();
   const [ask, setAsk] = useState<"approve" | "reject" | null>(null);
   const guard = useGuarded("bulk");
   const act = useMutation({
@@ -283,13 +293,20 @@ function SectionRows({ label, onPage, totals, children }: { label: string; onPag
   );
 }
 
-/** Directory tag: the client company (or companies) whose contacts hold this email or its company domain. */
-function MatchBadge({ r }: { r: CandidateRow }) {
-  if (!r.master_match) return null;
+/** Directory chip (pending records only): in the directory by email, by company domain, or checked and not in it. */
+function DirectoryChip({ r }: { r: CandidateRow }) {
+  if (r.review_state !== "pending" || !r.master_match) return null;
+  if (r.master_match === "none") {
+    return (
+      <Pill tone="neutral" className="mt-1 gap-1 self-start">
+        <UserX aria-hidden className="h-3 w-3 shrink-0" /> Not in directory
+      </Pill>
+    );
+  }
   const names = r.master_names.map((n) => n.trim() || "Unnamed company");
   const email = r.master_match === "email";
   const Icon = email ? AtSign : Building2;
-  const text = email ? "Exact email" : "Same domain";
+  const text = email ? "In directory" : "Company in directory";
   return (
     <Tooltip>
       <TooltipTrigger type="button" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}
@@ -367,7 +384,7 @@ function Row({ r, selected, onSelect, ticked, onTick }: {
       onClick={() => onSelect(r.id)} onKeyDown={(e) => e.key === "Enter" && onSelect(r.id)}
       className={cn("group cursor-pointer border-border/50 align-top hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring",
         selected && "bg-accent hover:bg-accent")}>
-      <TableCell className={cn(PINNED, "max-w-72 pl-4", confirmed && "shadow-[inset_3px_0_0_var(--success)]")}>
+      <TableCell className={cn(PINNED, "max-w-72 pl-4", confirmed ? "shadow-[inset_3px_0_0_var(--success)]" : r.is_new && "shadow-[inset_3px_0_0_var(--primary)]")}>
         <div className="flex min-w-0 items-start gap-3">
         {ticked !== null && (
           <span onClick={stop} onKeyDown={stop} className="pt-0.5">
@@ -382,11 +399,21 @@ function Row({ r, selected, onSelect, ticked, onTick }: {
                 <CheckCircle2 aria-hidden className="h-3 w-3 shrink-0" /> Confirmed
               </Pill>
             )}
+            {r.is_new && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--primary)_16%,transparent)] px-1.5 py-0.5 text-xs font-medium text-primary-text">
+                <Sparkles aria-hidden className="h-3 w-3 shrink-0" /> New
+              </span>
+            )}
           </span>
+          {r.last_scraped_at && (
+            <span className={cn("text-xs", r.is_new ? "text-primary-text" : "text-muted-foreground")}>
+              Scraped {SCRAPED.format(new Date(r.last_scraped_at))}
+            </span>
+          )}
           <span className="truncate text-xs text-muted-foreground" title={r.email_key}>{r.email_key}</span>
           {r.company && <span className="truncate text-xs text-muted-foreground" title={r.company}>{r.company}</span>}
           <span className="flex min-w-0 flex-wrap items-center gap-1">
-            <MatchBadge r={r} />
+            <DirectoryChip r={r} />
             <MailboxChip mailboxes={r.mailboxes} />
           </span>
         </div>

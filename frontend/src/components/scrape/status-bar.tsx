@@ -115,7 +115,7 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
         <div className="flex flex-col gap-1 border-t px-4 py-2 text-xs lg:px-6">
           {error && <p role="alert" className="text-destructive">{error.message} Retrying every few seconds…</p>}
           {note && <p role="status" className={s?.job_status === "failed" ? "break-words text-destructive" : "text-muted-foreground"}>{note}</p>}
-          {canScrape && !!s?.extract_failed && <p className="font-medium text-warning">{s.extract_failed} item(s) failed extraction and will be retried on the next run.</p>}
+          {canScrape && !!s?.extract_failed && <p className="font-medium text-warning">{s.extract_failed} item(s) failed extraction. Failed items are retried when their source data changes or after a full re-extract.</p>}
         </div>
       )}
 
