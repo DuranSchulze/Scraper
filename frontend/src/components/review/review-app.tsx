@@ -22,10 +22,10 @@ import { RecordDetail } from "./record-detail";
 import { RecordsTable } from "./records-table";
 
 // Filter pills (vault filter-pill-set): idle muted, active tinted primary.
-const PILL = "h-8 w-auto min-w-32 rounded-full border-transparent bg-muted/40 text-sm";
+const PILL = "h-8 w-auto min-w-32 rounded-full bg-muted/40 text-sm";
 const PILL_ON = "bg-[color-mix(in_oklab,var(--primary)_16%,transparent)] text-primary-text";
 // Toggle and popover chips: tonal surface, no outline; lift on hover, press on click.
-const CHIP = "h-8 rounded-full border-transparent bg-muted/40 font-normal transition-transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.97] motion-reduce:transform-none";
+const CHIP = "h-8 rounded-full bg-muted/40 font-normal transition-transform hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.97] motion-reduce:transform-none";
 const STATE_OPTIONS = [
   { value: "pending", label: "Pending" }, { value: "approved", label: "Confirmed" },
   { value: "rejected", label: "Rejected" }, { value: "merged", label: "Merged" },
@@ -121,7 +121,7 @@ export function ReviewApp() {
         <div role="group" aria-label="Group records by" className="inline-flex rounded-full bg-muted/40 p-0.5">
           {BUCKETS.map((b) => (
             <button key={b.value} type="button" aria-pressed={bucket === b.value} onClick={() => setParams({ bucket: b.value === "day" ? null : b.value })}
-              className={cn("inline-flex h-7 items-center rounded-full px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+              className={cn("inline-flex h-7 items-center rounded-full border border-border px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
                 bucket === b.value ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
               By {b.label.toLowerCase()}
             </button>
@@ -232,7 +232,7 @@ function StateTabs({ value, counts, onChange }: {
         return (
           <button key={o.value} type="button" aria-pressed={active} onClick={() => onChange(o.value)}
             ref={(el) => { if (el) refs.current.set(o.value, el); else refs.current.delete(o.value); }}
-            className={cn("relative z-10 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-sm transition-[color,transform] duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:scale-[0.97] motion-reduce:transform-none",
+            className={cn("relative z-10 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-border px-3.5 text-sm transition-[color,transform] duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:scale-[0.97] motion-reduce:transform-none",
               active ? "font-semibold text-primary-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>
             {o.label}
             {n != null && (

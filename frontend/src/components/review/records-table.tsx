@@ -74,7 +74,7 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
       <TableHead className="w-32" aria-sort={active ? (filters.order === "asc" ? "ascending" : "descending") : "none"}>
         <button type="button" onClick={() => onSort(key)}
           title={active && filters.order === "asc" ? "Oldest first. Click for newest first" : "Click to sort oldest first"}
-          className={cn("-ml-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-1 hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+          className={cn("-ml-1.5 inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-1 hover:bg-background hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
             active && "text-foreground")}>
           {label}<Icon aria-hidden className={cn("h-3.5 w-3.5 shrink-0", !active && "opacity-50")} />
         </button>

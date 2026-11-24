@@ -62,7 +62,7 @@ export function LoginForm() {
             <Input id="password" type={show ? "text" : "password"} autoComplete="current-password" required value={password}
               className="h-10 pr-10" onChange={(e) => setPassword(e.target.value)} aria-invalid={!!error} />
             <button type="button" onClick={() => setShow((v) => !v)} aria-label={show ? "Hide password" : "Show password"} aria-pressed={show}
-              className="absolute top-1/2 right-1 flex size-8 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+              className="absolute top-1/2 right-1 flex size-8 -translate-y-1/2 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring">
               {show ? <EyeOff className="h-4 w-4 shrink-0" /> : <Eye className="h-4 w-4 shrink-0" />}
             </button>
           </div>

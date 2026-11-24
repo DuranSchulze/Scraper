@@ -61,7 +61,7 @@ export function LogsView() {
         actions={
           <div data-print="hide" className="flex flex-wrap items-center gap-2">
             <DateRangeFilter from={range.from} to={range.to} onChange={setRange}
-              className="h-8 rounded-full border-transparent bg-muted/40 font-normal" />
+              className="h-8 rounded-full bg-muted/40 font-normal" />
             <ExportMenu range={range} />
           </div>
         } />
@@ -76,7 +76,7 @@ export function LogsView() {
             className="absolute top-[var(--active-tab-top)] left-[var(--active-tab-left)] h-[var(--active-tab-height)] w-[var(--active-tab-width)] rounded-full bg-primary shadow-sm transition-[left,top,width] duration-300 ease-out motion-reduce:transition-none" />
           {([["runs", "Scrape runs"], ["daily", "Daily totals"], ["published", "Added to directory"]] as const).map(([v, label]) => (
             <TabsPrimitive.Tab key={v} value={v}
-              className="relative z-10 inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full px-2.5 text-[13px] font-medium sm:px-3.5 sm:text-sm text-muted-foreground transition-[color,transform] duration-200 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-safe:active:scale-[0.97] data-active:font-semibold data-active:text-primary-foreground data-active:hover:text-primary-foreground">
+              className="relative z-10 inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full border border-border px-2.5 text-[13px] font-medium sm:px-3.5 sm:text-sm text-muted-foreground transition-[color,transform] duration-200 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-safe:active:scale-[0.97] data-active:font-semibold data-active:text-primary-foreground data-active:hover:text-primary-foreground">
               {/* Only on the narrowest phones (under 360px) would the full label overflow; there it shortens, keeping its full accessible name. */}
               {v === "published" ? <><span aria-hidden className="min-[360px]:hidden">Directory</span><span className="max-[359px]:sr-only">{label}</span></> : label}
             </TabsPrimitive.Tab>
@@ -91,7 +91,7 @@ export function LogsView() {
 }
 
 function ExportMenu({ range }: { range: LogRange }) {
-  const item = "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring";
+  const item = "flex w-full items-center gap-2 rounded-md border border-border px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring";
   // Print in the light theme so the PDF is readable on paper, then restore the viewer's theme.
   const print = () => {
     const html = document.documentElement, prev = html.getAttribute("data-theme");
@@ -127,7 +127,7 @@ function ExportMenu({ range }: { range: LogRange }) {
 
 function Tile({ icon: Icon, label, value, sub }: { icon: typeof Inbox; label: string; value: React.ReactNode; sub?: React.ReactNode }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-xl bg-card p-4">
+    <div className="flex min-w-0 flex-col gap-1 rounded-xl border bg-card p-4">
       <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />{label}
       </span>
