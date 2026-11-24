@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs as TabsPrimitive } from "@base-ui/react/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/shell/page-header";
 import { Pill } from "@/components/review/badges";
@@ -68,11 +69,19 @@ export function LogsView() {
       <SummaryTiles range={range} />
       {/* keepMounted: print shows every panel (globals.css), so each table must be in the DOM. */}
       <Tabs value={tab} onValueChange={(v) => setParam("tab", String(v))} className="gap-4">
-        <TabsList data-print="hide" aria-label="Log tables" className="max-w-full overflow-x-auto">
-          <TabsTrigger value="runs">Scrape runs</TabsTrigger>
-          <TabsTrigger value="daily">Daily totals</TabsTrigger>
-          <TabsTrigger value="published">Added to directory</TabsTrigger>
-        </TabsList>
+        {/* Same look as Review's state tabs: muted track, solid brand pill sliding under the selected tab. */}
+        <TabsPrimitive.List data-print="hide" aria-label="Log tables"
+          className="relative inline-flex w-fit max-w-full rounded-full bg-muted/60 p-1">
+          <TabsPrimitive.Indicator
+            className="absolute top-[var(--active-tab-top)] left-[var(--active-tab-left)] h-[var(--active-tab-height)] w-[var(--active-tab-width)] rounded-full bg-primary shadow-sm transition-[left,top,width] duration-300 ease-out motion-reduce:transition-none" />
+          {([["runs", "Scrape runs"], ["daily", "Daily totals"], ["published", "Added to directory"]] as const).map(([v, label]) => (
+            <TabsPrimitive.Tab key={v} value={v}
+              className="relative z-10 inline-flex h-8 shrink-0 items-center whitespace-nowrap rounded-full px-2.5 text-[13px] font-medium sm:px-3.5 sm:text-sm text-muted-foreground transition-[color,transform] duration-200 hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring motion-safe:active:scale-[0.97] data-active:font-semibold data-active:text-primary-foreground data-active:hover:text-primary-foreground">
+              {/* Only on the narrowest phones (under 360px) would the full label overflow; there it shortens, keeping its full accessible name. */}
+              {v === "published" ? <><span aria-hidden className="min-[360px]:hidden">Directory</span><span className="max-[359px]:sr-only">{label}</span></> : label}
+            </TabsPrimitive.Tab>
+          ))}
+        </TabsPrimitive.List>
         <TabsContent value="runs" keepMounted><JobsTable range={range} /></TabsContent>
         <TabsContent value="daily" keepMounted><DailyTable range={range} /></TabsContent>
         <TabsContent value="published" keepMounted><PublishedTable range={range} /></TabsContent>
@@ -93,7 +102,7 @@ function ExportMenu({ range }: { range: LogRange }) {
   };
   return (
     <Popover>
-      <PopoverTrigger render={<Button size="sm" className="h-8 rounded-full transition-transform hover:-translate-y-0.5 active:scale-[0.97] motion-reduce:transform-none" />}>
+      <PopoverTrigger render={<Button size="sm" className="h-8 rounded-full transition-transform motion-safe:hover:-translate-y-0.5 motion-safe:active:scale-[0.97]" />}>
         <Download aria-hidden className="h-4 w-4 shrink-0" /> Export
       </PopoverTrigger>
       <PopoverContent align="end" className="w-64 gap-1 p-1.5">
