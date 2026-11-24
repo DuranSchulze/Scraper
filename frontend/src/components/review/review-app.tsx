@@ -58,7 +58,7 @@ export function ReviewApp() {
   const bucket: Bucket = params.get("bucket") === "week" ? "week" : "day";
   const selectedId = Number(params.get("id")) || null;
   const { data: status } = useQuery(statusQuery);
-  const { data: list } = useQuery(candidatesQuery(filters));
+  const { data: list, dataUpdatedAt: listAt } = useQuery(candidatesQuery(filters));
   const ids = list?.rows.map((r) => r.id) ?? [];
   const pos = selectedId ? ids.indexOf(selectedId) : -1;
   const { data: facets } = useQuery(facetsQuery(filters.state));
@@ -71,10 +71,10 @@ export function ReviewApp() {
   const qc = useQueryClient();
   const lastScrape = status?.last_complete_scrape_job ?? null;
   const listScrape = list?.scrapeJob ?? null;
+  // listAt (0 until the list resolves) rechecks on every list response, also a late one with the same null generation.
   useEffect(() => {
-    if (lastScrape !== null && list && (listScrape ?? 0) < lastScrape) qc.invalidateQueries({ queryKey: ["candidates"] });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only the two scrape ids matter
-  }, [lastScrape, listScrape, qc]);
+    if (lastScrape !== null && listAt > 0 && (listScrape ?? 0) < lastScrape) qc.invalidateQueries({ queryKey: ["candidates"] });
+  }, [lastScrape, listScrape, listAt, qc]);
 
   const href = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);

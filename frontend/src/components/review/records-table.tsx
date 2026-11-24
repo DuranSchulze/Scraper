@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/pagination";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ApiError, candidatesQuery, keys, PAGE_SIZE, post, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
+import { ApiError, candidatesQuery, keys, PAGE_SIZE, post, statusQuery, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
 import { day, money } from "@/lib/format";
 import type { CandidateRow, TimelineBucket } from "@/lib/types";
 import { sections } from "@/lib/timeline";
@@ -82,7 +82,11 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
     );
   };
   const { data, error, isPending, isPlaceholderData } = useQuery(candidatesQuery(filters));
-  const { data: timeline, error: timelineError } = useQuery({ ...timelineQuery(filters, bucket, data?.scrapeJob ?? null), enabled: !!data });
+  // Totals wait until the list belongs to the latest completed scrape; a stale list is being refetched.
+  const { data: status } = useQuery(statusQuery);
+  const latest = status?.last_complete_scrape_job ?? null;
+  const current = !!data && (latest === null || (data.scrapeJob ?? 0) >= latest);
+  const { data: timeline, error: timelineError } = useQuery({ ...timelineQuery(filters, bucket, data?.scrapeJob ?? null), enabled: current });
   const qc = useQueryClient();
   // A newer scrape completed between the list and timeline reads: refetch the list only. Its new X-Scrape-Job
   // re-keys the timeline; refetching everything would rerun the stale timeline and cancel the list fetch (a loop).
@@ -92,7 +96,7 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
     if (stale) qc.invalidateQueries({ queryKey: listKey, exact: true }, { cancelRefetch: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new 409 should trigger this
   }, [stale, qc]);
-  const totals = new Map<string | null, TimelineBucket>((timeline ?? []).map((b) => [b.bucket, b]));
+  const totals = new Map<string | null, TimelineBucket>((current ? timeline ?? [] : []).map((b) => [b.bucket, b]));
   // A new page or filter is loading over the previous result: show skeletons, not the old rows (they looked frozen).
   // Same-page background refreshes are not placeholder data, so they never flash.
   const turning = isPlaceholderData;
