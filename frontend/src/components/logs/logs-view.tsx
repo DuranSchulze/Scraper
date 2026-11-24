@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Printer, Timer, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PageHeader } from "@/components/shell/page-header";
 import { Pill } from "@/components/review/badges";
@@ -39,14 +40,19 @@ function duration(seconds: number | null) {
 }
 
 export function LogsView() {
-  const router = useRouter(), pathname = usePathname(), params = useSearchParams();
+  const pathname = usePathname(), params = useSearchParams();
   const fallback = defaultRange();
   const range: LogRange = { from: params.get("from") || fallback.from, to: params.get("to") || fallback.to };
-  const setRange = (from: string, to: string) => {
-    const next = new URLSearchParams(params);
-    for (const [k, v] of Object.entries({ from, to })) if (v) next.set(k, v); else next.delete(k);
-    router.replace(`${pathname}?${next}`, { scroll: false });
+  const tab = ["daily", "published"].includes(params.get("tab") ?? "") ? params.get("tab")! : "runs";
+  const replace = (set: Record<string, string>) => {
+    // Read the live URL, not this render's params, so back-to-back updates (range then tab) both survive.
+    const next = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(set)) if (v) next.set(k, v); else next.delete(k);
+    // replaceState writes the URL at once (Next syncs useSearchParams), so the next update sees it.
+    window.history.replaceState(null, "", `${pathname}?${next}`);
   };
+  const setRange = (from: string, to: string) => replace({ from, to });
+  const setParam = (k: string, v: string) => replace({ [k]: v });
 
   return (
     <div className="flex flex-col gap-5">
@@ -60,11 +66,17 @@ export function LogsView() {
         } />
       <p className="hidden text-sm print:block">Report for {range.from} to {range.to}, Philippine time.</p>
       <SummaryTiles range={range} />
-      <JobsTable range={range} />
-      <div className="grid gap-5 xl:grid-cols-2">
-        <DailyTable range={range} />
-        <PublishedTable range={range} />
-      </div>
+      {/* keepMounted: print shows every panel (globals.css), so each table must be in the DOM. */}
+      <Tabs value={tab} onValueChange={(v) => setParam("tab", String(v))} className="gap-4">
+        <TabsList data-print="hide" aria-label="Log tables" className="max-w-full overflow-x-auto">
+          <TabsTrigger value="runs">Scrape runs</TabsTrigger>
+          <TabsTrigger value="daily">Daily totals</TabsTrigger>
+          <TabsTrigger value="published">Added to directory</TabsTrigger>
+        </TabsList>
+        <TabsContent value="runs" keepMounted><JobsTable range={range} /></TabsContent>
+        <TabsContent value="daily" keepMounted><DailyTable range={range} /></TabsContent>
+        <TabsContent value="published" keepMounted><PublishedTable range={range} /></TabsContent>
+      </Tabs>
     </div>
   );
 }

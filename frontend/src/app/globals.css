@@ -228,3 +228,7 @@ html[data-sidebar-ready] .sb-label { transition: opacity 0.15s ease 0.05s; }
   .sb-aside, .sb-spacer, [data-print="hide"] { display: none !important; }
   main { padding: 0 !important; }
 }
+/* Logs prints every tab's table, not only the open one. In the base layer so it outranks Tailwind's layered [hidden] !important. */
+@layer base {
+  @media print { [data-slot="tabs-content"][hidden] { display: block !important; margin-top: 1.25rem; } }
+}
