@@ -232,7 +232,7 @@ function StateTabs({ value, counts, onChange }: {
         return (
           <button key={o.value} type="button" aria-pressed={active} onClick={() => onChange(o.value)}
             ref={(el) => { if (el) refs.current.set(o.value, el); else refs.current.delete(o.value); }}
-            className={cn("relative z-10 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-border px-3.5 text-sm transition-[color,transform] duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:scale-[0.97] motion-reduce:transform-none",
+            className={cn("relative z-10 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3.5 text-sm transition-[color,transform] duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring active:scale-[0.97] motion-reduce:transform-none",
               active ? "font-semibold text-primary-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>
             {o.label}
             {n != null && (
