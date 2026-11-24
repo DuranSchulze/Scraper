@@ -1169,6 +1169,41 @@ def test_extract_gives_up_after_repeated_connection_drops(conn, monkeypatch):
         pipeline.run_extract(lambda _: None)
 
 
+def test_scoped_extract_binds_only_each_id_slice_and_retries_it(conn, monkeypatch):
+    unrelated = seed(conn, "unrelated", "unrelated@client.test")
+    ids = [seed(conn, f"scoped-{i}", f"p{i}@client.test") for i in range(7)]
+    conn.execute("UPDATE raw_items SET extracted_at=now() WHERE id=ANY(%s)", (ids[2:5],))
+    conn.commit()
+    monkeypatch.setenv("EXTRACT_BACKLOG_MINUTES", "0")
+    monkeypatch.setattr(pipeline, "BATCH", 2)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
+    queried, counted = [], []
+    execute = pipeline.psycopg.Connection.execute
+    rebuild = pipeline.rebuild
+
+    def record_query(connection, query, params=None, **kwargs):
+        if "FROM raw_items WHERE" in query and "id=ANY(%s)" in query:
+            (counted if query.startswith("SELECT count(*)") else queried).append(params[0])
+        return execute(connection, query, params, **kwargs)
+
+    def drop_once(connection, keys, rules, now):
+        if "p5@client.test" in keys and queried.count(ids[4:6]) == 1:
+            raise pipeline.psycopg.OperationalError("connection lost during a batch")
+        return rebuild(connection, keys, rules, now)
+
+    monkeypatch.setattr(pipeline.psycopg.Connection, "execute", record_query)
+    monkeypatch.setattr(pipeline, "rebuild", drop_once)
+    lines = []
+    pipeline.run_extract(lines.append, raw_ids=set(ids))
+
+    expected = [ids[:2], ids[2:4], ids[4:6], ids[6:]]
+    assert counted == expected
+    assert queried == [*expected[:3], expected[2], expected[3]]
+    assert conn.execute("SELECT id FROM raw_items WHERE extracted_at IS NULL").fetchall() == [{"id": unrelated}]
+    assert set(candidates(conn)) == {"p0@client.test", "p1@client.test", "p5@client.test", "p6@client.test"}
+    assert lines[-1] == "extract: done (4 items, 0 failed)"
+
+
 def test_progress_full_reset_batch_retry_and_failed_items(conn, monkeypatch):
     from scraper import app as api
 

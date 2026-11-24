@@ -1,5 +1,6 @@
 """Scrape (fetch from Google) and extract (raw_items -> signals -> candidates) jobs."""
 
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from threading import Event, Lock
@@ -237,10 +238,9 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
     extract_total = None
     signal_data = ", data" if qualifying_jobs else ""
     pending_filter = "extracted_at IS NULL AND extract_error IS NULL"
-    filters = ()
-    if raw_ids is not None:
+    work_ids = sorted(raw_ids) if raw_ids is not None else None
+    if work_ids is not None:
         pending_filter += " AND id=ANY(%s)"
-        filters = (sorted(raw_ids),)
 
     def progress(conn, done):
         if backlog:
@@ -279,9 +279,15 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                         first = conn.execute(f"SELECT min(id) AS id FROM raw_items WHERE {pending_filter}").fetchone()["id"]
                         if first is not None:
                             last_id = first - 1
-                if backlog or raw_ids is not None:
+                if work_ids is not None:
+                    with conn.pipeline():
+                        counts = [conn.execute(f"SELECT count(*) AS n FROM raw_items WHERE {pending_filter} AND id>%s",
+                                               (work_ids[start:start + BATCH], last_id))
+                                  for start in range(0, len(work_ids), BATCH)]
+                    extract_total = sum(count.fetchone()["n"] for count in counts)
+                elif backlog:
                     extract_total = conn.execute(f"SELECT count(*) AS n FROM raw_items WHERE {pending_filter} AND id>%s",
-                                                 (*filters, last_id)).fetchone()["n"]
+                                                 (last_id,)).fetchone()["n"]
                 else:
                     extract_total = count_pending(conn, eligible_only=True)
             progress(conn, succeeded + failed)
@@ -291,10 +297,22 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                 if backlog and monotonic() >= backlog_deadline:
                     outcome = "time limit reached"
                     break
+                batch_ids = []
+                if work_ids is not None:
+                    start = bisect_right(work_ids, last_id)
+                    batch_ids = work_ids[start:start + BATCH]
+                    if not batch_ids:
+                        break
+                filters = (batch_ids,) if batch_ids else ()
                 rows = conn.execute(
                     f"SELECT id, source, payload, last_job FROM raw_items WHERE {pending_filter} AND id>%s"
                     " ORDER BY id LIMIT %s FOR UPDATE", (*filters, last_id, BATCH)).fetchall()
                 if not rows:
+                    if batch_ids:
+                        conn.commit()
+                        last_id = batch_ids[-1]
+                        checkpoint()
+                        continue
                     break
                 ids = [r["id"] for r in rows]
                 old_signals = {}
@@ -340,7 +358,7 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                 failed += len(rows) - len(successful)
                 succeeded += len(successful)
                 total_signals += len(signals)
-                last_id = rows[-1]["id"]
+                last_id = batch_ids[-1] if batch_ids else rows[-1]["id"]
                 done = succeeded + failed
                 elapsed = max(monotonic() - started, 0.001)
                 label = f"backlog {done}/{extract_total}" if backlog else phase
