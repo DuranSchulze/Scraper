@@ -66,15 +66,15 @@ export function ReviewApp() {
   const moreCount = MORE_KEYS.filter((k) => filters[k]).length;
   const toggle = (k: "has_phone" | "has_amount" | "new") => setParams({ [k]: filters[k] ? null : "true" });
 
-  // A newly completed scrape changes which records are "New": refresh an open list.
+  // A newly completed scrape changes which records are "New": refetch when status knows a newer scrape than the list
+  // (compared on every response, including the first, so a completion between the two first reads is not missed).
   const qc = useQueryClient();
-  const lastScrape = status?.last_complete_scrape_job;
-  const seenScrape = useRef(lastScrape);
+  const lastScrape = status?.last_complete_scrape_job ?? null;
+  const listScrape = list?.scrapeJob ?? null;
   useEffect(() => {
-    if (lastScrape === undefined) return;
-    if (seenScrape.current !== undefined && seenScrape.current !== lastScrape) qc.invalidateQueries({ queryKey: ["candidates"] });
-    seenScrape.current = lastScrape;
-  }, [lastScrape, qc]);
+    if (lastScrape !== null && list && (listScrape ?? 0) < lastScrape) qc.invalidateQueries({ queryKey: ["candidates"] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only the two scrape ids matter
+  }, [lastScrape, listScrape, qc]);
 
   const href = (patch: Record<string, string | null>) => {
     const next = new URLSearchParams(params);

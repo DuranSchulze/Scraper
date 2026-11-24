@@ -145,8 +145,8 @@ export const timelineQuery = (f: Filters, bucket: Bucket, scrapeJob: number | nu
   // Page and order don't change section totals; the API ignores them.
   queryFn: () => request<TimelineBucket[]>("/api/candidates/timeline?" + qs({
     ...f, page: String(f.page), field: f.sort, bucket, ...(scrapeJob ? { scrape_job: String(scrapeJob) } : {}) })),
-  // Keep the old totals only within one scrape; a new scrape's rows never show the previous scrape's totals.
-  placeholderData: (prev, prevQuery) => prevQuery?.queryKey[4] === scrapeJob ? prev : undefined,
+  // No placeholder: totals from other filters or another scrape must never sit next to these rows.
+  // While loading, sections show their on-page counts.
   retry: (n, e) => !(e instanceof ApiError && e.status === 409) && n < 3,
 });
 
