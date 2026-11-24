@@ -149,7 +149,7 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
         ("GET", "/api/users", None), ("POST", "/api/users", {"email": "denied@test.com", "name": "Denied", "password": "x", "role_id": 1}),
         ("PATCH", "/api/users/1", {"role_id": 2}),
     ]
-    requests["scraping"] += [("GET", "/api/schedule", None), ("PUT", "/api/schedule", {"enabled": False, "interval_minutes": 15})]
+    requests["scraping"] += [("GET", "/api/schedule", None), ("PUT", "/api/schedule", {"enabled": False, "interval_minutes": 120})]
     tables = ("roles", "users", "schedule", "candidates", "clients", "raw_items", "signals", "jobs", "job_log", "job_mailboxes")
     with permission_client(conn, [key for key in auth.ROUTES if key != denied]) as member:
         before = {table: conn.execute(f"SELECT * FROM {table} ORDER BY 1,2").fetchall() for table in tables}

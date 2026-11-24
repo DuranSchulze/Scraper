@@ -32,7 +32,7 @@ class Checks:
 def scheduled(pg_url, monkeypatch):
     db.migrate()
     with db.connect() as conn:
-        conn.execute("INSERT INTO schedule(id,enabled,interval_minutes) VALUES (1,true,15)")
+        conn.execute("INSERT INTO schedule(id,enabled,interval_minutes) VALUES (1,true,120)")
     monkeypatch.setenv("SCRAPE_SINCE", "2018-01-01")
     now = [datetime.now(timezone.utc)]
 
@@ -55,13 +55,13 @@ def scheduled(pg_url, monkeypatch):
 
 @pytest.mark.parametrize("enabled,running,age,expected", [
     (False, False, None, False), (True, True, None, False),
-    (True, False, None, True), (True, False, 14, False),
-    (True, False, 15, True), (True, False, 16, True),
+    (True, False, None, True), (True, False, 119, False),
+    (True, False, 120, True), (True, False, 121, True),
 ])
 def test_auto_decision(enabled, running, age, expected):
     now = datetime(2026, 11, 11, tzinfo=timezone.utc)
     last = now - timedelta(minutes=age) if age is not None else None
-    assert api._auto_due(now, enabled, 15, last, running) is expected
+    assert api._auto_due(now, enabled, 120, last, running) is expected
 
 
 @pytest.mark.parametrize("outcome", ["done", "done_with_errors", "failed", "stopped"])
@@ -79,7 +79,7 @@ def test_interval_even_after_failure_and_restart(scheduled, outcome):
         "sources": ["gmail", "contacts", "sheets"], "mailboxes": [],
         "since": "2018-01-01", "full": False, "auto": True, "since_explicit": False,
     }
-    now[0] += timedelta(minutes=15)
+    now[0] += timedelta(minutes=120)
     api._auto_scrape(Checks())
     assert len(launched) == 2
 
@@ -111,7 +111,7 @@ def test_schedule_reread_and_manual_jobs_do_not_reset_interval(scheduled, monkey
 
     def enable():
         with db.connect() as conn:
-            conn.execute("UPDATE schedule SET enabled=true,interval_minutes=5")
+            conn.execute("UPDATE schedule SET enabled=true,interval_minutes=240")
 
     api._auto_scrape(Checks(2, enable))
     assert len(launched) == 1
@@ -198,8 +198,8 @@ def test_scrape_already_chains_incremental_extract(scheduled, monkeypatch):
 
 
 @pytest.mark.parametrize("value,enabled,interval", [
-    ("", False, 15), ("bad", False, 15), ("4", False, 15), ("1441", False, 15),
-    ("5", True, 5), ("15", True, 15), ("1440", True, 1440),
+    ("", False, 120), ("bad", False, 120), ("5", False, 120),
+    ("119", False, 120), ("1441", False, 120), ("120", True, 120), ("1440", True, 1440),
 ])
 def test_lifespan_seed_daemon_and_shutdown(scheduled, monkeypatch, value, enabled, interval, caplog):
     monkeypatch.setenv("SCRAPE_EVERY_MINUTES", value)
@@ -232,7 +232,7 @@ def test_lifespan_seed_daemon_and_shutdown(scheduled, monkeypatch, value, enable
 
     asyncio.run(boot())
     assert len(threads) == 1 and caplog.text.count("DAILY_SCRAPE_AT is ignored") == 1
-    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "30")
+    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "240")
     asyncio.run(boot())  # persisted settings win over later environment changes
 
 
@@ -246,7 +246,7 @@ def test_stopped_scheduler_does_not_access_database(monkeypatch):
 @pytest.mark.parametrize("recovery", ["scheduler", "get", "put"])
 def test_schedule_recovers_after_startup_database_failure(scheduled, authenticated_client, monkeypatch, recovery):
     _, launched = scheduled
-    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "5")
+    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "120")
     with db.connect() as conn:
         conn.execute("DELETE FROM schedule")
 
@@ -269,16 +269,16 @@ def test_schedule_recovers_after_startup_database_failure(scheduled, authenticat
         assert len(launched) == 1
     elif recovery == "get":
         response = client.get("/api/schedule")
-        assert response.status_code == 200 and response.json()["interval_minutes"] == 5
+        assert response.status_code == 200 and response.json()["interval_minutes"] == 120
     else:
-        response = client.put("/api/schedule", json={"enabled": False, "interval_minutes": 30},
+        response = client.put("/api/schedule", json={"enabled": False, "interval_minutes": 240},
                               headers={"X-Local-GUI": "1"})
         assert response.status_code == 200
 
-    saved = client.put("/api/schedule", json={"enabled": False, "interval_minutes": 30},
+    saved = client.put("/api/schedule", json={"enabled": False, "interval_minutes": 240},
                        headers={"X-Local-GUI": "1"})
     assert saved.status_code == 200
-    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "60")
+    monkeypatch.setenv("SCRAPE_EVERY_MINUTES", "360")
     api._auto_scrape(Checks())
     assert client.get("/api/schedule").json() == saved.json()
 
@@ -287,9 +287,9 @@ def test_schedule_constraints(scheduled):
     from psycopg.errors import CheckViolation, NotNullViolation, UniqueViolation
 
     with db.connect() as conn:
-        for sql in ("INSERT INTO schedule VALUES (2,true,15,now())",
-                    "INSERT INTO schedule VALUES (1,true,15,now())",
-                    "UPDATE schedule SET interval_minutes=4",
+        for sql in ("INSERT INTO schedule VALUES (2,true,120,now())",
+                    "INSERT INTO schedule VALUES (1,true,120,now())",
+                    "UPDATE schedule SET interval_minutes=119",
                     "UPDATE schedule SET interval_minutes=1441",
                     "UPDATE schedule SET enabled=NULL"):
             with pytest.raises((CheckViolation, NotNullViolation, UniqueViolation)):
@@ -302,17 +302,17 @@ def test_schedule_api(scheduled, authenticated_client):
     client = authenticated_client
     response = client.get("/api/schedule")
     assert response.status_code == 200
-    assert response.json() == {"enabled": True, "interval_minutes": 15,
+    assert response.json() == {"enabled": True, "interval_minutes": 120,
                                "last_auto_at": None, "next_run_at": now[0].isoformat()}
-    body = {"enabled": False, "interval_minutes": 30}
+    body = {"enabled": False, "interval_minutes": 240}
     assert client.put("/api/schedule", json=body).status_code == 403
     saved = client.put("/api/schedule", json=body, headers={"X-Local-GUI": "1"})
     assert saved.status_code == 200 and saved.json() == {**body, "last_auto_at": None, "next_run_at": None}
     assert client.get("/api/schedule").json() == saved.json()
-    for invalid in (4, 1441, 5.5, "bad", None):
+    for invalid in (119, 1441, 120.5, "bad", None):
         assert client.put("/api/schedule", json={**body, "interval_minutes": invalid},
                           headers={"X-Local-GUI": "1"}).status_code == 422
-    for interval in (5, 1440):
+    for interval in (120, 1440):
         response = client.put("/api/schedule", json={"enabled": True, "interval_minutes": interval},
                               headers={"X-Local-GUI": "1"})
         assert response.status_code == 200 and response.json()["interval_minutes"] == interval
@@ -328,8 +328,8 @@ def test_schedule_api(scheduled, authenticated_client):
 
 
 @pytest.mark.parametrize("enabled,running,age,next_age", [
-    (False, False, 20, None), (True, False, 5, 10),
-    (True, False, 20, -5), (True, True, 20, None), (True, True, 5, 10),
+    (False, False, 125, None), (True, False, 110, 10),
+    (True, False, 125, -5), (True, True, 125, None), (True, True, 110, 10),
 ])
 def test_schedule_next_run(scheduled, enabled, running, age, next_age):
     now, _ = scheduled
@@ -349,13 +349,14 @@ def test_schedule_next_run(scheduled, enabled, running, age, next_age):
 def test_changed_interval_applies_next_tick(scheduled):
     now, launched = scheduled
     with db.connect() as conn:
+        conn.execute("UPDATE schedule SET interval_minutes=240")
         conn.execute("INSERT INTO jobs(name,status,started_at,params) VALUES ('scrape','failed',%s,%s)",
-                     (now[0] - timedelta(minutes=5), api.Jsonb({"auto": True})))
+                     (now[0] - timedelta(minutes=120), api.Jsonb({"auto": True})))
 
     def shorten():
         assert not launched
         with db.connect() as conn:
-            conn.execute("UPDATE schedule SET interval_minutes=5")
+            conn.execute("UPDATE schedule SET interval_minutes=120")
 
     api._auto_scrape(Checks(1, shorten))
     api._auto_scrape(Checks())

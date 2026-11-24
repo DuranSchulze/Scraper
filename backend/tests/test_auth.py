@@ -84,8 +84,8 @@ def test_writes_require_matching_expected_user_when_supplied(authenticated_clien
     member_id = created.json()["id"]
     stale_headers = {**GUI, "X-Expected-User": str(admin_id)}
     schedule = "/api/schedule"
-    body = {"enabled": True, "interval_minutes": 60}
-    assert admin.put(schedule, headers=stale_headers, json={"enabled": False, "interval_minutes": 15}).status_code == 200
+    body = {"enabled": True, "interval_minutes": 240}
+    assert admin.put(schedule, headers=stale_headers, json={"enabled": False, "interval_minutes": 120}).status_code == 200
 
     member = TestClient(app, base_url="http://localhost")
     try:
@@ -102,7 +102,7 @@ def test_writes_require_matching_expected_user_when_supplied(authenticated_clien
         assert member.get(schedule).json() == original.json()
 
         saved = member.put(schedule, headers={**GUI, "X-Expected-User": str(member_id)}, json=body)
-        assert saved.status_code == 200 and saved.json()["interval_minutes"] == 60
+        assert saved.status_code == 200 and saved.json()["interval_minutes"] == 240
         assert member.put(schedule, headers=GUI, json={**body, "interval_minutes": 120}).status_code == 200
         assert member.get(schedule).json()["interval_minutes"] == 120
 
@@ -504,7 +504,7 @@ def test_user_and_api_limits_are_per_user(authenticated_client, monkeypatch):
     response = authenticated_client.get("/api/auth/me")
     assert response.status_code == 429 and response.headers["Retry-After"] == "60"
     response = authenticated_client.put("/api/schedule", headers={**GUI, "X-Expected-User": "2"},
-                                        json={"enabled": True, "interval_minutes": 60})
+                                        json={"enabled": True, "interval_minutes": 120})
     assert response.status_code == 429 and response.headers["Retry-After"] == "60"
     # A second user has an independent API bucket.
     with db.connect() as conn:

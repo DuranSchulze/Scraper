@@ -45,14 +45,18 @@ async def lifespan(app):
         scheduler.join(timeout=1)
 
 
+MIN_SCHEDULE_INTERVAL = 120
+MAX_SCHEDULE_INTERVAL = 1440
+
+
 def _seed_schedule(conn):
     try:
         interval = int(env("SCRAPE_EVERY_MINUTES"))
     except ValueError:
         interval = 0
-    enabled = 5 <= interval <= 1440
+    enabled = MIN_SCHEDULE_INTERVAL <= interval <= MAX_SCHEDULE_INTERVAL
     conn.execute("INSERT INTO schedule(id,enabled,interval_minutes) VALUES (1,%s,%s)"
-                 " ON CONFLICT DO NOTHING", (enabled, interval if enabled else 15))
+                 " ON CONFLICT DO NOTHING", (enabled, interval if enabled else MIN_SCHEDULE_INTERVAL))
 
 
 def _auto_due(now, enabled, interval_minutes, last_auto_started_at, running):
@@ -425,7 +429,7 @@ def stop(job_id: int):
 
 class ScheduleIn(BaseModel):
     enabled: bool
-    interval_minutes: int = Field(ge=5, le=1440)
+    interval_minutes: int = Field(ge=MIN_SCHEDULE_INTERVAL, le=MAX_SCHEDULE_INTERVAL)
 
 
 def _schedule(conn):

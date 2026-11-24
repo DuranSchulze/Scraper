@@ -61,7 +61,7 @@ def seed(conn, directory, second):
                         " ON CONFLICT (lower(name)) DO UPDATE SET routes=EXCLUDED.routes RETURNING id").fetchone()["id"]
     conn.execute("INSERT INTO users (email,name,password_hash,role_id) VALUES (%s,'Review Fixture',%s,%s)"
                  " ON CONFLICT (lower(email)) DO NOTHING", (EMAIL, auth.hash_password(PASSWORD), role))
-    conn.execute("INSERT INTO schedule (id,enabled,interval_minutes) VALUES (1,false,15)"
+    conn.execute("INSERT INTO schedule (id,enabled,interval_minutes) VALUES (1,false,120)"
                  " ON CONFLICT (id) DO UPDATE SET enabled=false")
 
     rows = []
