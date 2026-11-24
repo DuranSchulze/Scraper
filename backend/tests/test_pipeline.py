@@ -16,6 +16,8 @@ from scraper.sources import sheets
 def conn(pg_url, monkeypatch):
     monkeypatch.setenv("INTERNAL_DOMAINS", "acme.test")
     monkeypatch.setenv("SCRAPE_PARALLEL_MAILBOXES", "1")
+    # The developer .env may pause the backlog; tests assume the default drain.
+    monkeypatch.setenv("EXTRACT_BACKLOG_MINUTES", "20")
     db.migrate()
     with db.connect() as conn:
         yield conn
@@ -418,12 +420,13 @@ def test_crash_rolls_back_markers_signals_and_people_of_failed_batch(conn, monke
     conn.commit()
     original = pipeline.rebuild
     calls = []
-    def crash(conn, keys, rules, now):
+    def crash(conn, keys, rules, now, **kwargs):
         calls.append(set(keys))
-        original(conn, keys, rules, now)
+        original(conn, keys, rules, now, **kwargs)
         if len(calls) == 2:
             raise RuntimeError("crash after rebuild")
     monkeypatch.setattr(pipeline, "rebuild", crash)
+    monkeypatch.setattr(pipeline, "FLUSH_SECONDS", 0)  # rebuild with every batch, so the crash hits batch two
     with pytest.raises(RuntimeError, match="crash"):
         pipeline.run_extract(lambda _: None)
     assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NOT NULL").fetchone()["n"] == 500
@@ -433,6 +436,21 @@ def test_crash_rolls_back_markers_signals_and_people_of_failed_batch(conn, monke
     pipeline.run_extract(lambda _: None)
     assert len(candidates(conn)) == 501
     assert conn.execute("SELECT count(*) AS n FROM raw_items WHERE extracted_at IS NULL").fetchone()["n"] == 0
+
+
+def test_heavy_key_rebuilds_once_per_flush_not_per_batch(conn, monkeypatch):
+    for i in range(4):
+        seed(conn, sid=f"heavy-{i}", email="heavy@client.test", name="Heavy")
+    monkeypatch.setattr(pipeline, "BATCH", 1)
+    original, calls = pipeline.rebuild, []
+    def counting(c, keys, *args, **kwargs):
+        calls.append(set(keys))
+        return original(c, keys, *args, **kwargs)
+    monkeypatch.setattr(pipeline, "rebuild", counting)
+    pipeline.run_extract(lambda _: None)
+    assert calls == [{"heavy@client.test"}]
+    assert set(candidates(conn)) == {"heavy@client.test"}
+    assert conn.execute("SELECT count(*) AS n FROM rebuild_queue").fetchone()["n"] == 0
 
 
 def test_changed_merged_source_rebuilds_surviving_target(conn):
@@ -511,7 +529,7 @@ def test_restart_after_full_reset_cleans_pending_keys_without_signals(conn, monk
     conn.execute("INSERT INTO candidates (email_key) VALUES ('orphan@client.test')")
     conn.commit()
     original = pipeline.rebuild
-    def crash(*_):
+    def crash(*_, **__):
         raise RuntimeError("interrupted full run")
     monkeypatch.setattr(pipeline, "rebuild", crash)
     with pytest.raises(RuntimeError, match="interrupted full"):
@@ -1144,11 +1162,11 @@ def test_extract_reconnects_and_retries_batch_after_connection_drop(conn, monkey
     seed(conn)
     seed(conn, sid="s:Clients:3", email="ana@client.test", name="Ana")
     original, calls, lines = pipeline.rebuild, [], []
-    def flaky(c, *args):
+    def flaky(c, *args, **kwargs):
         calls.append(True)
         if len(calls) == 1:
             raise psycopg.OperationalError("server closed the connection unexpectedly")
-        return original(c, *args)
+        return original(c, *args, **kwargs)
     monkeypatch.setattr(pipeline, "rebuild", flaky)
     monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
     pipeline.run_extract(lines.append)
@@ -1161,7 +1179,7 @@ def test_extract_reconnects_and_retries_batch_after_connection_drop(conn, monkey
 def test_extract_gives_up_after_repeated_connection_drops(conn, monkeypatch):
     import psycopg
     seed(conn)
-    def down(*_):
+    def down(*_, **__):
         raise psycopg.OperationalError("server closed the connection unexpectedly")
     monkeypatch.setattr(pipeline, "rebuild", down)
     monkeypatch.setattr(pipeline.time, "sleep", lambda _: None)
@@ -1186,10 +1204,12 @@ def test_scoped_extract_binds_only_each_id_slice_and_retries_it(conn, monkeypatc
             (counted if query.startswith("SELECT count(*)") else queried).append(params[0])
         return execute(connection, query, params, **kwargs)
 
-    def drop_once(connection, keys, rules, now):
+    def drop_once(connection, keys, rules, now, **kwargs):
         if "p5@client.test" in keys and queried.count(ids[4:6]) == 1:
             raise pipeline.psycopg.OperationalError("connection lost during a batch")
-        return rebuild(connection, keys, rules, now)
+        return rebuild(connection, keys, rules, now, **kwargs)
+
+    monkeypatch.setattr(pipeline, "FLUSH_SECONDS", 0)  # rebuild with every batch, so the drop hits that batch
 
     monkeypatch.setattr(pipeline.psycopg.Connection, "execute", record_query)
     monkeypatch.setattr(pipeline, "rebuild", drop_once)

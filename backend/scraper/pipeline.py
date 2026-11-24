@@ -20,6 +20,34 @@ from .sources import contacts, gmail, sheets
 
 BATCH = 500
 BACKLOG_SOURCE = "extract_backlog"
+# Queued keys are rebuilt at most this often during a pass, and always at its end.
+FLUSH_SECONDS = 60
+
+
+def queue_rebuild(conn, keys, fresh=(), job_id=None) -> None:
+    """Queue keys for a later rebuild, in the caller's transaction; fresh keys remember the scrape job."""
+    fresh = set(fresh)
+    rows = [(key, job_id if key in fresh else None) for key in sorted(set(keys) | fresh)]
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO rebuild_queue (key, fresh_job) VALUES (%s,%s)"
+            " ON CONFLICT (key) DO UPDATE SET fresh_job=coalesce(EXCLUDED.fresh_job, rebuild_queue.fresh_job)", rows)
+
+
+def flush_rebuilds(conn, rules: dict) -> float:
+    """Rebuild every queued key once and clear the queue, in one transaction. Returns seconds spent."""
+    started = monotonic()
+    queued = conn.execute("SELECT key, fresh_job FROM rebuild_queue FOR UPDATE").fetchall()
+    if not queued:
+        return 0.0
+    keys = [r["key"] for r in queued]
+    by_job: dict[int, set[str]] = {}
+    for r in queued:
+        if r["fresh_job"] is not None:
+            by_job.setdefault(r["fresh_job"], set()).add(r["key"])
+    rebuild(conn, keys, rules, datetime.now(timezone.utc), fresh_by_job=by_job)
+    conn.execute("DELETE FROM rebuild_queue WHERE key=ANY(%s)", (keys,))
+    return monotonic() - started
 
 
 def rebuild_targets(keys, merged: dict[str, str]) -> dict[str, set[str]]:
@@ -33,7 +61,7 @@ def rebuild_targets(keys, merged: dict[str, str]) -> dict[str, set[str]]:
     return groups
 
 
-def rebuild(conn, keys, rules: dict, now: datetime, *, scrape_job_id=None, fresh_keys=()) -> None:
+def rebuild(conn, keys, rules: dict, now: datetime, *, scrape_job_id=None, fresh_keys=(), fresh_by_job=None) -> None:
     conn.execute(master.LOCK)
     merged = {r["email_key"]: r["target"] for r in conn.execute(
         "SELECT c.email_key, t.email_key AS target FROM candidates c"
@@ -59,9 +87,12 @@ def rebuild(conn, keys, rules: dict, now: datetime, *, scrape_job_id=None, fresh
             " AND c.reviewed IS NULL AND c.client_id IS NULL"
             " AND NOT EXISTS (SELECT 1 FROM candidates src WHERE src.merged_into=c.id)", (absent,))
 
+    fresh_by_job = dict(fresh_by_job or {})
     if fresh_keys:
+        fresh_by_job.setdefault(scrape_job_id, set()).update(fresh_keys)
+    for job_id, fresh in fresh_by_job.items():
         conn.execute("UPDATE candidates SET pending_scrape_job=%s, pending_scraped_at=%s WHERE email_key=ANY(%s)",
-                     (scrape_job_id, now, sorted({resolve(key, merged) for key in fresh_keys})))
+                     (job_id, now, sorted({resolve(key, merged) for key in fresh})))
     master.rematch(conn, targets)
 
 
@@ -253,6 +284,10 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
     def one_pass():
         nonlocal succeeded, failed, total_signals, last_id, full, extract_total, rebuild_seconds, outcome
         with db.connect() as conn:
+            # Keys queued by an interrupted earlier pass are rebuilt before new work.
+            rebuild_seconds += flush_rebuilds(conn, rules)
+            conn.commit()
+            last_flush = monotonic()
             # Also recover pending keys left without signals by an interrupted full reset.
             if not backlog:
                 rebuild_keys.update(r["email_key"] for r in conn.execute(
@@ -292,6 +327,17 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                     extract_total = count_pending(conn, eligible_only=True)
             progress(conn, succeeded + failed)
             conn.commit()
+
+            def stop_point():
+                nonlocal rebuild_seconds
+                try:
+                    checkpoint()
+                except JobStopped:
+                    # A stop still leaves every committed batch's people rebuilt and tagged.
+                    rebuild_seconds += flush_rebuilds(conn, rules)
+                    conn.commit()
+                    raise
+
             while succeeded + failed < extract_total:
                 # shortcut: the budget is checked between durable batches, add in-batch cancellation if a hard cutoff is needed
                 if backlog and monotonic() >= backlog_deadline:
@@ -311,7 +357,7 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                     if batch_ids:
                         conn.commit()
                         last_id = batch_ids[-1]
-                        checkpoint()
+                        stop_point()
                         continue
                     break
                 ids = [r["id"] for r in rows]
@@ -345,10 +391,11 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                     cur.executemany("INSERT INTO signals (raw_item_id, key, data) VALUES (%s,%s,%s)", signals)
                 conn.execute("UPDATE raw_items SET extracted_at=now(), extract_error=NULL WHERE id=ANY(%s)", (successful,))
                 if affected:
-                    rebuild_started = monotonic()
-                    stamps = {"scrape_job_id": scrape_job_id, "fresh_keys": fresh} if fresh else {}
-                    rebuild(conn, affected, rules, datetime.now(timezone.utc), **stamps)
-                    rebuild_seconds += monotonic() - rebuild_started
+                    # Queued with the signals (same transaction); rebuilt together about once a minute.
+                    queue_rebuild(conn, affected, fresh, scrape_job_id)
+                if monotonic() - last_flush >= FLUSH_SECONDS:
+                    rebuild_seconds += flush_rebuilds(conn, rules)
+                    last_flush = monotonic()
                 if backlog:
                     db.set_cursor(conn, BACKLOG_SOURCE, "", str(rows[-1]["id"]))
                 progress(conn, succeeded + failed + len(rows))
@@ -364,11 +411,10 @@ def _extract_pass(log, rules, internal, checkpoint, *, full=False, keys=(), raw_
                 label = f"backlog {done}/{extract_total}" if backlog else phase
                 log(f"{label}: {succeeded} items, {total_signals} signals, {failed} failed"
                     f" ({done / elapsed:.1f} rows/s, {rebuild_seconds:.1f}s rebuilding)")
-                checkpoint()
+                stop_point()
             if rebuild_keys:
-                rebuild_started = monotonic()
-                rebuild(conn, rebuild_keys, rules, datetime.now(timezone.utc))
-                rebuild_seconds += monotonic() - rebuild_started
+                queue_rebuild(conn, rebuild_keys)
+            rebuild_seconds += flush_rebuilds(conn, rules)
             conn.commit()
 
     drops = 0
