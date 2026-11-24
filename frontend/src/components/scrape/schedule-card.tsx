@@ -15,7 +15,7 @@ import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 
 const label = (m: number) => m < 60 ? `Every ${m} minutes` : m === 60 ? "Every hour" : m % 60 === 0 ? `Every ${m / 60} hours` : `Every ${m} minutes`;
-const PRESETS = [5, 15, 30, 60, 240, 1440];
+const PRESETS = [120, 240, 360, 720, 1440];
 
 export function ScheduleCard() {
   const qc = useQueryClient();
@@ -23,7 +23,7 @@ export function ScheduleCard() {
   // null = follow the server; set once the user edits, cleared after a save.
   const [draft, setDraft] = useState<{ enabled: boolean; interval: number } | null>(null);
   const enabled = draft?.enabled ?? data?.enabled ?? false;
-  const interval = draft?.interval ?? data?.interval_minutes ?? 15;
+  const interval = draft?.interval ?? data?.interval_minutes ?? 120;
   const [asking, setAsking] = useState(false);
   const guard = useGuarded("schedule");
   const save = useMutation({
