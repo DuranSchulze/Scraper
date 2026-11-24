@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pause, Play, Square, Timer, Upload } from "lucide-react";
+import { CheckCircle2, Pause, Play, Square, Timer, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -74,6 +74,8 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
 
   const state = s?.job_status ? JOB_STATE[s.job_status] : null;
   const ready = s?.ready_to_publish ?? 0;
+  // A finished scrape (not a standalone "extract" re-run, which fetches no mail) gets the complete block.
+  const complete = canScrape && !running && s?.job !== "extract" && (s?.job_status === "done" || s?.job_status === "done_with_errors");
   const note = !canScrape ? null : s?.job_control === "stop" ? "Stopping after the current batch is saved…"
     : s?.job_control === "pause" && s.job_status === "running" ? "Pausing after the current batch is saved…"
     : s?.job_status === "paused" && !s.job_control ? "Continuing…"
@@ -90,7 +92,8 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
           {!s && !error ? <><LoadingLabel>Loading job status…</LoadingLabel><Skeleton className="h-4 w-32" /><Skeleton className="h-5 w-20 rounded-full" /></>
             : s?.job ? <span className="text-muted-foreground">Last job: <span className="font-medium text-foreground">{s.job}</span></span>
             : <span className="text-muted-foreground">No job has run yet</span>}
-          {state && <Pill tone={state.tone}>{state.label}{s?.job_failures ? ` · ${s.job_failures} failure(s)` : ""}</Pill>}
+          {/* A finished run's state is shown by ScrapeComplete (for scrape users), so the pill would repeat it. */}
+          {state && !complete && <Pill tone={state.tone}>{state.label}{s?.job_failures ? ` · ${s.job_failures} failure(s)` : ""}</Pill>}
           {s?.job_started_at && <span className="text-xs text-muted-foreground tabular-nums">started {stamp(s.job_started_at)}</span>}
           {jobId && canScrape && <JobControls status={s!.job_status} control={s!.job_control} busy={control.isPending || resume.isPending}
             resuming={resume.isPending}
@@ -102,7 +105,9 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
 
         {canScrape && (running
           ? <StageProgress progress={s?.job_progress ?? null} paused={s?.job_status === "paused"} running={board?.counts?.running ?? 0} />
-          : <NextScrape />)}
+          : complete
+            ? <ScrapeComplete errors={s?.job_status === "done_with_errors" ? s.job_failures : 0} finishedAt={s?.job_finished_at ?? null} />
+            : <NextScrape />)}
 
         {canReview && (
           <Button size="sm" className="ml-auto" disabled={!ready || guard.busy} aria-busy={guard.running} onClick={() => setConfirm("publish")}>
@@ -200,8 +205,22 @@ function StageProgress({ progress, paused, running }: { progress: JobProgress | 
   );
 }
 
+/** Idle after a finished scrape: says it is complete, when it finished, and when the next one runs. */
+function ScrapeComplete({ errors, finishedAt }: { errors: number; finishedAt: string | null }) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+      <Pill tone={errors ? "warning" : "success"} className="gap-1">
+        <CheckCircle2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+        {errors ? `Complete with ${errors} error(s)` : "Scrape complete"}
+      </Pill>
+      {finishedAt && <span className="text-xs text-muted-foreground">Finished {phDateTime(finishedAt)}</span>}
+      <NextScrape withTime />
+    </div>
+  );
+}
+
 /** Idle: a live countdown to the next automatic scrape, from the saved schedule. */
-function NextScrape() {
+function NextScrape({ withTime = false }: { withTime?: boolean }) {
   const now = useNow();
   const { data: sched } = useQuery(scheduleQuery);
   if (!sched) return null;
@@ -209,7 +228,7 @@ function NextScrape() {
   const text = !sched.enabled ? "Auto-scrape off"
     : at == null ? "Next auto-scrape after the current job"
     : at - now <= 0 ? "Auto-scrape starting…"
-    : `Next auto-scrape in ${clock(at - now)}`;
+    : `Next auto-scrape in ${clock(at - now)}${withTime ? ` · ${phDateTime(at)}` : ""}`;
   return (
     <span role="timer" aria-live="off" className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground tabular-nums"
       title={at ? phDateTime(at) : undefined}>

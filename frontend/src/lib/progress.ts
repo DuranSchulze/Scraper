@@ -19,7 +19,8 @@ export function stageView(p: JobProgress) {
   // The backlog pass runs after this run's own items; its count moves while done/total stay fixed.
   if (p.stage === "extract" && p.backlog_total) {
     const value = Math.min(99, Math.floor(((p.backlog_done ?? 0) / p.backlog_total) * 100));
-    return { label: "Extracting older backlog",
+    const full = (p.backlog_done ?? 0) >= p.backlog_total;
+    return { label: full ? "Finishing up" : "Extracting older backlog",
       count: `${(p.backlog_done ?? 0).toLocaleString("en-US")}/${p.backlog_total.toLocaleString("en-US")} backlog items`, value };
   }
   const stage = STAGE[p.stage];
@@ -27,5 +28,7 @@ export function stageView(p: JobProgress) {
   // A stage still working never shows a full bar: cap at 99% until the next stage takes over.
   const value = !known ? null : Math.min(99, Math.floor((p.done / p.total) * 100));
   const count = !known || !stage.unit ? "" : `${p.done.toLocaleString("en-US")}/${p.total.toLocaleString("en-US")} ${stage.unit}`;
+  // Every item counted but the job still runs (backlog, tagging, saving): say so, so a full count isn't read as done.
+  if (known && p.done >= p.total) return { label: "Finishing up", count, value };
   return { label: stage.label, count, value };
 }

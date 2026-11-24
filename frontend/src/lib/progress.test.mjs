@@ -26,7 +26,9 @@ test("stageView: counts, unknown totals, never a full bar while running", () => 
   const at = "2026-11-13T00:00:00Z";
   assert.deepEqual(stageView({ stage: "fetch", done: 3, total: 8, started_at: at }), { label: "Fetching mail", count: "3/8 mailboxes", value: 37 });
   assert.deepEqual(stageView({ stage: "extract", done: 1240, total: 5600, started_at: at }).count, "1,240/5,600 items");
-  assert.equal(stageView({ stage: "extract", done: 5600, total: 5600, started_at: at }).value, 99);
+  assert.deepEqual(stageView({ stage: "extract", done: 81, total: 81, started_at: at }), { label: "Finishing up", count: "81/81 items", value: 99 });
+  assert.deepEqual(stageView({ stage: "tag", done: 1, total: 1, started_at: at }), { label: "Finishing up", count: "", value: 99 });
+  assert.equal(stageView({ stage: "extract", done: 5, total: 5, started_at: at, backlog_done: 1000, backlog_total: 1000 }).label, "Finishing up");
   assert.deepEqual(stageView({ stage: "extract", done: 0, total: 0, started_at: at }), { label: "Extracting records", count: "", value: null });
   assert.equal(stageView({ stage: "tag", done: 0, total: 1, started_at: at }).count, "");
 });
