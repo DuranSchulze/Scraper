@@ -28,7 +28,7 @@ def test_scrape_anchor_upgrades_populated_012_and_reruns_as_noop(pg_url, monkeyp
         for table, query in queries[1:]:
             conn.execute(query, (job_id,) if table == "job_mailboxes" else ())
         before = {table: conn.execute(f"SELECT * FROM {table}").fetchone() for table, _ in queries}
-    assert db.migrate() == [migration.name, "014_rebuild_queue.sql"]
+    assert db.migrate() == [migration.name, "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     defaults = {
         "jobs": {"completed": False, "lineage": []},
@@ -36,7 +36,7 @@ def test_scrape_anchor_upgrades_populated_012_and_reruns_as_noop(pg_url, monkeyp
         "sync_state": {"gmail_complete_at": None, "gmail_boundary": None},
         "raw_items": {"last_job": None},
         "candidates": dict.fromkeys(("pending_scrape_job", "pending_scraped_at", "last_scrape_job",
-                                     "last_scraped_at", "master_evaluated_at")),
+                                     "last_scraped_at", "master_evaluated_at", "first_published_at")),
     }
     with db.connect() as conn:
         for table, row in before.items():
@@ -71,7 +71,7 @@ def test_directory_sync_upgrade_rewrites_roles_clears_ids_and_preserves_director
         conn.rollback()
         assert conn.execute("SELECT count(*) AS n FROM master_clients").fetchone()["n"] == 1
         assert conn.execute("SELECT master_ids FROM candidates LIMIT 1").fetchone()["master_ids"] == [1]
-    assert db.migrate() == ["012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT to_regclass('master_clients') AS clients,to_regclass('master_imports') AS imports").fetchone() == {"clients": None, "imports": None}
@@ -110,7 +110,7 @@ def test_roles_upgrade_preserves_accounts_and_grants(pg_url):
             conn.execute("INSERT INTO users(email,name,password_hash,role,routes,active) VALUES (%s,%s,'kept hash',%s,%s,%s)",
                          (f"user{i}@test", f"User {i}", role, routes, i != 1))
         before = conn.execute("SELECT id,email,name,password_hash,active,created_at FROM users ORDER BY id").fetchall()
-    assert db.migrate() == ["010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT id,email,name,password_hash,active,created_at FROM users ORDER BY id").fetchall() == before
@@ -148,7 +148,7 @@ def test_user_routes_upgrade_defaults_constraints_and_noop(pg_url):
             conn.execute(path.read_text())
             conn.execute("INSERT INTO schema_migrations VALUES (%s)", (path.name,))
         conn.execute("INSERT INTO users(email,name,password_hash,role) VALUES ('old@test','Old','hash','member')")
-    assert db.migrate() == ["008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     with db.connect() as conn:
         assert conn.execute("SELECT r.routes FROM users u JOIN roles r ON r.id=u.role_id").fetchone()["routes"] == ["review", "scraping"]
         new = conn.execute(
@@ -185,7 +185,7 @@ def test_users_migration_preserves_populated_006_and_reruns_as_noop(pg_url):
             "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename <> 'schema_migrations'")]
         before = {table: conn.execute(sql.SQL("SELECT * FROM {}").format(sql.Identifier(table))).fetchall()
                   for table in tables}
-    assert db.migrate() == ["007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         for table, rows in before.items():
@@ -214,7 +214,7 @@ def test_upgrade_001_backfills_legacy_and_rerun_is_noop(pg_url):
         client = conn.execute("INSERT INTO clients (name) VALUES ('Legacy') RETURNING id").fetchone()["id"]
         conn.execute("INSERT INTO candidates (email_key, review_state, client_id) VALUES ('old@x.test', 'approved', %s)", (client,))
         conn.execute("INSERT INTO candidates (email_key) VALUES ('new@x.test')")
-    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["002_stages_publish.sql", "003_client_details.sql", "004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         old = conn.execute("SELECT * FROM candidates WHERE email_key='old@x.test'").fetchone()
@@ -254,7 +254,7 @@ def test_upgrade_002_preserves_populated_clients_and_adds_details(pg_url):
         conn.execute("CREATE TABLE schema_migrations (name text PRIMARY KEY)")
         conn.execute("INSERT INTO schema_migrations VALUES ('001_init.sql'), ('002_stages_publish.sql')")
         conn.execute("INSERT INTO clients (name, emails, stage, amounts) VALUES ('Legacy', ARRAY['old@test.com'], 'paid', '[{\"amount\": 500}]')")
-    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["003_client_details.sql", "004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         row = conn.execute("SELECT * FROM clients").fetchone()
@@ -273,7 +273,7 @@ def test_upgrade_003_adds_job_tables_and_keeps_clients(pg_url):
             conn.execute((db.MIGRATIONS_DIR / name).read_text())
             conn.execute("INSERT INTO schema_migrations VALUES (%s)", (name,))
         conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
-    assert db.migrate() == ["004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["004_jobs.sql", "005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT name FROM clients").fetchone()["name"] == "Kept"
@@ -401,7 +401,7 @@ def test_upgrade_004_preserves_jobs_logs_and_data_and_reserves_paused_slot(pg_ur
         conn.execute("INSERT INTO jobs (name,status,params) VALUES ('scrape','running','{\"done_mailboxes\":[\"a\"]}')")
         conn.execute("INSERT INTO job_log (job_id,line) VALUES (1,'kept')")
         conn.execute("INSERT INTO clients (name) VALUES ('Kept')")
-    assert db.migrate() == ["005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql"]
+    assert db.migrate() == ["005_job_controls.sql", "006_job_mailboxes.sql", "007_users.sql", "008_user_routes.sql", "009_schedule.sql", "010_roles.sql", "011_master_list.sql", "012_directory_sync.sql", "013_scrape_anchor.sql", "014_rebuild_queue.sql", "015_publish_history.sql"]
     assert db.migrate() == []
     with db.connect() as conn:
         assert conn.execute("SELECT params, control FROM jobs").fetchone() == {"params": {"done_mailboxes": ["a"]}, "control": None}

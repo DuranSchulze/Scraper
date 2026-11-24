@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { keys, scheduleQuery, updateSchedule } from "@/lib/api";
-import { ago } from "@/lib/format";
+import { ago, phDateTime } from "@/lib/format";
 import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 
@@ -34,7 +34,7 @@ export function ScheduleCard() {
   });
   // A server value outside the presets (set from SCRAPE_EVERY_MINUTES) stays selectable.
   const options = [...new Set([...PRESETS, interval])].sort((a, b) => a - b).map((m) => ({ value: String(m), label: label(m) }));
-  const next = !data ? "" : !data.enabled ? "Off" : data.next_run_at ? new Date(data.next_run_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "After the current job ends";
+  const next = !data ? "" : !data.enabled ? "Off" : data.next_run_at ? phDateTime(data.next_run_at) : "After the current job ends";
 
   return (
     <Card>

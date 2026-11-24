@@ -222,3 +222,9 @@ html[data-sidebar-ready] .sb-label { transition: opacity 0.15s ease 0.05s; }
   from { left: -33%; }
   to { left: 100%; }
 }
+
+/* Logs report: Print / Save as PDF shows only the page content. */
+@media print {
+  .sb-aside, .sb-spacer, [data-print="hide"] { display: none !important; }
+  main { padding: 0 !important; }
+}

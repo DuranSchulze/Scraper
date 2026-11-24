@@ -19,7 +19,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from . import auth, db, master, pipeline
+from . import auth, db, logs, master, pipeline
 from .db import JobStopped
 from .config import RULES_PATH, ROOT, env, env_list, jwt_secret, load_rules
 
@@ -128,6 +128,8 @@ configure_middleware(app)
 
 # --- Persistent jobs (one running row across all API processes) ---
 
+# Philippine time for log lines: a fixed +08:00 (no DST), so the slim image needs no tzdata.
+PHT = timezone(timedelta(hours=8))
 HEARTBEAT_SECONDS = 30
 PAUSE_POLL_SECONDS = 2
 
@@ -137,7 +139,7 @@ def log(job_id: int, msg: str) -> None:
         with db.connect() as conn:
             conn.autocommit = True
             conn.execute("INSERT INTO job_log (job_id, line) VALUES (%s,%s)",
-                         (job_id, f"{datetime.now():%H:%M:%S} {msg}"))
+                         (job_id, f"{datetime.now(PHT):%H:%M:%S} {msg}"))
             conn.execute("UPDATE jobs SET heartbeat_at=clock_timestamp() WHERE id=%s AND status IN ('running','paused')", (job_id,))
     except (PostgresError, RuntimeError) as exc:
         line = msg.replace("\r", "\\r").replace("\n", "\\n")
@@ -453,6 +455,69 @@ def put_schedule(body: ScheduleIn):
         conn.execute("UPDATE schedule SET enabled=%s,interval_minutes=%s,updated_at=clock_timestamp() WHERE id=1",
                      (body.enabled, body.interval_minutes))
         return _schedule(conn)
+
+
+def _log_range(date_from: str, date_to: str) -> dict:
+    try:
+        return logs.bounds(date_from, date_to)
+    except ValueError as exc:
+        raise HTTPException(422, f"Invalid date range: {exc}")
+
+
+@app.get("/api/logs/summary", dependencies=[Depends(auth.require_route("scraping"))])
+def logs_summary(date_from: str = Query("", alias="from"), date_to: str = Query("", alias="to")):
+    r = _log_range(date_from, date_to)
+    with db.connect() as conn:
+        _seed_schedule(conn)
+        return logs.summary(conn, r, _schedule(conn))
+
+
+@app.get("/api/logs/jobs", dependencies=[Depends(auth.require_route("scraping"))])
+def logs_jobs(response: Response, date_from: str = Query("", alias="from"), date_to: str = Query("", alias="to"),
+              page: int = Query(1, ge=1), size: int = Query(25, ge=1, le=200)):
+    r = _log_range(date_from, date_to)
+    with db.connect() as conn:
+        rows, total = logs.jobs(conn, r, size, (page - 1) * size)
+    response.headers["X-Total-Count"] = str(total)
+    return rows
+
+
+@app.get("/api/logs/daily", dependencies=[Depends(auth.require_route("scraping"))])
+def logs_daily(date_from: str = Query("", alias="from"), date_to: str = Query("", alias="to")):
+    r = _log_range(date_from, date_to)
+    with db.connect() as conn:
+        return logs.daily(conn, r)
+
+
+@app.get("/api/logs/published", dependencies=[Depends(auth.require_route("scraping"))])
+def logs_published(response: Response, date_from: str = Query("", alias="from"), date_to: str = Query("", alias="to"),
+                   page: int = Query(1, ge=1), size: int = Query(25, ge=1, le=200)):
+    r = _log_range(date_from, date_to)
+    with db.connect() as conn:
+        rows, total = logs.published(conn, r, size, (page - 1) * size)
+    response.headers["X-Total-Count"] = str(total)
+    return rows
+
+
+@app.get("/api/logs/export", dependencies=[Depends(auth.require_route("scraping"))])
+def logs_export(table: Literal["jobs", "daily", "published", "all"], format: Literal["csv", "xlsx"] = "csv",
+                date_from: str = Query("", alias="from"), date_to: str = Query("", alias="to")):
+    if table == "all" and format == "csv":
+        raise HTTPException(422, "Export every table as xlsx, or one table as csv")
+    r = _log_range(date_from, date_to)
+    with db.connect() as conn:
+        if format == "csv":
+            body, media = logs.to_csv(logs.table_rows(conn, table, r)), "text/csv; charset=utf-8"
+        else:
+            _seed_schedule(conn)
+            names = ("jobs", "daily", "published") if table == "all" else (table,)
+            sheets = {"Summary": logs.summary_rows(logs.summary(conn, r, _schedule(conn)))} if table == "all" else {}
+            titles = {"jobs": "Scrape runs", "daily": "Daily totals", "published": "Added to directory"}
+            sheets.update({titles[n]: logs.table_rows(conn, n, r) for n in names})
+            body = logs.to_xlsx(sheets)
+            media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    name = f"scraper-{'report' if table == 'all' else table}-{r['from']}-to-{r['to']}.{format}"
+    return Response(body, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 class ScrapeIn(BaseModel):
@@ -851,8 +916,8 @@ def _approve(conn, cand: dict, c: ClientIn):
         (Jsonb(values), getuser(), cand["id"]))
 
 
-@app.post("/api/publish", dependencies=[Depends(auth.require_route("review"))])
-def publish():
+@app.post("/api/publish")
+def publish(user=Depends(auth.require_route("review"))):
     inserted = updated = 0
     with db.connect() as conn:
         rows = conn.execute(
@@ -886,8 +951,12 @@ def publish():
                     " payments, client_since, services_availed, departments)"
                     " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id", vals).fetchone()["id"]
                 inserted += 1
-            conn.execute("UPDATE candidates SET client_id=%s, published_at=clock_timestamp(), updated_at=now() WHERE id=%s",
+            conn.execute("UPDATE candidates SET client_id=%s, published_at=clock_timestamp(),"
+                         " first_published_at=coalesce(first_published_at, clock_timestamp()), updated_at=now() WHERE id=%s",
                          (client_id, cand["id"]))
+        if inserted or updated:
+            conn.execute("INSERT INTO publish_events (by_user, inserted, updated) VALUES (%s,%s,%s)",
+                         (user.get("email") or user.get("name"), inserted, updated))
     return {"published": inserted + updated, "inserted": inserted, "updated": updated}
 
 

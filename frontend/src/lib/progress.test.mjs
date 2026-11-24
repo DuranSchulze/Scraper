@@ -2,6 +2,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { clock, stageView } from "./progress.ts";
+import { day, phDateTime, stamp } from "./format.ts";
+
+test("format: instants show in Philippine time; plain dates stay as they are", () => {
+  // 23:30 UTC on Nov 23 is 07:30 on Nov 24 in Manila.
+  assert.equal(stamp("2026-11-23T23:30:00Z"), "2026-11-24 07:30");
+  assert.equal(day("2026-11-23T23:30:00Z"), "2026-11-24");
+  assert.equal(day("2026-11-15"), "2026-11-15");
+  assert.equal(stamp("2026-11-24T07:30:00+08:00"), "2026-11-24 07:30");
+  assert.equal(phDateTime("2026-11-24T01:23:00Z"), "Nov 24, 2026, 9:23 AM PHT");
+  assert.equal(stamp(null), "");
+  assert.equal(phDateTime("nonsense"), "");
+});
 
 test("clock: minutes, hours, never negative", () => {
   assert.equal(clock(754_000), "12:34");

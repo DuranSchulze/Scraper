@@ -1,5 +1,8 @@
 import { queryOptions } from "@tanstack/react-query";
-import type { Account, Candidate, CandidateRow, MailboxBoard, MasterSummary, RawItem, Role, RouteKey, Status, TimelineBucket, User } from "./types";
+import type {
+  Account, Candidate, CandidateRow, LogDay, LogJob, LogPublished, LogRange, LogsSummary, MailboxBoard, MasterSummary,
+  RawItem, Role, RouteKey, Status, TimelineBucket, User,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public retryAfter: number | null = null) {
@@ -149,6 +152,34 @@ export const timelineQuery = (f: Filters, bucket: Bucket, scrapeJob: number | nu
   // While loading, sections show their on-page counts.
   retry: (n, e) => !(e instanceof ApiError && e.status === 409) && n < 3,
 });
+
+/** Logs page: every query takes the same Philippine-date range. */
+const logsPath = (path: string, r: LogRange, extra: Record<string, string> = {}) =>
+  `/api/logs/${path}?` + qs({ from: r.from, to: r.to, ...extra });
+export const LOG_PAGE_SIZE = 25;
+export const logsSummaryQuery = (r: LogRange) => queryOptions({
+  queryKey: ["logs", "summary", r] as const,
+  queryFn: () => request<LogsSummary>(logsPath("summary", r)),
+  refetchInterval: 30_000,
+});
+export const logsJobsQuery = (r: LogRange, page: number) => queryOptions({
+  queryKey: ["logs", "jobs", r, page] as const,
+  queryFn: () => requestWithTotal<LogJob[]>(logsPath("jobs", r, { page: String(page), size: String(LOG_PAGE_SIZE) })),
+  placeholderData: (prev) => prev,
+  refetchInterval: 30_000,
+});
+export const logsDailyQuery = (r: LogRange) => queryOptions({
+  queryKey: ["logs", "daily", r] as const,
+  queryFn: () => request<LogDay[]>(logsPath("daily", r)),
+});
+export const logsPublishedQuery = (r: LogRange, page: number) => queryOptions({
+  queryKey: ["logs", "published", r, page] as const,
+  queryFn: () => requestWithTotal<LogPublished[]>(logsPath("published", r, { page: String(page), size: String(LOG_PAGE_SIZE) })),
+  placeholderData: (prev) => prev,
+});
+/** A same-origin download link; the session cookie authorises it. */
+export const logsExportUrl = (r: LogRange, table: "jobs" | "daily" | "published" | "all", format: "csv" | "xlsx") =>
+  logsPath("export", r, { table, format });
 
 export const masterSummaryQuery = queryOptions({
   queryKey: keys.master,

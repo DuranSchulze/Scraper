@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { boardQuery, canUse, keys, meQuery, post, scheduleQuery, statusQuery } from "@/lib/api";
-import { stamp } from "@/lib/format";
+import { phDateTime, stamp } from "@/lib/format";
 import type { JobProgress, RouteKey, Status, User } from "@/lib/types";
 import { clock, stageView } from "@/lib/progress";
 import { Pill } from "@/components/review/badges";
@@ -212,7 +212,7 @@ function NextScrape() {
     : `Next auto-scrape in ${clock(at - now)}`;
   return (
     <span role="timer" aria-live="off" className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground tabular-nums"
-      title={at ? new Date(at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : undefined}>
+      title={at ? phDateTime(at) : undefined}>
       <Timer aria-hidden className="h-3.5 w-3.5 shrink-0" />{text}
     </span>
   );

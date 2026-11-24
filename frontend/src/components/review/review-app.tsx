@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, MORE_KEYS, masterSummaryQuery, PAGE_SIZE, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
 import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { phDateTime } from "@/lib/format";
 import { PageHeader } from "@/components/shell/page-header";
 import { ConfirmDialog } from "./confirm-dialog";
 import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
@@ -259,7 +260,7 @@ function DirectoryLine() {
         <>
           <span>Client directory: <span className="tabular-nums text-foreground">{m.companies.toLocaleString()}</span> companies, <span className="tabular-nums text-foreground">{m.contacts.toLocaleString()}</span> contacts.</span>
           <span><span className="tabular-nums text-foreground">{m.email.toLocaleString()}</span> pending records match by email, <span className="tabular-nums text-foreground">{m.domain.toLocaleString()}</span> by company domain.</span>
-          {m.tagged_at && <span>Tagged {new Date(m.tagged_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}; retagged after every scrape.</span>}
+          {m.tagged_at && <span>Tagged {phDateTime(m.tagged_at)}; retagged after every scrape.</span>}
         </>
       ) : <span>The client directory tables are not in this database yet, so no records are tagged.</span>}
     </p>

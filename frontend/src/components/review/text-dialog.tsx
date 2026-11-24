@@ -5,6 +5,7 @@ import { ChevronRight, Paperclip } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { rawQuery, rulesQuery } from "@/lib/api";
 import type { RawItem } from "@/lib/types";
+import { phDateTime } from "@/lib/format";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
 
 const PRE = "max-h-[65vh] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted/50 p-3 font-mono text-xs";
@@ -24,7 +25,7 @@ export function splitQuoted(body: string): [string, string] {
 
 function when(v: string) {
   const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? v : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(d.getTime()) ? v : phDateTime(v);
 }
 
 function Fold({ label, children }: { label: string; children: React.ReactNode }) {

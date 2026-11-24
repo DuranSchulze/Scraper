@@ -14,7 +14,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ApiError, candidatesQuery, keys, PAGE_SIZE, post, statusQuery, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
-import { day, money } from "@/lib/format";
+import { day, money, PH } from "@/lib/format";
 import type { CandidateRow, TimelineBucket } from "@/lib/types";
 import { sections } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
@@ -55,7 +55,7 @@ export function pageList(page: number, pages: number): (number | "…")[] {
 }
 
 // Local time: when the user's own scrape finished.
-const SCRAPED = new Intl.DateTimeFormat(undefined, { dateStyle: "medium" });
+const SCRAPED = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: PH });
 const DATE_LABEL = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const sectionLabel = (key: string | null, bucket: Bucket) =>
   key === null ? "No date" : `${bucket === "week" ? "Week of " : ""}${DATE_LABEL.format(new Date(`${key}T00:00:00Z`))}`;

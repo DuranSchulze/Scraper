@@ -1,6 +1,32 @@
-export const day = (iso?: string | null) => (iso ?? "").slice(0, 10);
+/** Every time in the app is shown in Philippine time, whatever the viewer's computer is set to. */
+export const PH = "Asia/Manila";
 
-export const stamp = (iso?: string | null) => (iso ? iso.slice(0, 16).replace("T", " ") : "");
+const PH_PARTS = new Intl.DateTimeFormat("en-CA", {
+  timeZone: PH, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+});
+const PH_LONG = new Intl.DateTimeFormat("en-US", { timeZone: PH, dateStyle: "medium", timeStyle: "short" });
+
+/** "YYYY-MM-DD HH:MM" in Philippine time; "" for empty or unparseable input. */
+function phParts(iso: string) {
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return null;
+  const p = Object.fromEntries(PH_PARTS.formatToParts(t).map((x) => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
+}
+
+/** The Philippine calendar date of an instant. A plain date ("2026-11-15") is already a calendar day and is kept. */
+export const day = (iso?: string | null) => !iso ? "" : /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : phParts(iso)?.date ?? iso.slice(0, 10);
+
+export const stamp = (iso?: string | null) => {
+  const p = iso ? phParts(iso) : null;
+  return p ? `${p.date} ${p.time}` : "";
+};
+
+/** "Nov 24, 2026, 9:23 AM PHT"; "" when unknown. */
+export const phDateTime = (iso?: string | number | null) => {
+  const t = typeof iso === "number" ? iso : iso ? Date.parse(iso) : NaN;
+  return isFinite(t) ? `${PH_LONG.format(t)} PHT` : "";
+};
 
 export const money = (a: { amount: number; currency: string }) =>
   `${a.currency} ${Number(a.amount).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;

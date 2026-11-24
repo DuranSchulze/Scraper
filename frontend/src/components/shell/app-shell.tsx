@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
-import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, RefreshCw, ScanSearch, Sun, Users } from "lucide-react";
+import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, RefreshCw, ScanSearch, ScrollText, Sun, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
@@ -24,6 +24,7 @@ const NAV = [
   { label: "Workspace", items: [
     { href: "/", label: "Review", icon: ListChecks, route: "review" },
     { href: "/scraping", label: "Scraping", icon: ScanSearch, route: "scraping" },
+    { href: "/logs", label: "Logs", icon: ScrollText, route: "scraping" },
   ] },
   { label: "Admin", items: [
     { href: "/accounts", label: "Accounts", icon: Users, route: "accounts" },
@@ -293,11 +294,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
+        <div data-print="hide" className="contents">
         <StatusBar leading={
           <Button size="icon" variant="outline" className="lg:hidden" aria-label="Open navigation" onClick={() => setDrawer(true)}>
             <Menu className="h-4 w-4 shrink-0" />
           </Button>
         } />
+        </div>
         <main className="flex-1 p-4 lg:p-6">{children}</main>
       </div>
       <ConfirmDialog open={confirm} onOpenChange={setConfirm} title="Sign out?" confirmLabel="Sign out" pending={signingOut}

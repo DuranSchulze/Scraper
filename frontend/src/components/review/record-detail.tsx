@@ -12,7 +12,7 @@ import { SheetClose, SheetDescription, SheetTitle } from "@/components/ui/sheet"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { candidateQuery, keys, post } from "@/lib/api";
-import { day, money, stamp } from "@/lib/format";
+import { day, money, phDateTime, stamp } from "@/lib/format";
 import { STAGES, STATUSES, type Candidate, type CandidateFields, type Field } from "@/lib/types";
 import { Pill, StageBadge } from "./badges";
 import { ClientDetails } from "./client-details";
@@ -219,7 +219,7 @@ function DetailForm({ c, onDone, nav }: { c: Candidate; onDone: (next: number | 
           <div className="flex flex-col gap-6">
             {restored && (
               <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-info/30 bg-info/10 px-3 py-2 text-sm">
-                Restored unsaved edits from {new Date(restored).toLocaleString()}.
+                Restored unsaved edits from {phDateTime(restored)}.
                 <Button type="button" variant="ghost" size="sm" disabled={guard.busy} onClick={discard}>Discard edits</Button>
               </div>
             )}

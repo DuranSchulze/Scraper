@@ -34,6 +34,33 @@ export type Status = {
   last_complete_scrape_at: string | null;
 };
 
+/** Logs page (GET /api/logs/*). Dates are Philippine calendar days; timestamps are ISO instants. */
+export type LogRange = { from: string; to: string };
+export type LogsSummary = {
+  range: LogRange;
+  stored: Partial<Record<"gmail" | "contacts" | "sheets", number>>;
+  fetched: Partial<Record<"gmail" | "contacts" | "sheets", number>>;
+  runs: { total: number; auto: number; full: number; completed: number; unfinished: number };
+  last_complete_scrape_at: string | null;
+  last_full_scrape_at: string | null;
+  next_run_at: string | null;
+  schedule: { enabled: boolean | null; interval_minutes: number | null };
+  backlog_pending: number;
+  published: number;
+  clients_total: number;
+  candidates: Partial<Record<ReviewState, number>>;
+};
+export type LogJob = {
+  id: number; name: "scrape" | "extract"; status: JobStatus; completed: boolean; auto: boolean; full: boolean;
+  started_at: string; finished_at: string | null; seconds: number | null; failures: number; error: string | null;
+  mailboxes_done: number; mailboxes: number; emails_fetched: number;
+};
+export type LogDay = { day: string; emails: number; contacts: number; sheet_rows: number; runs: number; completed_runs: number; published: number };
+export type LogPublished = {
+  id: number; email: string; name: string | null; company: string | null; client_id: number | null;
+  first_published_at: string; published_at: string | null; reviewed_by: string | null;
+};
+
 export type JobProgress = {
   stage: "fetch" | "extract" | "tag"; done: number; total: number; started_at: string;
   /** Present while the time-boxed backlog pass drains older unextracted items. */
