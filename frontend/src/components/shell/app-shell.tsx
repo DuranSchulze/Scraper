@@ -144,7 +144,7 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
           <Tooltip disabled={!tip}>
             <TooltipTrigger render={
               <button type="button" onClick={toggleCollapsed} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
-                className={cn(ROW, IDLE, "border border-border")} />
+                className={cn(ROW, IDLE)} />
             }>
               <span className={SLOT}>
                 <PanelLeftClose className={cn("sb-icon-expanded", ICON)} />
@@ -164,7 +164,7 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
           <Tooltip disabled={!tip}>
           <TooltipTrigger render={
             <MenuPrimitive.Trigger aria-label={`Account menu for ${name}`}
-              className={cn(ROW, "h-12 min-w-0 flex-1 border border-border text-left text-sidebar-foreground hover:bg-sidebar-accent/70 data-popup-open:bg-sidebar-accent")} />
+              className={cn(ROW, "h-12 min-w-0 flex-1 text-left text-sidebar-foreground hover:bg-sidebar-accent/70 data-popup-open:bg-sidebar-accent")} />
           }>
             <span className={SLOT}>
               <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-accent-foreground uppercase ring-1 ring-sidebar-border">{name.slice(0, 1)}</span>
@@ -204,7 +204,7 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
         </MenuPrimitive.Root>
         <button type="button" onClick={toggleTheme} title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          className="mr-2 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md border border-border text-sidebar-foreground/80 outline-none transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring in-data-[sidebar=collapsed]:lg:hidden">
+          className="mr-2 flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-sidebar-foreground/80 outline-none transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring in-data-[sidebar=collapsed]:lg:hidden">
           {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
         </button>
         </div>
