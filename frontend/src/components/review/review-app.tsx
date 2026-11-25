@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, MORE_KEYS, masterSummaryQuery, PAGE_SIZE, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
-import { STAGES, STATUSES, type ReviewState } from "@/lib/types";
+import { STAGES, STATUSES } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { phDateTime } from "@/lib/format";
 import { PageHeader } from "@/components/shell/page-header";
@@ -36,7 +36,7 @@ const MATCH_OPTIONS = [
   { value: "", label: "Any directory match" }, { value: "any", label: "In client directory" },
   { value: "email", label: "Exact email" }, { value: "domain", label: "Same domain" }, { value: "none", label: "Not in directory" },
 ];
-const BUCKETS: { value: Bucket; label: string }[] = [{ value: "day", label: "Day" }, { value: "week", label: "Week" }];
+const BUCKETS: { value: Bucket; label: string }[] = [{ value: "day", label: "By day" }, { value: "week", label: "By week" }];
 const TOGGLES = ["new", "has_phone", "has_amount"] as const;
 const RESETS_PAGE =new Set<string>(["state", "sort", "order", ...FILTER_KEYS]);
 const any = (label: string, values: string[] = []) => [{ value: "", label }, ...values.map((v) => ({ value: v, label: v }))];
@@ -116,17 +116,10 @@ export function ReviewApp() {
       <PageHeader title="Review" description="Records grouped by date, tagged when a client directory contact has the same email or company domain. Shortcuts in a record: A approve, R reject, J / K next / previous." />
       <DirectoryLine />
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <StateTabs value={filters.state} counts={status?.candidates}
+        <PillTabs label="Review state" options={STATE_OPTIONS} value={filters.state} counts={status?.candidates}
           onChange={(v) => setParams({ state: v === "pending" ? null : v, id: null, ...(v !== "pending" && { match: null }) })} />
-        <div role="group" aria-label="Group records by" className="inline-flex rounded-full bg-muted/40 p-0.5">
-          {BUCKETS.map((b) => (
-            <button key={b.value} type="button" aria-pressed={bucket === b.value} onClick={() => setParams({ bucket: b.value === "day" ? null : b.value })}
-              className={cn("inline-flex h-7 items-center rounded-full border border-border px-3 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring",
-                bucket === b.value ? "bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
-              By {b.label.toLowerCase()}
-            </button>
-          ))}
-        </div>
+        <PillTabs label="Group records by" options={BUCKETS} value={bucket}
+          onChange={(v) => setParams({ bucket: v === "day" ? null : v })} />
       </div>
       <div role="group" aria-label="Filters" className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="ghost" aria-pressed={!!filters.new} onClick={() => toggle("new")}
@@ -209,26 +202,33 @@ export function ReviewApp() {
   );
 }
 
-/** Pending / Confirmed / Rejected / Merged: a solid brand pill slides under the selected tab. */
-function StateTabs({ value, counts, onChange }: {
-  value: string; counts?: Partial<Record<ReviewState, number>>; onChange: (v: string) => void;
+/** A pill tab switch (review state, day/week grouping): a solid brand pill slides under the selected tab. */
+function PillTabs({ label, options, value, counts, onChange }: {
+  label: string; options: readonly { value: string; label: string }[]; value: string;
+  counts?: Partial<Record<string, number>>; onChange: (v: string) => void;
 }) {
   const refs = useRef(new Map<string, HTMLButtonElement>());
   const [box, setBox] = useState<{ left: number; width: number } | null>(null);
-  // Measure the selected tab; counts change its width, so remeasure when they arrive.
+  // Measure the selected tab, and remeasure when any tab resizes (counts arriving, the web font swapping in).
   useLayoutEffect(() => {
-    const el = refs.current.get(value);
-    if (el) setBox({ left: el.offsetLeft, width: el.offsetWidth });
+    const measure = () => {
+      const el = refs.current.get(value);
+      if (el) setBox({ left: el.offsetLeft, width: el.offsetWidth });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    refs.current.forEach((el) => ro.observe(el));
+    return () => ro.disconnect();
   }, [value, counts]);
   return (
-    <div role="group" aria-label="Review state" className="relative inline-flex max-w-full overflow-x-auto rounded-full bg-muted/60 p-1">
+    <div role="group" aria-label={label} className="relative inline-flex max-w-full overflow-x-auto rounded-full bg-muted/60 p-1">
       {box && (
         <span aria-hidden style={{ left: box.left, width: box.width }}
           className="absolute top-1 bottom-1 rounded-full bg-primary shadow-sm transition-[left,width] duration-300 ease-out motion-reduce:transition-none" />
       )}
-      {STATE_OPTIONS.map((o) => {
+      {options.map((o) => {
         const active = value === o.value;
-        const n = counts?.[o.value as ReviewState];
+        const n = counts?.[o.value];
         return (
           <button key={o.value} type="button" aria-pressed={active} onClick={() => onChange(o.value)}
             ref={(el) => { if (el) refs.current.set(o.value, el); else refs.current.delete(o.value); }}
