@@ -1,9 +1,10 @@
-# Local deploy: API + scraper (daily run at DAILY_SCRAPE_AT) and the web UI. Database stays on Neon.
+# Local deploy: API + scraper (daily run at DAILY_SCRAPE_AT) and the web UI. Database runs locally in the db service.
 services:
   api:
     build: ./backend
     env_file: .env
     environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@db:5432/client_directory  # .env's localhost URL is for runs outside Docker
       HOST: 0.0.0.0
       GUI_PORT: "8765"
       PORT: "8765"  # PORT wins over GUI_PORT; must match web's SCRAPER_API_URL
@@ -12,6 +13,24 @@ services:
       APP_URL: http://localhost:3000
     volumes:
       - ${SA_KEY_PATH:?set SA_KEY_PATH in .env to the service account JSON on this PC}:/secrets/sa-key.json:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: client_directory
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5434:5432"  # 5432/5433 are taken by the native PG 13/18 installs
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d client_directory"]
+      interval: 5s
+      retries: 10
     restart: unless-stopped
   web:
     build: ./frontend
@@ -19,3 +38,5 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     restart: unless-stopped
+volumes:
+  pgdata:
