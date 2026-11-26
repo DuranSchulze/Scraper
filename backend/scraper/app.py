@@ -327,6 +327,15 @@ def _run_job(job_id: int, name: str, params: dict) -> None:
             logger(f"ERROR: {error}")
         elif result in ("done", "done_with_errors"):
             logger(f"{name}: finished")
+            if name == "scrape":
+                try:
+                    synced = _sync_matched()
+                    logger(f"auto-sync: approved {synced['approved']}, skipped {len(synced['skipped'])}")
+                except HTTPException as exc:
+                    logger(f"auto-sync skipped: {exc.detail}")
+                except (PostgresError, RuntimeError) as exc:
+                    # PostgreSQL error details can contain candidate data.
+                    logger(f"auto-sync failed: {type(exc).__name__}")
 
 
 def _launch_job(job_id: int, name: str, params: dict) -> None:
@@ -1045,6 +1054,10 @@ class ApproveMatchedIn(BaseModel):
 
 @app.post("/api/candidates/approve-matched", dependencies=[Depends(auth.require_route("review"))])
 def approve_matched(body: ApproveMatchedIn | None = None):
+    return _sync_matched(body.expected if body else None)
+
+
+def _sync_matched(expected: int | None = None) -> dict:
     approved, skipped = 0, []
     with db.connect() as conn:
         if not conn.execute(master.TRY_LOCK).fetchone()["ok"]:
@@ -1053,7 +1066,7 @@ def approve_matched(body: ApproveMatchedIn | None = None):
         if master.available(conn):
             rows = conn.execute(
                 f"SELECT * FROM candidates WHERE {master.APPROVABLE} ORDER BY id FOR UPDATE").fetchall()
-        if body is not None and body.expected is not None and body.expected != len(rows):
+        if expected is not None and expected != len(rows):
             raise HTTPException(409, "matched count changed")
         if not rows:
             return {"approved": 0, "skipped": []}

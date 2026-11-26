@@ -1,3 +1,4 @@
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from scraper.app import app
@@ -1093,6 +1094,73 @@ def test_runner_persists_completion_and_error_status(conn, monkeypatch, outcome)
     assert state["job_failures"] == (2 if outcome == "done_with_errors" else 0)
     assert state["error"] == ("ValueError('fixture failure')" if outcome == "failed" else None)
     assert any(line.endswith("doing work") for line in state["log"])
+
+
+@pytest.mark.parametrize("outcome", ["done", "done_with_errors"])
+def test_finished_scrape_auto_syncs_matches(conn, directory, monkeypatch, outcome):
+    company, = directory([("Company", [])])
+    good = insert_review_candidate(conn, "good@co.test", match="email", master_ids=[company])
+    bad = insert_review_candidate(conn, "bad@co.test", {"name": 123}, match="email", master_ids=[company])
+    conn.commit()
+
+    def scrape(log, **kwargs):
+        if outcome == "done_with_errors":
+            log.failure()
+
+    monkeypatch.setattr(pipeline, "run_scrape", scrape)
+    monkeypatch.setattr(app_module, "_launch_job", app_module._run_job)
+    job_id = app_module.start_job("scrape", {"sources": [], "mailboxes": [], "since": None, "full": False})
+
+    assert conn.execute("SELECT status FROM jobs WHERE id=%s", (job_id,)).fetchone()["status"] == outcome
+    rows = conn.execute("SELECT id, review_state FROM candidates WHERE id=ANY(%s)", ([good, bad],)).fetchall()
+    assert {r["id"]: r["review_state"] for r in rows} == {good: "approved", bad: "pending"}
+    lines = conn.execute("SELECT line FROM job_log WHERE job_id=%s", (job_id,)).fetchall()
+    assert any(row["line"].endswith("auto-sync: approved 1, skipped 1") for row in lines)
+
+
+@pytest.mark.parametrize("name,outcome,sync_error,log_line", [
+    ("scrape", "done", HTTPException(409, "directory busy"), "auto-sync skipped: directory busy"),
+    ("scrape", "done_with_errors", OperationalError("row includes private@co.test"), "auto-sync failed: OperationalError"),
+    ("scrape", "done", RuntimeError("database not configured"), "auto-sync failed: RuntimeError"),
+    ("scrape", "stopped", None, None),
+    ("scrape", "failed", None, None),
+    ("extract", "done", None, None),
+])
+def test_job_runner_only_auto_syncs_finished_scrapes(monkeypatch, name, outcome, sync_error, log_line):
+    events = []
+
+    class Log:
+        def __init__(self, _job_id):
+            pass
+
+        def checkpoint(self):
+            pass
+
+        def __call__(self, message):
+            events.append(message)
+
+    def finish(*args):
+        events.append(outcome)
+        return outcome
+
+    def sync():
+        assert sync_error is not None
+        events.append("sync")
+        raise sync_error
+
+    monkeypatch.setattr(app_module, "JobLog", Log)
+    monkeypatch.setattr(app_module, "_heartbeat", lambda *_: None)
+    monkeypatch.setattr(app_module, "_finish_job", finish)
+    monkeypatch.setattr(app_module, "_sync_matched", sync)
+    monkeypatch.setattr(pipeline, "run_scrape", lambda **_: None)
+    monkeypatch.setattr(pipeline, "run_extract", lambda *_, **__: None)
+    app_module._run_job(1, name, {"sources": [], "mailboxes": [], "since": None, "full": False})
+
+    assert events[0] == outcome
+    if log_line:
+        assert events[1:] == ["scrape: finished", "sync", log_line]
+    else:
+        assert len(events) == 2
 
 
 def test_heartbeat_updates_without_log_output_while_runner_is_alive(conn, monkeypatch):
