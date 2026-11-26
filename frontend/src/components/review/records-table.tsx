@@ -3,17 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Inbox, Loader2, Mail, Sparkles, UserX, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, AtSign, BookUser, Building2, CalendarDays, CheckCircle2, ChevronRight, FileSpreadsheet, Inbox, Mail, Sparkles, UserX, X } from "lucide-react";
 import { badgeVariants } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Card } from "@/components/ui/card";
-import {
-  Pagination, PaginationContent, PaginationEllipsis, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious,
-} from "@/components/ui/pagination";
+import { TablePager } from "@/components/ui/table-pager";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ApiError, candidatesQuery, keys, PAGE_SIZE, post, statusQuery, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
+import { ApiError, candidatesQuery, keys, post, statusQuery, timelineQuery, type Bucket, type BulkResult, type Filters, type SortKey } from "@/lib/api";
 import { day, money, PH } from "@/lib/format";
 import type { CandidateRow, TimelineBucket } from "@/lib/types";
 import { sections } from "@/lib/timeline";
@@ -47,22 +45,15 @@ async function bulk(ids: number[], action: "approve" | "reject"): Promise<BulkRe
   return out;
 }
 
-/** Page numbers to show: first, last, and the current page with one neighbour each side; gaps become "…". */
-export function pageList(page: number, pages: number): (number | "…")[] {
-  const keep = [...new Set([1, page - 1, page, page + 1, pages])].filter((p) => p >= 1 && p <= pages).sort((a, b) => a - b);
-  // A gap of exactly one page shows that page instead of an ellipsis.
-  return keep.flatMap((p, i) => i === 0 || p - keep[i - 1] === 1 ? [p] : p - keep[i - 1] === 2 ? [p - 1, p] : ["…" as const, p]);
-}
-
 // Local time: when the user's own scrape finished.
 const SCRAPED = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: PH });
 const DATE_LABEL = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const sectionLabel = (key: string | null, bucket: Bucket) =>
   key === null ? "No date" : `${bucket === "week" ? "Week of " : ""}${DATE_LABEL.format(new Date(`${key}T00:00:00Z`))}`;
 
-export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, onPage, pageHref, toolbar }: {
+export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, onPage, onSize, toolbar }: {
   filters: Filters; bucket: Bucket; selectedId: number | null; onSelect: (id: number) => void; onSort: (key: SortKey) => void;
-  onPage: (page: number) => void; pageHref: (page: number) => string; toolbar?: React.ReactNode;
+  onPage: (page: number) => void; onSize: (size: number) => void; toolbar?: React.ReactNode;
 }) {
   const tableRef = useRef<HTMLTableElement>(null);
   // A new page starts at the top of the scrolling table.
@@ -101,7 +92,6 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
   // Same-page background refreshes are not placeholder data, so they never flash.
   const turning = isPlaceholderData;
   const rows = data?.rows;
-  const pages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
 
   // Ticked records (pending tab only). Any filter, sort, page or tab change starts a fresh selection.
   const selectable = filters.state === "pending";
@@ -139,14 +129,6 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
       qc.invalidateQueries({ queryKey: keys.status });
     },
   });
-  const from = (filters.page - 1) * PAGE_SIZE;
-  // Real links (middle-click opens a new tab); a plain click pages in place without a reload.
-  const pageLink = (p: number, disabled: boolean) => disabled
-    ? { "aria-disabled": true, tabIndex: -1, className: "cursor-not-allowed opacity-50" }
-    : { href: pageHref(p), onClick: (e: React.MouseEvent) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-        e.preventDefault(); onPage(p);
-      } };
   return (
     <Card className="gap-0 overflow-hidden py-0">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
@@ -240,33 +222,8 @@ export function RecordsTable({ filters, bucket, selectedId, onSelect, onSort, on
             ))}
           </TableBody>
       </Table>
-      {data && data.total > PAGE_SIZE && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 px-4 py-2.5">
-          <p className="text-sm text-muted-foreground tabular-nums" aria-live="polite">
-            Showing <span className="font-medium text-foreground">{(from + 1).toLocaleString()}–{Math.min(from + PAGE_SIZE, data.total).toLocaleString()}</span> of{" "}
-            <span className="font-medium text-foreground">{data.total.toLocaleString()}</span> records
-          </p>
-          <Pagination aria-label="Records pages" className="mx-0 w-auto justify-end">
-            <PaginationContent>
-              <PaginationItem>
-                <PaginationPrevious {...pageLink(filters.page - 1, filters.page <= 1)} />
-              </PaginationItem>
-              {pageList(filters.page, pages).map((p, i) => (
-                <PaginationItem key={p === "…" ? `gap${i}` : p}>
-                  {p === "…" ? <PaginationEllipsis /> : (
-                    <PaginationLink isActive={p === filters.page} className="tabular-nums" {...pageLink(p, false)}>
-                      {turning && p === filters.page ? <Loader2 aria-hidden className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" /> : p.toLocaleString()}
-                      {turning && p === filters.page && <span className="sr-only">{`Page ${p.toLocaleString()}, loading`}</span>}
-                    </PaginationLink>
-                  )}
-                </PaginationItem>
-              ))}
-              <PaginationItem>
-                <PaginationNext {...pageLink(filters.page + 1, filters.page >= pages)} />
-              </PaginationItem>
-            </PaginationContent>
-          </Pagination>
-        </div>
+      {data && data.total > 0 && (
+        <TablePager page={filters.page} size={filters.size} total={data.total} loading={turning} itemLabel="records" onPage={onPage} onSize={onSize} />
       )}
     </Card>
   );

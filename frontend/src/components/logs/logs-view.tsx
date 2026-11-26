@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, Download, FileSpreadsheet, FileText, Inbox, Printer, Timer, UserPlus } from "lucide-react";
+import { CalendarClock, CheckCircle2, Download, FileSpreadsheet, FileText, Inbox, Printer, Timer, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -14,7 +14,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { PageHeader } from "@/components/shell/page-header";
 import { Pill } from "@/components/review/badges";
 import { DateRangeFilter } from "@/components/review/date-range";
-import { LOG_PAGE_SIZE, logsDailyQuery, logsExportUrl, logsJobsQuery, logsPublishedQuery, logsSummaryQuery } from "@/lib/api";
+import { DEFAULT_PAGE_SIZE, TablePager } from "@/components/ui/table-pager";
+import { logsDailyQuery, logsExportUrl, logsJobsQuery, logsPublishedQuery, logsSummaryQuery } from "@/lib/api";
 import { day, phDateTime, stamp } from "@/lib/format";
 import type { JobStatus, LogJob, LogRange } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -172,18 +173,25 @@ function Section({ title, count, children, footer }: { title: string; count?: nu
   );
 }
 
-function Pager({ page, total, onPage }: { page: number; total: number; onPage: (p: number) => void }) {
-  const pages = Math.max(1, Math.ceil(total / LOG_PAGE_SIZE));
-  if (pages < 2) return null;
-  return (
-    <div data-print="hide" className="flex items-center justify-between gap-3 bg-muted/30 px-4 py-2 text-sm text-muted-foreground">
-      <span className="tabular-nums">Page {n(page)} of {n(pages)}</span>
-      <span className="flex gap-1">
-        <Button size="sm" variant="ghost" disabled={page <= 1} onClick={() => onPage(page - 1)} aria-label="Previous page"><ChevronLeft className="h-4 w-4" /></Button>
-        <Button size="sm" variant="ghost" disabled={page >= pages} onClick={() => onPage(page + 1)} aria-label="Next page"><ChevronRight className="h-4 w-4" /></Button>
-      </span>
-    </div>
-  );
+/** Page and size for a paged log table; both reset when the date range changes. */
+function usePaging(range: LogRange) {
+  const key = `${range.from}|${range.to}`;
+  const [state, setState] = useState({ key: "", page: 1, size: DEFAULT_PAGE_SIZE });
+  const page = state.key === key ? state.page : 1;
+  return {
+    page, size: state.size,
+    onPage: (p: number) => setState((s) => ({ ...s, key, page: p })),
+    onSize: (size: number) => setState({ key, page: 1, size }),
+  };
+}
+
+/** Stays mounted while a page loads (keeps keyboard focus); placeholder data carries the previous query's total, so the pager
+ *  shows it as loading. Steps back once a fresh total puts the page out of range. */
+function LogPager({ paging, total, fresh, itemLabel }: { paging: ReturnType<typeof usePaging>; total?: number; fresh: boolean; itemLabel: string }) {
+  const last = Math.max(1, Math.ceil((total ?? 0) / paging.size));
+  const { page, onPage } = paging;
+  useEffect(() => { if (fresh && total != null && page > last) onPage(last); }, [fresh, total, page, last, onPage]);
+  return total ? <TablePager {...paging} total={total} loading={!fresh} itemLabel={itemLabel} /> : null;
 }
 
 function Rows({ cols, loading, error, empty, children }: { cols: number; loading: boolean; error: Error | null; empty: boolean; children: React.ReactNode }) {
@@ -196,13 +204,13 @@ function Rows({ cols, loading, error, empty, children }: { cols: number; loading
 const HEAD = "bg-muted [&_th]:h-9 [&_th]:px-3 [&_th]:text-xs [&_th]:font-medium [&_th]:text-muted-foreground";
 
 function JobsTable({ range }: { range: LogRange }) {
-  const [state, setState] = useState({ key: "", page: 1 });
-  const key = `${range.from}|${range.to}`;
-  const page = state.key === key ? state.page : 1;
-  const { data, error, isPending } = useQuery(logsJobsQuery(range, page));
+  const paging = usePaging(range);
+  // Placeholder data is the previous page: show loading rows, not rows that don't match the pager.
+  const { data, error, isPending: pending, isPlaceholderData } = useQuery(logsJobsQuery(range, paging.page, paging.size));
+  const isPending = pending || isPlaceholderData;
   return (
     <Section title="Scrape runs" count={data?.total}
-      footer={data && <Pager page={page} total={data.total} onPage={(p) => setState({ key, page: p })} />}>
+      footer={<LogPager paging={paging} total={data?.total} fresh={!isPending} itemLabel="runs" />}>
       <Table className="min-w-[960px]" containerClassName="overflow-auto">
         <TableHeader className={HEAD}>
           <TableRow className="hover:bg-transparent">
@@ -283,13 +291,12 @@ function DailyTable({ range }: { range: LogRange }) {
 }
 
 function PublishedTable({ range }: { range: LogRange }) {
-  const [state, setState] = useState({ key: "", page: 1 });
-  const key = `${range.from}|${range.to}`;
-  const page = state.key === key ? state.page : 1;
-  const { data, error, isPending } = useQuery(logsPublishedQuery(range, page));
+  const paging = usePaging(range);
+  const { data, error, isPending: pending, isPlaceholderData } = useQuery(logsPublishedQuery(range, paging.page, paging.size));
+  const isPending = pending || isPlaceholderData;
   return (
     <Section title="Added to directory" count={data?.total}
-      footer={data && <Pager page={page} total={data.total} onPage={(p) => setState({ key, page: p })} />}>
+      footer={<LogPager paging={paging} total={data?.total} fresh={!isPending} itemLabel="clients" />}>
       <Table containerClassName="overflow-auto">
         <TableHeader className={HEAD}>
           <TableRow className="hover:bg-transparent">

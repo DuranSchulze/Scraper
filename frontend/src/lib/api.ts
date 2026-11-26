@@ -79,7 +79,7 @@ export const post = <T = { ok: boolean }>(path: string, body?: unknown) =>
 
 export type SortKey = "last_contact" | "first_contact";
 export type Filters = {
-  state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc"; page: number;
+  state: string; stage: string; status: string; department: string; q: string; sort: SortKey; order: "asc" | "desc"; page: number; size: number;
   mailbox: string; service: string; domain: string; has_phone: string; has_amount: string; date_from: string; date_to: string;
   match: string; new: string;
 };
@@ -91,7 +91,6 @@ import type { Bucket } from "./timeline";
 export type { Bucket };
 export type Facets = { departments: string[]; mailboxes: string[]; services: string[] };
 export type BulkResult = { done: number[]; failed: { id: number; error: string }[] };
-export const PAGE_SIZE = 50;
 
 export const keys = {
   status: ["status"] as const,
@@ -137,7 +136,7 @@ const qs = (o: Record<string, string>) => new URLSearchParams(Object.entries(o).
 
 export const candidatesQuery = (f: Filters) => queryOptions({
   queryKey: keys.candidates(f),
-  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + qs({ ...f, page: String(f.page), size: String(PAGE_SIZE) })),
+  queryFn: () => requestWithTotal<CandidateRow[]>("/api/candidates?" + qs({ ...f, page: String(f.page), size: String(f.size) })),
   placeholderData: (prev) => prev,
 });
 
@@ -147,7 +146,7 @@ export const timelineQuery = (f: Filters, bucket: Bucket, scrapeJob: number | nu
   queryKey: keys.timeline(f, bucket, scrapeJob),
   // Page and order don't change section totals; the API ignores them.
   queryFn: () => request<TimelineBucket[]>("/api/candidates/timeline?" + qs({
-    ...f, page: String(f.page), field: f.sort, bucket, ...(scrapeJob ? { scrape_job: String(scrapeJob) } : {}) })),
+    ...f, page: String(f.page), size: String(f.size), field: f.sort, bucket, ...(scrapeJob ? { scrape_job: String(scrapeJob) } : {}) })),
   // No placeholder: totals from other filters or another scrape must never sit next to these rows.
   // While loading, sections show their on-page counts.
   retry: (n, e) => !(e instanceof ApiError && e.status === 409) && n < 3,
@@ -156,15 +155,14 @@ export const timelineQuery = (f: Filters, bucket: Bucket, scrapeJob: number | nu
 /** Logs page: every query takes the same Philippine-date range. */
 const logsPath = (path: string, r: LogRange, extra: Record<string, string> = {}) =>
   `/api/logs/${path}?` + qs({ from: r.from, to: r.to, ...extra });
-export const LOG_PAGE_SIZE = 25;
 export const logsSummaryQuery = (r: LogRange) => queryOptions({
   queryKey: ["logs", "summary", r] as const,
   queryFn: () => request<LogsSummary>(logsPath("summary", r)),
   refetchInterval: 30_000,
 });
-export const logsJobsQuery = (r: LogRange, page: number) => queryOptions({
-  queryKey: ["logs", "jobs", r, page] as const,
-  queryFn: () => requestWithTotal<LogJob[]>(logsPath("jobs", r, { page: String(page), size: String(LOG_PAGE_SIZE) })),
+export const logsJobsQuery = (r: LogRange, page: number, size: number) => queryOptions({
+  queryKey: ["logs", "jobs", r, page, size] as const,
+  queryFn: () => requestWithTotal<LogJob[]>(logsPath("jobs", r, { page: String(page), size: String(size) })),
   placeholderData: (prev) => prev,
   refetchInterval: 30_000,
 });
@@ -172,9 +170,9 @@ export const logsDailyQuery = (r: LogRange) => queryOptions({
   queryKey: ["logs", "daily", r] as const,
   queryFn: () => request<LogDay[]>(logsPath("daily", r)),
 });
-export const logsPublishedQuery = (r: LogRange, page: number) => queryOptions({
-  queryKey: ["logs", "published", r, page] as const,
-  queryFn: () => requestWithTotal<LogPublished[]>(logsPath("published", r, { page: String(page), size: String(LOG_PAGE_SIZE) })),
+export const logsPublishedQuery = (r: LogRange, page: number, size: number) => queryOptions({
+  queryKey: ["logs", "published", r, page, size] as const,
+  queryFn: () => requestWithTotal<LogPublished[]>(logsPath("published", r, { page: String(page), size: String(size) })),
   placeholderData: (prev) => prev,
 });
 /** A same-origin download link; the session cookie authorises it. */

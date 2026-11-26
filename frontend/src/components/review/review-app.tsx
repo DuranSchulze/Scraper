@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AtSign, BookUser, RefreshCw, Search, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -9,8 +9,9 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
-import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, MORE_KEYS, masterSummaryQuery, PAGE_SIZE, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
+import { ApiError, candidatesQuery, facetsQuery, FILTER_KEYS, MORE_KEYS, masterSummaryQuery, post, statusQuery, type Bucket, type Filters } from "@/lib/api";
 import { STAGES, STATUSES } from "@/lib/types";
+import { DEFAULT_PAGE_SIZE, pageSize } from "@/components/ui/table-pager";
 import { cn } from "@/lib/utils";
 import { phDateTime } from "@/lib/format";
 import { PageHeader } from "@/components/shell/page-header";
@@ -38,11 +39,11 @@ const MATCH_OPTIONS = [
 ];
 const BUCKETS: { value: Bucket; label: string }[] = [{ value: "day", label: "By day" }, { value: "week", label: "By week" }];
 const TOGGLES = ["new", "has_phone", "has_amount"] as const;
-const RESETS_PAGE =new Set<string>(["state", "sort", "order", ...FILTER_KEYS]);
+const RESETS_PAGE =new Set<string>(["state", "sort", "order", "size", ...FILTER_KEYS]);
 const any = (label: string, values: string[] = []) => [{ value: "", label }, ...values.map((v) => ({ value: v, label: v }))];
 
 export function ReviewApp() {
-  const router = useRouter(), pathname = usePathname(), params = useSearchParams();
+  const pathname = usePathname(), params = useSearchParams();
   const state = params.get("state") || "pending";
   const filters: Filters = {
     state,
@@ -55,6 +56,7 @@ export function ReviewApp() {
     sort: params.get("sort") === "first_contact" ? "first_contact" : "last_contact",
     order: params.get("order") === "asc" ? "asc" : "desc",
     page: Math.max(1, Math.floor(Number(params.get("page"))) || 1),
+    size: pageSize(params.get("size")),
   };
   const bucket: Bucket = params.get("bucket") === "week" ? "week" : "day";
   const selectedId = Number(params.get("id")) || null;
@@ -77,18 +79,19 @@ export function ReviewApp() {
     if (lastScrape !== null && listAt > 0 && (listScrape ?? 0) < lastScrape) qc.invalidateQueries({ queryKey: ["candidates"] });
   }, [lastScrape, listScrape, listAt, qc]);
 
-  const href = (patch: Record<string, string | null>) => {
-    const next = new URLSearchParams(params);
+  const setParams = (patch: Record<string, string | null>) => {
+    // Read the live URL, not this render's params, so a debounced search never undoes a change made since (e.g. Rows).
+    const next = new URLSearchParams(window.location.search);
     for (const [k, v] of Object.entries(patch)) if (v) next.set(k, v); else next.delete(k);
     // Any filter or sort change starts again at page 1.
     if (Object.keys(patch).some((k) => RESETS_PAGE.has(k))) next.delete("page");
-    return `${pathname}?${next}`;
+    // replaceState writes the URL at once (Next syncs useSearchParams), so the next update sees it.
+    window.history.replaceState(null, "", `${pathname}?${next}`);
   };
-  const setParams = (patch: Record<string, string | null>) => router.replace(href(patch), { scroll: false });
   const pagePatch = (p: number) => ({ page: p > 1 ? String(p) : null });
 
   // Reviewing records shrinks the list; step back if the current page no longer exists.
-  const lastPage = list ? Math.max(1, Math.ceil(list.total / PAGE_SIZE)) : null;
+  const lastPage = list ? Math.max(1, Math.ceil(list.total / filters.size)) : null;
   useEffect(() => {
     if (lastPage && filters.page > lastPage) setParams(pagePatch(lastPage));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only a changed total should trigger this
@@ -175,7 +178,7 @@ export function ReviewApp() {
         )}
       </div>
       <RecordsTable filters={filters} bucket={bucket} selectedId={selectedId} onSelect={(id) => setParams({ id: String(id) })}
-        onPage={(p) => setParams(pagePatch(p))} pageHref={(p) => href(pagePatch(p))}
+        onPage={(p) => setParams(pagePatch(p))} onSize={(s) => setParams({ size: s === DEFAULT_PAGE_SIZE ? null : String(s) })}
         onSort={(sort) => {
           // A new column starts oldest first; the active column flips. The default (last contact, newest) leaves the URL clean.
           const order = sort === filters.sort && filters.order === "asc" ? "desc" : "asc";
@@ -194,7 +197,7 @@ export function ReviewApp() {
                 {selectedId && (
                   <RecordDetail key={selectedId} id={selectedId} onDone={(next) => setParams({ id: next ? String(next) : null })}
                     prevId={ids[pos - 1] ?? null} nextId={pos >= 0 ? ids[pos + 1] ?? null : null}
-                    onNav={(id) => setParams({ id: String(id) })} position={pos >= 0 && list ? `${((filters.page - 1) * PAGE_SIZE + pos + 1).toLocaleString()} of ${list.total.toLocaleString()}` : null} />
+                    onNav={(id) => setParams({ id: String(id) })} position={pos >= 0 && list ? `${((filters.page - 1) * filters.size + pos + 1).toLocaleString()} of ${list.total.toLocaleString()}` : null} />
                 )}
               </SheetContent>
             </Sheet>
