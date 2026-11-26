@@ -8,6 +8,16 @@ export function clock(ms: number): string {
   return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
 }
 
+/** Explicit unit labels ("1h 02m 03s", "12m 34s", "45s"); never negative. */
+export function clockLabeled(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (h) return `${h}h ${pad(m)}m ${pad(sec)}s`;
+  if (m) return `${m}m ${pad(sec)}s`;
+  return `${sec}s`;
+}
+
 const STAGE = {
   fetch: { label: "Fetching mail", unit: "mailboxes" },
   extract: { label: "Extracting records", unit: "items" },

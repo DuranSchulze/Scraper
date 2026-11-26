@@ -4,7 +4,10 @@ export const PH = "Asia/Manila";
 const PH_PARTS = new Intl.DateTimeFormat("en-CA", {
   timeZone: PH, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
 });
-const PH_LONG = new Intl.DateTimeFormat("en-US", { timeZone: PH, dateStyle: "medium", timeStyle: "short" });
+const PH_LONG = new Intl.DateTimeFormat("en-GB", { timeZone: PH, dateStyle: "medium", timeStyle: "short", hourCycle: "h23" });
+const PH_TIME_12 = new Intl.DateTimeFormat("en-US", { timeZone: PH, hour: "numeric", minute: "2-digit", hour12: true });
+const PH_LONG_12 = new Intl.DateTimeFormat("en-US", { timeZone: PH, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
+const PH_DAY_MONTH = new Intl.DateTimeFormat("en-GB", { timeZone: PH, day: "numeric", month: "short" });
 
 /** "YYYY-MM-DD HH:MM" in Philippine time; "" for empty or unparseable input. */
 function phParts(iso: string) {
@@ -22,10 +25,39 @@ export const stamp = (iso?: string | null) => {
   return p ? `${p.date} ${p.time}` : "";
 };
 
-/** "Nov 24, 2026, 9:23 AM PHT"; "" when unknown. */
+const toTime = (iso?: string | number | null) => typeof iso === "number" ? iso : iso ? Date.parse(iso) : NaN;
+
+/** "24 Nov 2026, 09:23 PHT"; "" when unknown. */
 export const phDateTime = (iso?: string | number | null) => {
-  const t = typeof iso === "number" ? iso : iso ? Date.parse(iso) : NaN;
+  const t = toTime(iso);
   return isFinite(t) ? `${PH_LONG.format(t)} PHT` : "";
+};
+
+/** "09:23" on today's Philippine date, "27 Nov 09:23" this year, else "27 Nov 2025 09:23"; "" when unknown. */
+export const phShort = (iso?: string | number | null, now = Date.now()) => {
+  const t = toTime(iso);
+  if (!isFinite(t)) return "";
+  const p = phParts(new Date(t).toISOString())!;
+  const today = phParts(new Date(now).toISOString())!.date;
+  if (p.date === today) return p.time;
+  return `${PH_DAY_MONTH.format(t)}${p.date.slice(0, 4) === today.slice(0, 4) ? "" : ` ${p.date.slice(0, 4)}`} ${p.time}`;
+};
+
+/** "9:23 AM PHT" on today's Philippine date, "27 Nov, 9:23 AM PHT" this year, else "27 Nov 2025, 9:23 AM PHT"; "" when unknown. */
+export const phShort12 = (iso?: string | number | null, now = Date.now()) => {
+  const t = toTime(iso);
+  if (!isFinite(t)) return "";
+  const p = phParts(new Date(t).toISOString())!;
+  const today = phParts(new Date(now).toISOString())!.date;
+  const time = `${PH_TIME_12.format(t)} PHT`;
+  if (p.date === today) return time;
+  return `${PH_DAY_MONTH.format(t)}${p.date.slice(0, 4) === today.slice(0, 4) ? "" : ` ${p.date.slice(0, 4)}`}, ${time}`;
+};
+
+/** "Nov 24, 2026, 9:23 AM PHT"; "" when unknown. */
+export const phDateTime12 = (iso?: string | number | null) => {
+  const t = toTime(iso);
+  return isFinite(t) ? `${PH_LONG_12.format(t)} PHT` : "";
 };
 
 export const money = (a: { amount: number; currency: string }) =>

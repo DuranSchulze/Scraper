@@ -8,9 +8,9 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 import { boardQuery, canUse, keys, meQuery, post, scheduleQuery, statusQuery } from "@/lib/api";
-import { phDateTime, stamp } from "@/lib/format";
+import { phDateTime12, phShort12 } from "@/lib/format";
 import type { JobProgress, RouteKey, Status, User } from "@/lib/types";
-import { clock, stageView } from "@/lib/progress";
+import { clockLabeled, stageView } from "@/lib/progress";
 import { Pill } from "@/components/review/badges";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
@@ -90,11 +90,14 @@ export function StatusBar({ leading }: { leading?: React.ReactNode }) {
 
         <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
           {!s && !error ? <><LoadingLabel>Loading job status…</LoadingLabel><Skeleton className="h-4 w-32" /><Skeleton className="h-5 w-20 rounded-full" /></>
-            : s?.job ? <span className="text-muted-foreground">Last job: <span className="font-medium text-foreground">{s.job}</span></span>
+            : complete ? null
+            : s?.job ? <span className="font-medium capitalize text-foreground">{s.job}</span>
             : <span className="text-muted-foreground">No job has run yet</span>}
           {/* A finished run's state is shown by ScrapeComplete (for scrape users), so the pill would repeat it. */}
           {state && !complete && <Pill tone={state.tone}>{state.label}{s?.job_failures ? ` · ${s.job_failures} failure(s)` : ""}</Pill>}
-          {s?.job_started_at && <span className="text-xs text-muted-foreground tabular-nums">started {stamp(s.job_started_at)}</span>}
+          {/* A finished job shows when it ended; ScrapeComplete already does for a finished scrape. */}
+          {!complete && (!running && s?.job_finished_at ? <When label="at" at={s.job_finished_at} />
+            : s?.job_started_at && <When label="Started" at={s.job_started_at} />)}
           {jobId && canScrape && <JobControls status={s!.job_status} control={s!.job_control} busy={control.isPending || resume.isPending}
             resuming={resume.isPending}
             onPause={() => control.mutate({ id: jobId, action: "pause" })}
@@ -186,14 +189,14 @@ function useNow() {
 function StageProgress({ progress, paused, running }: { progress: JobProgress | null; paused: boolean; running: number }) {
   const now = useNow();
   const view = progress ? stageView(progress) : { label: "Starting", count: "", value: null };
-  const elapsed = progress ? clock(now - new Date(progress.started_at).getTime()) : "";
+  const elapsed = progress ? clockLabeled(now - new Date(progress.started_at).getTime()) : "";
   const label = `${view.label}${paused ? " (paused)" : ""}`;
   return (
     <div className="flex min-w-[14rem] flex-1 flex-col gap-1 sm:max-w-sm">
       <div className="flex items-baseline justify-between gap-2 text-xs">
         <span className="truncate font-medium text-foreground">{label}</span>
         <span className="whitespace-nowrap text-muted-foreground tabular-nums">
-          {view.count}{view.count && progress?.stage === "fetch" && running ? ` · ${running} running` : ""}{elapsed ? `${view.count ? " · " : ""}${elapsed}` : ""}
+          {view.count}{view.count && progress?.stage === "fetch" && running ? ` · ${running} running` : ""}{elapsed ? `${view.count ? " · " : ""}${elapsed} elapsed` : ""}
         </span>
       </div>
       {view.value == null
@@ -208,19 +211,25 @@ function StageProgress({ progress, paused, running }: { progress: JobProgress | 
 /** Idle after a finished scrape: says it is complete, when it finished, and when the next one runs. */
 function ScrapeComplete({ errors, finishedAt }: { errors: number; finishedAt: string | null }) {
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+    <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
       <Pill tone={errors ? "warning" : "success"} className="gap-1">
         <CheckCircle2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
         {errors ? `Complete with ${errors} error(s)` : "Scrape complete"}
       </Pill>
-      {finishedAt && <span className="text-xs text-muted-foreground">Finished {phDateTime(finishedAt)}</span>}
-      <NextScrape withTime />
+      {finishedAt && <When label="Finished" at={finishedAt} />}
+      <NextScrape />
     </div>
   );
 }
 
+/** "Finished 7:04 AM PHT" style label; re-renders on the live clock so a past-midnight time gains its date. */
+function When({ label, at }: { label: string; at: string }) {
+  const now = useNow();
+  return <span className="text-xs text-muted-foreground tabular-nums" title={phDateTime12(at)}>{label} <time dateTime={at}>{phShort12(at, now)}</time></span>;
+}
+
 /** Idle: a live countdown to the next automatic scrape, from the saved schedule. */
-function NextScrape({ withTime = false }: { withTime?: boolean }) {
+function NextScrape() {
   const now = useNow();
   const { data: sched } = useQuery(scheduleQuery);
   if (!sched) return null;
@@ -228,10 +237,10 @@ function NextScrape({ withTime = false }: { withTime?: boolean }) {
   const text = !sched.enabled ? "Auto-scrape off"
     : at == null ? "Next auto-scrape after the current job"
     : at - now <= 0 ? "Auto-scrape starting…"
-    : `Next auto-scrape in ${clock(at - now)}${withTime ? ` · ${phDateTime(at)}` : ""}`;
+    : `Next scrape at ${phShort12(at, now)} · in ${clockLabeled(at - now)}`;
   return (
     <span role="timer" aria-live="off" className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground tabular-nums"
-      title={at ? phDateTime(at) : undefined}>
+      title={at ? phDateTime12(at) : undefined}>
       <Timer aria-hidden className="h-3.5 w-3.5 shrink-0" />{text}
     </span>
   );

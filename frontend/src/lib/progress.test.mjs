@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { clock, stageView } from "./progress.ts";
-import { day, phDateTime, stamp } from "./format.ts";
+import { day, phDateTime, phShort, stamp } from "./format.ts";
 
 test("format: instants show in Philippine time; plain dates stay as they are", () => {
   // 23:30 UTC on Nov 23 is 07:30 on Nov 24 in Manila.
@@ -10,7 +10,12 @@ test("format: instants show in Philippine time; plain dates stay as they are", (
   assert.equal(day("2026-11-23T23:30:00Z"), "2026-11-24");
   assert.equal(day("2026-11-15"), "2026-11-15");
   assert.equal(stamp("2026-11-24T07:30:00+08:00"), "2026-11-24 07:30");
-  assert.equal(phDateTime("2026-11-24T01:23:00Z"), "Nov 24, 2026, 9:23 AM PHT");
+  assert.equal(phDateTime("2026-11-24T01:23:00Z"), "24 Nov 2026, 09:23 PHT");
+  // 15:55 UTC is 23:55 in Manila: same Manila day shows the time only; after Manila midnight it gains the date.
+  assert.equal(phShort("2026-11-24T15:55:00Z", Date.parse("2026-11-24T15:58:00Z")), "23:55");
+  assert.equal(phShort("2026-11-24T15:55:00Z", Date.parse("2026-11-24T16:00:00Z")), "24 Nov 23:55");
+  assert.equal(phShort("2025-12-31T15:55:00Z", Date.parse("2026-01-02T00:00:00Z")), "31 Dec 2025 23:55");
+  assert.equal(phShort(null), "");
   assert.equal(stamp(null), "");
   assert.equal(phDateTime("nonsense"), "");
 });

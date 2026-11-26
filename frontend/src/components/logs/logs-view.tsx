@@ -28,10 +28,10 @@ const STATUS: Record<JobStatus, { label: string; tone: "neutral" | "info" | "war
 };
 const n = (v?: number | null) => (v ?? 0).toLocaleString("en-US");
 
-/** Today's Philippine date, and the date `days` before it. */
+/** Today's Philippine date, and the 6 days before it (last 7 days). */
 function defaultRange(): LogRange {
   const to = day(new Date().toISOString());
-  const from = day(new Date(Date.parse(`${to}T00:00:00+08:00`) - 29 * 86_400_000).toISOString());
+  const from = day(new Date(Date.parse(`${to}T00:00:00+08:00`) - 6 * 86_400_000).toISOString());
   return { from, to };
 }
 
@@ -62,6 +62,7 @@ export function LogsView() {
         actions={
           <div data-print="hide" className="flex flex-wrap items-center gap-2">
             <DateRangeFilter from={range.from} to={range.to} onChange={setRange}
+              hint="Filters scrape history by date."
               className="h-8 rounded-full bg-muted/40 font-normal" />
             <ExportMenu range={range} />
           </div>
