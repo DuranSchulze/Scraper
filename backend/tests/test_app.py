@@ -112,7 +112,7 @@ def permission_client(conn, routes, role="Custom"):
     rid = conn.execute("INSERT INTO roles(name,routes) VALUES (%s,%s) RETURNING id", (role, routes)).fetchone()["id"]
     user = conn.execute(
         "INSERT INTO users(email,name,password_hash,role_id) VALUES ('routes@test','Routes','unused',%s)"
-        " RETURNING id", (rid,)).fetchone()
+        " RETURNING id,session_version", (rid,)).fetchone()
     conn.commit()
     return TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(user)})
 
@@ -147,7 +147,7 @@ def test_every_route_denies_without_changes_or_job_launch(conn, monkeypatch, den
     requests["accounts"] = [
         ("GET", "/api/roles", None), ("POST", "/api/roles", {"name": "Denied", "routes": ["accounts"]}),
         ("PATCH", "/api/roles/1", {"name": "Denied", "routes": ["accounts"]}), ("DELETE", "/api/roles/1", None),
-        ("GET", "/api/users", None), ("POST", "/api/users", {"email": "denied@test.com", "name": "Denied", "password": "x", "role_id": 1}),
+        ("GET", "/api/users", None), ("POST", "/api/users", {"email": "denied@test.com", "name": "Denied", "role_id": 1}),
         ("PATCH", "/api/users/1", {"role_id": 2}),
     ]
     requests["scraping"] += [("GET", "/api/schedule", None), ("PUT", "/api/schedule", {"enabled": False, "interval_minutes": 120})]

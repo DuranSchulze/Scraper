@@ -154,7 +154,7 @@ def test_summary_route_contract_permissions_and_removed_endpoints(conn, director
     for routes in (["review"], ["accounts"], ["scraping"]):
         with db.connect() as connection:
             role = connection.execute("INSERT INTO roles(name,routes) VALUES (%s,%s) RETURNING id", (routes[0], routes)).fetchone()["id"]
-            user = connection.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES (%s,'Test','unused',%s) RETURNING id",
+            user = connection.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES (%s,'Test','unused',%s) RETURNING id,session_version",
                                       (routes[0] + '@test', role)).fetchone()
         with TestClient(api.app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(user)}) as client:
             assert client.get("/api/master/summary").status_code == (200 if "review" in routes else 403)

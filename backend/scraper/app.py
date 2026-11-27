@@ -111,7 +111,7 @@ async def require_gui_header(request: Request, call_next):
     # Custom header forces a CORS preflight, so other websites cannot POST here.
     if request.method != "GET" and request.headers.get("x-local-gui") != "1":
         return JSONResponse({"detail": "missing X-Local-GUI header"}, status_code=403)
-    return await call_next(request)
+    return await auth.authenticate_before_body(request, call_next)
 
 
 def configure_middleware(application):

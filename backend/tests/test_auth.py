@@ -1,5 +1,6 @@
 """Authentication uses fixture accounts and disposable local Postgres only."""
 
+import json
 import time
 import runpy
 import traceback
@@ -21,6 +22,20 @@ GUI = {"X-Local-GUI": "1"}
 SECRET = "test-only-secret-with-at-least-64-characters-for-hmac-algorithm-tests"
 PASSWORD = "test-password-123"
 EMAIL = "admin@example.test"
+STRONG_PASSWORD = "Long!NewPass3"
+
+
+def login(client, email, password):
+    return client.post("/api/auth/login", json={"email": email, "password": password}, headers=GUI)
+
+
+def change_password(client, current, new):
+    return client.post("/api/auth/password", json={"current_password": current, "new_password": new}, headers=GUI)
+
+
+def legacy_token(user_id):
+    now = int(time.time())
+    return jwt.encode({"sub": str(user_id), "iat": now, "exp": now + 100}, SECRET, algorithm="HS256")
 
 
 def role_id(name):
@@ -60,12 +75,13 @@ def test_login_cookie_me_and_logout(authenticated_client):
     client = authenticated_client
     response = client.post("/api/auth/login", json={"email": EMAIL.upper(), "password": PASSWORD}, headers=GUI)
     user = response.json()
-    assert user == {"id": 1, "email": EMAIL, "name": "Admin", "role": {"id": role_id("Owner"), "name": "Owner"}, "routes": list(auth.ROUTES)}
+    assert user == {"id": 1, "email": EMAIL, "name": "Admin", "role": {"id": role_id("Owner"), "name": "Owner"},
+                    "routes": list(auth.ROUTES), "must_change_password": False, "session_version": 0}
     cookie = response.headers["set-cookie"]
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie and "Path=/" in cookie
     assert "Max-Age=28800" in cookie and "Secure" not in cookie
     claims = jwt.decode(client.cookies.get(auth.COOKIE), SECRET, algorithms=["HS256"])
-    assert claims["sub"] == "1" and "role" not in claims and claims["exp"] - claims["iat"] == 28800
+    assert claims["sub"] == "1" and claims["ver"] == 0 and "role" not in claims and claims["exp"] - claims["iat"] == 28800
     assert client.get("/api/auth/me").json() == user
     response = client.post("/api/auth/logout", headers=GUI)
     assert response.json() == {"ok": True}
@@ -78,10 +94,11 @@ def test_writes_require_matching_expected_user_when_supplied(authenticated_clien
     admin_id = admin.get("/api/auth/me").json()["id"]
     email = "member@example.test"
     created = admin.post("/api/users", headers=GUI, json={
-        "email": email, "name": "Member", "password": PASSWORD, "role_id": role_id("Developer"),
+        "email": email, "name": "Member", "role_id": role_id("Developer"),
     })
     assert created.status_code == 201
     member_id = created.json()["id"]
+    password = created.json()["temporary_password"]
     stale_headers = {**GUI, "X-Expected-User": str(admin_id)}
     schedule = "/api/schedule"
     body = {"enabled": True, "interval_minutes": 240}
@@ -90,8 +107,9 @@ def test_writes_require_matching_expected_user_when_supplied(authenticated_clien
     member = TestClient(app, base_url="http://localhost")
     try:
         assert member.put(schedule, headers=stale_headers, json=body).status_code == 401
-        login = member.post("/api/auth/login", headers=stale_headers, json={"email": email, "password": PASSWORD})
+        login = member.post("/api/auth/login", headers=stale_headers, json={"email": email, "password": password})
         assert login.status_code == 200 and login.json()["id"] == member_id
+        assert change_password(member, password, STRONG_PASSWORD).status_code == 200
         original = member.get(schedule, headers=stale_headers)
         assert original.status_code == 200
 
@@ -204,20 +222,28 @@ def test_every_api_route_requires_auth_before_validation(path, method):
         assert client.request(method, path).status_code == 403
 
 
-def test_users_create_list_and_case_insensitive_duplicates(authenticated_client):
-    body = {"email": "Member@Example.test", "name": " Member ", "password": PASSWORD, "role_id": role_id("Developer")}
+def test_users_create_list_and_case_insensitive_duplicates(authenticated_client, caplog):
+    caplog.set_level("DEBUG")
+    body = {"email": "Member@Example.test", "name": " Member ", "role_id": role_id("Developer")}
     response = authenticated_client.post("/api/users", json=body, headers=GUI)
     assert response.status_code == 201
     created = response.json()
     assert created["email"] == "member@example.test" and created["name"] == "Member" and created["active"] is True
-    assert set(created) == {"id", "email", "name", "role", "routes", "active", "created_at"}
+    assert set(created) == {"id", "email", "name", "role", "routes", "active", "created_at",
+                            "must_change_password", "session_version", "temporary_password"}
+    assert created["must_change_password"] is True and created["session_version"] == 0
+    password = created["temporary_password"]
+    assert len(password) == 16 and auth.validate_password(password, created["email"]) is None
+    assert response.headers["Cache-Control"] == "no-store"
     assert created["routes"] == ["review", "scraping"]
     users = authenticated_client.get("/api/users").json()
-    assert len(users) == 2 and all("password_hash" not in user for user in users)
+    assert len(users) == 2 and all(not {"password_hash", "temporary_password"} & user.keys() for user in users)
+    assert users[-1]["must_change_password"] is True
     assert authenticated_client.post("/api/users", json=body, headers=GUI).status_code == 409
     with db.connect() as conn:
-        stored = conn.execute("SELECT password_hash FROM users WHERE id=%s", (created["id"],)).fetchone()["password_hash"]
-    assert stored != PASSWORD and auth.verify_password(PASSWORD, stored)
+        stored = conn.execute("SELECT * FROM users WHERE id=%s", (created["id"],)).fetchone()
+    assert password not in stored.values() and auth.verify_password(password, stored["password_hash"])
+    assert password not in caplog.text
 
 
 @pytest.mark.parametrize("routes", [
@@ -229,7 +255,7 @@ def test_stored_and_effective_routes_are_canonical(authenticated_client, routes)
     expected = [key for key in auth.ROUTES if key in routes]
     assert role["routes"] == expected
     created = admin.post("/api/users", headers=GUI, json={
-        "email": "routes@example.test", "name": "Routes", "password": PASSWORD, "role_id": role["id"],
+        "email": "routes@example.test", "name": "Routes", "role_id": role["id"],
     })
     assert created.status_code == 201 and created.json()["routes"] == expected
     # Responses canonicalize arrays even when an external writer orders them differently.
@@ -237,14 +263,13 @@ def test_stored_and_effective_routes_are_canonical(authenticated_client, routes)
         conn.execute("UPDATE roles SET routes=%s WHERE id=%s", (routes, role["id"]))
     assert admin.get("/api/users").json()[-1]["routes"] == expected
     with TestClient(app, base_url="http://localhost") as member:
-        login = member.post("/api/auth/login", headers=GUI,
-                            json={"email": "routes@example.test", "password": PASSWORD})
-        assert login.status_code == 200
-        assert set(login.json()) == {"id", "email", "name", "role", "routes"}
-        assert login.json()["routes"] == expected
-        assert member.get("/api/auth/me").json() == login.json()
+        response = login(member, "routes@example.test", created.json()["temporary_password"])
+        assert response.status_code == 200
+        assert set(response.json()) == {"id", "email", "name", "role", "routes", "must_change_password", "session_version"}
+        assert response.json()["routes"] == expected
+        assert member.get("/api/auth/me").json() == response.json()
         claims = jwt.decode(member.cookies.get(auth.COOKIE), SECRET, algorithms=["HS256"])
-        assert set(claims) == {"sub", "iat", "exp"}
+        assert set(claims) == {"sub", "iat", "exp", "ver"}
 
 
 @pytest.mark.parametrize("routes", [[], ["unknown"], ["masterlist"], ["review", "unknown"], [None], None, "review"])
@@ -264,11 +289,11 @@ def test_role_edit_revokes_same_session_immediately(authenticated_client, revoke
     admin = authenticated_client
     role = new_role(admin, routes=list(auth.ROUTES))
     created = admin.post("/api/users", headers=GUI, json={
-        "email": "routes@example.test", "name": "Routes", "password": PASSWORD, "role_id": role["id"],
+        "email": "routes@example.test", "name": "Routes", "role_id": role["id"],
     }).json()
     with TestClient(app, base_url="http://localhost") as member:
-        assert member.post("/api/auth/login", headers=GUI, json={
-            "email": created["email"], "password": PASSWORD}).status_code == 200
+        assert login(member, created["email"], created["temporary_password"]).status_code == 200
+        assert change_password(member, created["temporary_password"], STRONG_PASSWORD).status_code == 200
         cookie = member.cookies.get(auth.COOKIE)
         assert member.get(endpoint).status_code == 200
         kept = [key for key in auth.ROUTES if key != revoked]
@@ -282,9 +307,9 @@ def test_role_edit_revokes_same_session_immediately(authenticated_client, revoke
 
 @pytest.mark.parametrize("change", [{"email": "invalid"}, {"email": "a@b"}, {"email": "a@bad_domain.test"},
                                     {"email": "a@-bad.test"}, {"email": "a..b@example.test"}, {"name": " "},
-                                    {"password": ""}, {"password": "x" * 1025}, {"role_id": 0}])
+                                    {"password": PASSWORD}, {"role_id": 0}])
 def test_user_validation(authenticated_client, change):
-    body = {"email": "new@example.test", "name": "New", "password": PASSWORD, "role_id": role_id("Developer"), **change}
+    body = {"email": "new@example.test", "name": "New", "role_id": role_id("Developer"), **change}
     response = authenticated_client.post("/api/users", json=body, headers=GUI)
     assert response.status_code == 422 and isinstance(response.json()["detail"], list)
     with db.connect() as conn:
@@ -298,6 +323,189 @@ def test_legacy_cookie_role_claim_is_ignored(authenticated_client):
     client.cookies.set(auth.COOKIE, token, domain="localhost.local", path="/")
     assert client.get("/api/auth/me").json()["role"]["name"] == "Owner"
     assert client.get("/api/roles").status_code == 200
+
+
+@pytest.mark.parametrize("version", [None, False, True, "0", 0.0, -1, 2147483648, 1])
+def test_invalid_or_stale_session_versions_are_unauthorized(authenticated_client, version):
+    claims = jwt.decode(legacy_token(1), SECRET, algorithms=["HS256"])
+    token = jwt.encode({**claims, "ver": version}, SECRET, algorithm="HS256")
+    authenticated_client.cookies.set(auth.COOKIE, token, domain="localhost.local", path="/")
+    assert authenticated_client.get("/api/auth/me").status_code == 401
+
+
+def test_migration_and_temporary_password_lifecycle(pg_url, monkeypatch, caplog):
+    monkeypatch.setenv("JWT_SECRET", SECRET)
+    monkeypatch.setenv("APP_URL", "")
+    monkeypatch.setenv("COOKIE_SAMESITE", "lax")
+    monkeypatch.setattr(auth, "buckets", {})
+    caplog.set_level("DEBUG")
+    migration = "017_temp_passwords.sql"
+    with monkeypatch.context() as patch:
+        pending = db.pending_migrations
+        patch.setattr(db, "pending_migrations", lambda applied: [p for p in pending(applied) if p.name < migration])
+        assert db.migrate()[-1] == "016_schedule_min_interval.sql"
+    with db.connect() as conn:
+        stored_hash = auth.hash_password(PASSWORD)
+        conn.execute(
+            "INSERT INTO users(email,name,password_hash,role_id) VALUES (%s,'Admin',%s,%s),(%s,'Member',%s,%s)",
+            (EMAIL, stored_hash, role_id("Owner"), "member@example.test", stored_hash, role_id("Developer")))
+        before = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
+    legacy = legacy_token(2)
+    assert db.migrate() == [migration]
+    assert db.migrate() == []
+    with db.connect() as conn:
+        assert conn.execute("SELECT * FROM users ORDER BY id").fetchall() == [
+            {**row, "must_change_password": False, "session_version": 0} for row in before
+        ]
+
+    with (TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: legacy_token(1)}) as admin,
+          TestClient(app, base_url="http://localhost") as member):
+        member.cookies.set(auth.COOKIE, legacy, domain="localhost.local", path="/")
+        assert member.get("/api/auth/me").json()["must_change_password"] is False
+        assert member.get("/api/jobs/latest/mailboxes").status_code == 200
+        reset = admin.post("/api/users/2/reset-password", headers=GUI)
+        assert reset.status_code == 200 and reset.headers["Cache-Control"] == "no-store"
+        assert set(reset.json()) == {"temporary_password"}
+        temporary = reset.json()["temporary_password"]
+        assert len(temporary) == 16 and auth.validate_password(temporary, "member@example.test") is None
+        with db.connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id=2").fetchone()
+        assert row["session_version"] == 1 and row["must_change_password"] is True
+        assert temporary not in row.values() and auth.verify_password(temporary, row["password_hash"])
+        assert member.get("/api/auth/me").status_code == 401
+        assert login(member, "member@example.test", PASSWORD).status_code == 401
+
+        signed_in = login(member, "member@example.test", temporary)
+        assert signed_in.status_code == 200 and signed_in.json()["must_change_password"] is True
+        assert member.get("/api/auth/me").json() == signed_in.json()
+        for path, method in API_ROUTES:
+            if (method, path) in {("GET", "/api/auth/me"), ("POST", "/api/auth/logout"), ("POST", "/api/auth/password")}:
+                continue
+            blocked = member.request(method, path, headers=GUI)
+            assert blocked.status_code == 403 and blocked.json() == {"detail": "Password change required"}, (method, path)
+        assert member.post("/api/auth/logout", headers=GUI).status_code == 200
+        assert member.get("/api/auth/me").status_code == 401
+        assert login(member, "member@example.test", temporary).status_code == 200
+        temporary_cookie = member.cookies.get(auth.COOKIE)
+
+        changed = change_password(member, temporary, STRONG_PASSWORD)
+        assert changed.status_code == 200 and "HttpOnly" in changed.headers["set-cookie"]
+        assert changed.json()["must_change_password"] is False and changed.json()["session_version"] == 2
+        assert member.cookies.get(auth.COOKIE) != temporary_cookie
+        assert member.get("/api/auth/me").json() == changed.json()
+        assert member.get("/api/jobs/latest/mailboxes").status_code == 200
+        with TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: temporary_cookie}) as stale:
+            assert stale.get("/api/auth/me").status_code == 401
+            assert login(stale, "member@example.test", temporary).status_code == 401
+            assert login(stale, "member@example.test", STRONG_PASSWORD).status_code == 200
+    assert temporary not in caplog.text and STRONG_PASSWORD not in caplog.text
+
+
+@pytest.mark.parametrize("method,path", [("POST", "/api/users"), ("PUT", "/api/schedule")])
+def test_forced_change_is_checked_before_json_parsing(authenticated_client, method, path):
+    def malformed_request():
+        return authenticated_client.request(method, path, headers={**GUI, "Content-Type": "application/json"},
+                                            content="{")
+
+    assert malformed_request().status_code == 422
+    with db.connect() as conn:
+        conn.execute("UPDATE users SET must_change_password=true")
+    blocked = malformed_request()
+    assert blocked.status_code == 403 and blocked.json() == {"detail": "Password change required"}
+
+
+def test_reset_errors_and_create_share_the_rate_limit(authenticated_client, monkeypatch):
+    admin = authenticated_client
+    monkeypatch.setattr(auth, "clock", lambda: 100.0)
+    with db.connect() as conn:
+        member = conn.execute(
+            "INSERT INTO users(email,name,password_hash,role_id) VALUES ('member@test','Member','unused',%s)"
+            " RETURNING id,session_version", (role_id("Developer"),)).fetchone()
+    with TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(member)}) as client:
+        assert client.post("/api/users/1/reset-password", headers=GUI).status_code == 403
+    assert admin.post("/api/users/1/reset-password", headers=GUI).status_code == 400
+    assert admin.post("/api/users/999999/reset-password", headers=GUI).status_code == 404
+    auth.buckets[("create_user", 1)] = (auth.deque([100.0] * 9), 3600)
+    reset_url = f"/api/users/{member['id']}/reset-password"
+    assert admin.post(reset_url, headers=GUI).status_code == 200
+    for url in ("/api/users", reset_url):
+        response = admin.post(url, json={}, headers=GUI)
+        assert response.status_code == 429 and response.headers["Retry-After"] == "3600"
+
+
+def test_voluntary_password_change_validation_and_rate_limit(authenticated_client, monkeypatch):
+    client = authenticated_client
+    monkeypatch.setattr(auth, "clock", lambda: 100.0)
+    for current, new, detail in (
+        ("wrong", STRONG_PASSWORD, "Current password is incorrect"),
+        (PASSWORD, PASSWORD, "New password must differ from the current password"),
+        (PASSWORD, "Aa1!short", "Password must be 12 to 128 characters"),
+    ):
+        response = change_password(client, current, new)
+        assert response.status_code == 400 and response.json() == {"detail": detail}
+    assert client.get("/api/auth/me").json()["session_version"] == 0
+    old_cookie = client.cookies.get(auth.COOKIE)
+    assert change_password(client, PASSWORD, STRONG_PASSWORD).status_code == 200
+    with TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: old_cookie}) as stale:
+        assert stale.get("/api/auth/me").status_code == 401
+    assert login(client, EMAIL, STRONG_PASSWORD).status_code == 200
+    assert change_password(client, STRONG_PASSWORD, STRONG_PASSWORD).status_code == 400
+    response = change_password(client, STRONG_PASSWORD, "Different!Pass7")
+    assert response.status_code == 429 and response.headers["Retry-After"] == "900"
+
+
+@pytest.mark.parametrize("path,field,body", [
+    ("/api/users", "password", {"email": "new@example.test", "name": "New", "role_id": 1}),
+    ("/api/auth/password", "current_password", {"new_password": STRONG_PASSWORD}),
+    ("/api/auth/login", "password", {"email": EMAIL}),
+])
+def test_credential_validation_does_not_echo_password(authenticated_client, path, field, body):
+    password = "plaintext-secret-marker" * 50
+    response = authenticated_client.post(path, headers=GUI, json={**body, field: password})
+    assert response.status_code == 422
+    detail, = response.json()["detail"]
+    assert detail["loc"] == ["body", field] and detail["msg"] and detail["type"]
+    assert "plaintext-secret-marker" not in response.text
+
+
+def test_password_change_rejects_invalid_unicode(authenticated_client):
+    client = authenticated_client
+    response = client.post("/api/auth/password", headers={**GUI, "Content-Type": "application/json"},
+                           content=json.dumps({"current_password": PASSWORD, "new_password": STRONG_PASSWORD + "\ud800"}))
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Password contains an invalid Unicode character"}
+    assert client.get("/api/auth/me").json()["session_version"] == 0
+    assert login(client, EMAIL, PASSWORD).status_code == 200
+
+
+def test_reset_wins_race_with_password_change(authenticated_client, monkeypatch):
+    admin = authenticated_client
+    created = admin.post("/api/users", headers=GUI, json={
+        "email": "member@example.test", "name": "Member", "role_id": role_id("Developer"),
+    }).json()
+    original = created["temporary_password"]
+    with TestClient(app, base_url="http://localhost") as member:
+        assert login(member, created["email"], original).status_code == 200
+        verify = auth.verify_password
+        reset = []
+
+        def reset_after_verify(password, stored):
+            valid = verify(password, stored)
+            if password == original:
+                result = admin.post(f"/api/users/{created['id']}/reset-password", headers=GUI)
+                assert result.status_code == 200
+                reset.append(result.json()["temporary_password"])
+            return valid
+
+        with monkeypatch.context() as patch:
+            patch.setattr(auth, "verify_password", reset_after_verify)
+            response = change_password(member, original, STRONG_PASSWORD)
+        assert response.status_code == 401 and "set-cookie" not in response.headers
+        assert member.get("/api/auth/me").status_code == 401
+        assert login(member, created["email"], STRONG_PASSWORD).status_code == 401
+        signed_in = login(member, created["email"], reset[0])
+        assert signed_in.status_code == 200 and signed_in.json()["must_change_password"] is True
+        assert signed_in.json()["session_version"] == 1
 
 
 def test_roles_crud_counts_locked_names_and_errors(authenticated_client):
@@ -335,7 +543,7 @@ def test_roles_crud_counts_locked_names_and_errors(authenticated_client):
 def test_user_assignment_validation_and_self_lockout(authenticated_client):
     client = authenticated_client
     developer = role_id("Developer")
-    body = {"email": "new@example.test", "name": "New", "password": PASSWORD, "role_id": developer}
+    body = {"email": "new@example.test", "name": "New", "role_id": developer}
     for change in ({"role_id": 999999},):
         assert client.post("/api/users", headers=GUI, json={**body, **change}).status_code == 404
     for change in ({"role": "admin"}, {"routes": ["accounts"]}, {"role_id": None}):
@@ -351,18 +559,19 @@ def test_user_assignment_validation_and_self_lockout(authenticated_client):
     assert client.patch(url, headers=GUI, json={"role_id": role_id("Owner")}).status_code == 200
     assert client.get("/api/users").json()[-1]["role"]["name"] == "Owner"
     # Reassigning an account changes its grants without minting another cookie.
-    member = TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(created)})
-    assert member.get("/api/roles").status_code == 200
-    assert client.patch(url, headers=GUI, json={"role_id": developer}).status_code == 200
-    assert member.get("/api/roles").status_code == 403
-    member.close()
+    with TestClient(app, base_url="http://localhost") as member:
+        assert login(member, created["email"], created["temporary_password"]).status_code == 200
+        assert change_password(member, created["temporary_password"], "Another!Pass3").status_code == 200
+        assert member.get("/api/roles").status_code == 200
+        assert client.patch(url, headers=GUI, json={"role_id": developer}).status_code == 200
+        assert member.get("/api/roles").status_code == 403
 
 
 def test_shared_role_edit_cannot_remove_own_accounts_access(authenticated_client):
     client = authenticated_client
     role = new_role(client, name="Administrator", routes=["accounts"])
     with db.connect() as conn:
-        actor = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('manager@test','Manager','unused',%s) RETURNING id",
+        actor = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('manager@test','Manager','unused',%s) RETURNING id,session_version",
                              (role["id"],)).fetchone()
         conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('coworker@test','Coworker','unused',%s)", (role["id"],))
     manager = TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(actor)})
@@ -379,7 +588,7 @@ def test_inactive_owners_do_not_allow_last_active_owner_demotion(authenticated_c
     role = new_role(client, name="Administrator", routes=["accounts"])
     with db.connect() as conn:
         conn.execute("INSERT INTO users(email,name,password_hash,role_id,active) VALUES ('inactive@test','Inactive','unused',%s,false)", (role_id("Owner"),))
-        actor = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('manager@test','Manager','unused',%s) RETURNING id",
+        actor = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('manager@test','Manager','unused',%s) RETURNING id,session_version",
                              (role["id"],)).fetchone()
     manager = TestClient(app, base_url="http://localhost", cookies={auth.COOKIE: auth.sign_token(actor)})
     denied = manager.patch("/api/users/1", headers=GUI, json={"role_id": role["id"]})
@@ -392,7 +601,7 @@ def test_concurrent_demotions_leave_one_active_owner(authenticated_client):
     owner = role_id("Owner")
     with db.connect() as conn:
         second = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('second@test','Second','unused',%s) RETURNING id", (owner,)).fetchone()["id"]
-        actor = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('manager@test','Manager','unused',%s) RETURNING id", (role["id"],)).fetchone()
+        actor = conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES ('manager@test','Manager','unused',%s) RETURNING id,session_version", (role["id"],)).fetchone()
     barrier = threading.Barrier(2)
 
     def demote(uid):
@@ -406,12 +615,18 @@ def test_concurrent_demotions_leave_one_active_owner(authenticated_client):
         assert conn.execute("SELECT count(*) AS n FROM users WHERE active AND role_id=%s", (owner,)).fetchone()["n"] == 1
 
 
-@pytest.mark.parametrize("password", ["x", "x" * 1024])
-def test_created_user_can_log_in_with_password_length_boundaries(authenticated_client, password):
-    body = {"email": "new@example.test", "name": "New", "password": password, "role_id": role_id("Developer")}
-    assert authenticated_client.post("/api/users", json=body, headers=GUI).status_code == 201
-    response = authenticated_client.post("/api/auth/login", json={"email": body["email"], "password": password}, headers=GUI)
-    assert response.status_code == 200 and response.json()["email"] == body["email"]
+@pytest.mark.parametrize("password,message", [
+    (" " * 12, "blank"), ("Aa1!" + "x" * 7, "12 to 128"), ("Aa1!" + "x" * 125, "12 to 128"),
+    ("aa1!" + "x" * 8, "uppercase"), ("AA1!" + "X" * 8, "lowercase"),
+    ("Aaaa!" + "x" * 7, "digit"), ("Aaa1é " + "x" * 6, "symbol"), ("AdMiN!123abc", "before @"),
+])
+def test_password_policy_rejects_each_rule(password, message):
+    assert message in auth.validate_password(password, EMAIL)
+
+
+@pytest.mark.parametrize("length", [12, 128])
+def test_password_policy_accepts_length_boundaries_and_short_local_parts(length):
+    assert auth.validate_password("Aa1!" + "x" * (length - 4), "aa@example.test") is None
 
 
 def test_password_hash_is_salted_and_bad_hashes_do_not_raise():
@@ -508,7 +723,7 @@ def test_user_and_api_limits_are_per_user(authenticated_client, monkeypatch):
     assert response.status_code == 429 and response.headers["Retry-After"] == "60"
     # A second user has an independent API bucket.
     with db.connect() as conn:
-        second = conn.execute("INSERT INTO users(email,name,password_hash,role_id) SELECT 'two@example.test','Two','unused',id FROM roles WHERE name='Developer' RETURNING id").fetchone()
+        second = conn.execute("INSERT INTO users(email,name,password_hash,role_id) SELECT 'two@example.test','Two','unused',id FROM roles WHERE name='Developer' RETURNING id,session_version").fetchone()
     authenticated_client.cookies.set(auth.COOKIE, auth.sign_token(second), domain="localhost.local", path="/")
     assert authenticated_client.get("/api/auth/me").status_code == 200
 
@@ -541,6 +756,7 @@ def test_first_admin_seed_only_when_empty(authenticated_client, monkeypatch, cap
         users = conn.execute("SELECT * FROM users").fetchall()
     if password:
         assert len(users) == 1 and users[0]["email"] == "seed@example.test" and users[0]["role_id"] == role_id("Owner")
+        assert users[0]["must_change_password"] is False and users[0]["session_version"] == 0
         assert auth.verify_password(password, users[0]["password_hash"])
         assert authenticated_client.post("/api/auth/login", json={
             "email": "seed@example.test", "password": password}, headers=GUI).status_code == 200
@@ -567,6 +783,31 @@ def test_invalid_bootstrap_password_is_not_in_startup_traceback(authenticated_cl
     assert "secret123" not in caplog.text
     with db.connect() as conn:
         assert conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"] == 0
+
+
+def test_seeded_admin_can_be_reset_and_restart_preserves_reset(authenticated_client, monkeypatch):
+    admin = authenticated_client
+    monkeypatch.setenv("ADMIN_EMAIL", "seed@example.test")
+    monkeypatch.setenv("ADMIN_PASSWORD", "weak")
+    owner = role_id("Owner")
+    with db.connect() as conn:
+        conn.execute("DELETE FROM users")
+    with TestClient(app, base_url="http://localhost") as seeded:
+        signed_in = login(seeded, "seed@example.test", "weak")
+        assert signed_in.status_code == 200 and signed_in.json()["must_change_password"] is False
+        seed_id = signed_in.json()["id"]
+        assert change_password(seeded, "weak", "alsoweak").status_code == 400
+        with db.connect() as conn:
+            conn.execute("INSERT INTO users(email,name,password_hash,role_id) VALUES (%s,'Admin',%s,%s)",
+                         (EMAIL, auth.hash_password(PASSWORD), owner))
+        assert login(admin, EMAIL, PASSWORD).status_code == 200
+        reset = admin.post(f"/api/users/{seed_id}/reset-password", headers=GUI)
+        assert reset.status_code == 200 and seeded.get("/api/auth/me").status_code == 401
+    with TestClient(app, base_url="http://localhost") as restarted:
+        assert login(restarted, "seed@example.test", "weak").status_code == 401
+        signed_in = login(restarted, "seed@example.test", reset.json()["temporary_password"])
+        assert signed_in.status_code == 200 and signed_in.json()["must_change_password"] is True
+        assert signed_in.json()["session_version"] == 1
 
 
 @pytest.mark.parametrize("error", [RuntimeError, ValueError])
