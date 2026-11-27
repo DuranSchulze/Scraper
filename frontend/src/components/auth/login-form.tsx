@@ -6,7 +6,7 @@ import { CircleAlert, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError, announceSessionChange, post } from "@/lib/api";
+import { ApiError, CHANGE_PASSWORD, announceSessionChange, post } from "@/lib/api";
 import type { User } from "@/lib/types";
 
 /** Only same-origin paths are followed after sign-in; the browser's own URL parser decides what is same-origin. */
@@ -33,10 +33,10 @@ export function LoginForm() {
     setPending(true);
     setError("");
     try {
-      await post<User>("/api/auth/login", { email, password });
+      const user = await post<User>("/api/auth/login", { email, password });
       announceSessionChange();
-      // Full navigation: starts with an empty query cache for this account.
-      window.location.href = safeNext(requested);
+      // Full navigation: starts with an empty query cache for this account. A temporary password opens nothing else first.
+      window.location.href = user.must_change_password ? CHANGE_PASSWORD : safeNext(requested);
     } catch (err) {
       const wait = err instanceof ApiError && err.status === 429 ? Math.max(1, Math.ceil((err.retryAfter ?? 60) / 60)) : 0;
       setError(wait ? `Too many attempts. Try again in about ${wait} minute${wait > 1 ? "s" : ""}.`

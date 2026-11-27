@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Lock, Pencil, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Lock, Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -16,7 +16,7 @@ import { Pill } from "@/components/review/badges";
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { PageHeader } from "@/components/shell/page-header";
 import { Pick } from "@/components/review/pick";
-import { deleteRole, keys, post, rolesQuery, saveRole, setUserRole, usersQuery } from "@/lib/api";
+import { deleteRole, keys, meQuery, post, resetPassword, rolesQuery, saveRole, setUserRole, usersQuery } from "@/lib/api";
 import { stamp } from "@/lib/format";
 import { ROUTES, type Account, type Role, type RouteKey } from "@/lib/types";
 import { GRACE_SECONDS, Spinner, useGuarded } from "@/lib/guarded";
@@ -36,7 +36,10 @@ const pages = (routes: RouteKey[]) => routes.map((r) => ROUTE_LABEL[r]).join(", 
 export function AccountsView() {
   const { data: users, error, isPending } = useQuery(usersQuery);
   const { data: roles } = useQuery(rolesQuery);
+  const { data: me } = useQuery(meQuery);
   const [open, setOpen] = useState(false);
+  // The one moment a temporary password is visible: the API never returns it again.
+  const [issued, setIssued] = useState<{ name: string; email: string; password: string; reset: boolean } | null>(null);
   const roleOptions = (roles ?? []).map((r) => ({ value: String(r.id), label: r.name }));
 
   return (
@@ -51,25 +54,35 @@ export function AccountsView() {
               <TableHead>Email</TableHead>
               <TableHead className="w-56">Role</TableHead>
               <TableHead>Created</TableHead>
+              <TableHead><span className="sr-only">Actions</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {(users ?? []).map((u: Account) => (
               <TableRow key={u.id} className="hover:bg-muted/40">
-                <TableCell className="font-medium">{u.name}</TableCell>
+                <TableCell className="font-medium">
+                  <span className="flex flex-wrap items-center gap-2">
+                    {u.name}
+                    {u.must_change_password && <Pill tone="warning">Temporary password</Pill>}
+                  </span>
+                </TableCell>
                 <TableCell className="break-all">{u.email}</TableCell>
                 <TableCell><RoleSelect account={u} options={roleOptions} /></TableCell>
                 <TableCell className="tabular-nums text-muted-foreground">{stamp(u.created_at)}</TableCell>
+                <TableCell className="text-right">
+                  {me && u.id !== me.id && <ResetPassword account={u} onIssued={(password) => setIssued({ name: u.name, email: u.email, password, reset: true })} />}
+                </TableCell>
               </TableRow>
             ))}
-            {error && <TableRow><TableCell colSpan={4} role="alert" className="py-8 text-center text-destructive">{error.message}</TableCell></TableRow>}
-            {!error && !isPending && !users?.length && <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground">No accounts yet.</TableCell></TableRow>}
+            {error && <TableRow><TableCell colSpan={5} role="alert" className="py-8 text-center text-destructive">{error.message}</TableCell></TableRow>}
+            {!error && !isPending && !users?.length && <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">No accounts yet.</TableCell></TableRow>}
             {!error && isPending && Array.from({ length: 3 }, (_, i) => (
               <TableRow key={`sk-${i}`} className="hover:bg-transparent">
                 <TableCell>{i === 0 && <LoadingLabel>Loading accounts…</LoadingLabel>}<Skeleton className="h-4 w-28" /></TableCell>
                 <TableCell><Skeleton className="h-4 w-44" /></TableCell>
                 <TableCell><Skeleton className="h-8 w-40" /></TableCell>
                 <TableCell><Skeleton className="h-4 w-28" /></TableCell>
+                <TableCell />
               </TableRow>
             ))}
           </TableBody>
@@ -77,8 +90,66 @@ export function AccountsView() {
       </Card>
       <RolesSection roles={roles} />
       {/* Remounted per open so the draft always starts empty. */}
-      {open && roles && <NewAccountDialog roles={roles} onClose={() => setOpen(false)} />}
+      {open && roles && <NewAccountDialog roles={roles} onClose={() => setOpen(false)}
+        onCreated={(u) => setIssued({ name: u.name, email: u.email, password: u.temporary_password, reset: false })} />}
+      {issued && <IssuedPassword {...issued} onClose={() => setIssued(null)} />}
     </div>
+  );
+}
+
+/** Replaces the account's password with a new temporary one and signs it out everywhere. */
+function ResetPassword({ account, onIssued }: { account: Account; onIssued: (password: string) => void }) {
+  const qc = useQueryClient();
+  const [asking, setAsking] = useState(false);
+  const reset = useMutation({
+    // The secret goes straight to the reveal and the mutation resolves empty, so the query cache never holds it.
+    mutationFn: async () => { onIssued((await resetPassword(account.id)).temporary_password); },
+    onSuccess: () => setAsking(false),
+    onError: (e: Error) => { setAsking(false); toast.error(`Could not reset ${account.name}'s password: ${e.message}`); },
+    onSettled: () => qc.invalidateQueries({ queryKey: keys.users }),
+  });
+  return (
+    <>
+      <Button size="sm" variant="outline" onClick={() => setAsking(true)} disabled={reset.isPending}>
+        <KeyRound className="h-4 w-4 shrink-0" /> Reset password
+      </Button>
+      <ConfirmDialog open={asking} onOpenChange={(o) => !reset.isPending && setAsking(o)} pending={reset.isPending}
+        title={`Reset ${account.name}'s password?`} confirmLabel="Reset password"
+        description={`${account.name} is signed out everywhere and must sign in with a new temporary password, then choose their own.`}
+        onConfirm={() => reset.mutate()} />
+    </>
+  );
+}
+
+/** Shows a fresh temporary password once, with copy, until the admin closes it. */
+function IssuedPassword({ name, email, password, reset, onClose }: { name: string; email: string; password: string; reset: boolean; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try { await navigator.clipboard.writeText(password); setCopied(true); }
+    catch { toast.error("Could not copy. Select the password and copy it by hand."); }
+  }
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{reset ? `New temporary password for ${name}` : `Account created for ${name}`}</DialogTitle>
+          <DialogDescription>
+            Give this to {name} ({email}) privately. They sign in with it once, then choose their own password.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="temp-password" className="sr-only">Temporary password</Label>
+          <Input id="temp-password" readOnly value={password} onFocus={(e) => e.currentTarget.select()} className="h-10 font-mono" />
+          <Button type="button" variant="outline" className="h-10" onClick={copy} aria-live="polite">
+            {copied ? <><Check className="h-4 w-4 shrink-0" /> Copied</> : <><Copy className="h-4 w-4 shrink-0" /> Copy</>}
+          </Button>
+        </div>
+        <p className="rounded-lg bg-warning/20 px-3 py-2 text-sm">This password is shown only once. If it&apos;s lost, reset it again.</p>
+        <DialogFooter>
+          <Button type="button" onClick={onClose}>Done</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -249,26 +320,25 @@ function RoleDialog({ role, onClose }: { role: Role | null; onClose: () => void 
   );
 }
 
-function NewAccountDialog({ roles, onClose }: { roles: Role[]; onClose: () => void }) {
+function NewAccountDialog({ roles, onClose, onCreated }: { roles: Role[]; onClose: () => void; onCreated: (u: Account & { temporary_password: string }) => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   // Default to the first unlocked role, so a new account is never an Owner by accident.
   const [roleId, setRoleId] = useState(String((roles.find((r) => !r.locked) ?? roles[0])?.id ?? ""));
   const [error, setError] = useState("");
   const role = roles.find((r) => String(r.id) === roleId);
   const create = useMutation({
-    mutationFn: () => post<Account>("/api/users", { name, email, password, role_id: Number(roleId) }),
-    onSuccess: (u) => {
-      toast.success(`Account created for ${u.email}`);
+    // The secret goes straight to the reveal and the mutation resolves empty, so the query cache never holds it.
+    mutationFn: async () => { onCreated(await post<Account & { temporary_password: string }>("/api/users", { name, email, role_id: Number(roleId) })); },
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: keys.users });
       qc.invalidateQueries({ queryKey: keys.roles });
       onClose();
     },
     onError: (e: Error) => setError(e.message),
   });
-  const valid = name.trim() && email.trim() && password && roleId;
+  const valid = name.trim() && email.trim() && roleId;
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o && !create.isPending) onClose(); }}>
@@ -276,7 +346,7 @@ function NewAccountDialog({ roles, onClose }: { roles: Role[]; onClose: () => vo
         <form onSubmit={(e) => { e.preventDefault(); setError(""); create.mutate(); }} className="flex flex-col gap-4" noValidate>
           <DialogHeader>
             <DialogTitle>New account</DialogTitle>
-            <DialogDescription>The person signs in with this email and password. Share the password securely.</DialogDescription>
+            <DialogDescription>A temporary password is created for them. They choose their own the first time they sign in.</DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="acc-name">Name</Label>
@@ -285,10 +355,6 @@ function NewAccountDialog({ roles, onClose }: { roles: Role[]; onClose: () => vo
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="acc-email">Email</Label>
             <Input id="acc-email" type="email" autoComplete="off" value={email} onChange={(e) => setEmail(e.target.value)} />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="acc-password">Password</Label>
-            <Input id="acc-password" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="acc-role">Role</Label>

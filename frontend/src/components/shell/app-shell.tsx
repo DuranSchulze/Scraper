@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { Menu as MenuPrimitive } from "@base-ui/react/menu";
-import { ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, RefreshCw, ScanSearch, ScrollText, Sun, Users } from "lucide-react";
+import { KeyRound, ListChecks, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, RefreshCw, ScanSearch, ScrollText, Sun, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
@@ -13,10 +13,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ConfirmDialog } from "@/components/review/confirm-dialog";
 import { StatusBar } from "@/components/scrape/status-bar";
 import { cancelQueued } from "@/lib/guarded";
-import { accountSwitched, announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
+import { CHANGE_PASSWORD, accountSwitched, announceSessionChange, canUse, markSigningOut, meQuery, post, statusQuery } from "@/lib/api";
 import { toggleTheme, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { LoadingLabel, Skeleton } from "@/components/ui/skeleton";
+import { PageSkeleton } from "@/components/shell/route-guard";
 
 // Nav stays plain data, grouped like modern app shells. Each item needs its grant on the account's role
 // (pages and the API check again).
@@ -194,6 +195,10 @@ function SidebarContent({ tip, collapsed, showCollapse, onNavigate, onLogout }: 
                     {theme === "dark" ? "Light mode" : "Dark mode"}
                   </MenuPrimitive.Item>
                 )}
+                <MenuPrimitive.Item render={<Link href={CHANGE_PASSWORD} onClick={onNavigate} />} className={ITEM}>
+                  <KeyRound aria-hidden />
+                  Change password
+                </MenuPrimitive.Item>
                 <MenuPrimitive.Item onClick={onLogout} className={cn(ITEM, "text-destructive data-highlighted:bg-destructive/10 data-highlighted:text-destructive")}>
                   <LogOut aria-hidden />
                   Sign out
@@ -220,12 +225,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [signingOut, setSigningOut] = useState(false);
   // Another tab changed the account and this page's reload was declined: nothing here may start a request.
   const [stale, setStale] = useState(false);
-  const { data: me } = useQuery(meQuery);
+  const { data: me, isError: meFailed } = useQuery(meQuery);
   // A /me refetch reporting another account than this page loaded as: same lock as a broadcast whose reload was declined.
   // Re-read on every /me change; latched in api.ts, so it never unlocks without a reload.
   const switched = !!me && accountSwitched();
   useEffect(() => { if (switched) cancelQueued(); }, [switched]);
   const locked = stale || switched;
+  // A temporary password (e.g. a bookmarked page, or an admin reset mid-session) leaves the app until it is replaced.
+  const mustChange = !!me?.must_change_password;
+  useEffect(() => { if (mustChange) window.location.replace(CHANGE_PASSWORD); }, [mustChange]);
 
   // Turn transitions on after the first painted frame, so the saved state never animates in on load.
   useEffect(() => {
@@ -274,6 +282,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // Full page load clears every cached query from this session.
     // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- a full load is the point: it empties the query cache
     window.location.href = "/login";
+  }
+
+  // The shell polls protected endpoints, so nothing in it mounts until /me confirms a usable password.
+  if ((!me && !meFailed) || mustChange) {
+    return <main className="mx-auto w-full max-w-5xl p-4 lg:p-6"><PageSkeleton label={mustChange ? "Redirecting…" : "Loading…"} /></main>;
   }
 
   return (

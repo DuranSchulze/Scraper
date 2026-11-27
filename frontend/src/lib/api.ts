@@ -237,13 +237,19 @@ export const meQuery = queryOptions({
 export const PAGES = [["review", "/"], ["scraping", "/scraping"], ["accounts", "/accounts"]] as const;
 /** Fallback home for an account whose grants open no page here. */
 export const NO_PAGE = "/no-access";
-export const canUse = (me: User | undefined, route: RouteKey) => !!me && me.routes.includes(route);
-export const homeFor = (me: User) => PAGES.find(([r]) => canUse(me, r))?.[1] ?? NO_PAGE;
+/** Where an account on a temporary password must go before it may open anything else. */
+export const CHANGE_PASSWORD = "/change-password";
+// A temporary password opens no page: the API refuses everything but /me, logout and the password change.
+export const canUse = (me: User | undefined, route: RouteKey) => !!me && !me.must_change_password && me.routes.includes(route);
+export const homeFor = (me: User) => me.must_change_password ? CHANGE_PASSWORD : PAGES.find(([r]) => canUse(me, r))?.[1] ?? NO_PAGE;
 
 export const usersQuery = queryOptions({
   queryKey: keys.users,
   queryFn: () => request<Account[]>("/api/users"),
 });
+export const resetPassword = (id: number) => post<{ temporary_password: string }>(`/api/users/${id}/reset-password`);
+export const changePassword = (current_password: string, new_password: string) =>
+  post<User>("/api/auth/password", { current_password, new_password });
 export const setUserRole = (id: number, role_id: number) =>
   request<Account>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify({ role_id }) });
 

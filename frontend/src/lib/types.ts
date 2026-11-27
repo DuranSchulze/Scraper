@@ -175,7 +175,7 @@ export type RoleRef = { id: number; name: string };
 /** A custom role: the pages its accounts may use. The locked Owner role always has every grant. */
 export type Role = RoleRef & { routes: RouteKey[]; locked: boolean; users: number };
 /** `routes` come from the account's role, re-read by the API on every request. */
-export type User = { id: number; email: string; name: string; role: RoleRef; routes: RouteKey[] };
+export type User = { id: number; email: string; name: string; role: RoleRef; routes: RouteKey[]; must_change_password: boolean; session_version: number };
 export type Account = User & { active: boolean; created_at: string };
 
 /** "none": a pending record checked against the directory with no match. null: not checked, or not pending. */
