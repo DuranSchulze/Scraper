@@ -25,6 +25,12 @@ export const stamp = (iso?: string | null) => {
   return p ? `${p.date} ${p.time}` : "";
 };
 
+/** "9:23 AM" in Philippine time; "" when unknown. */
+export const phTime12 = (iso?: string | null) => {
+  const t = iso ? Date.parse(iso) : NaN;
+  return isFinite(t) ? PH_TIME_12.format(t) : "";
+};
+
 const toTime = (iso?: string | number | null) => typeof iso === "number" ? iso : iso ? Date.parse(iso) : NaN;
 
 /** "24 Nov 2026, 09:23 PHT"; "" when unknown. */

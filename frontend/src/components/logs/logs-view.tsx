@@ -16,7 +16,7 @@ import { Pill } from "@/components/review/badges";
 import { DateRangeFilter } from "@/components/review/date-range";
 import { DEFAULT_PAGE_SIZE, TablePager } from "@/components/ui/table-pager";
 import { logsDailyQuery, logsExportUrl, logsJobsQuery, logsPublishedQuery, logsSummaryQuery } from "@/lib/api";
-import { day, phDateTime, stamp } from "@/lib/format";
+import { day, phDateTime, phDateTime12, phTime12 } from "@/lib/format";
 import type { JobStatus, LogJob, LogRange } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -146,8 +146,8 @@ function SummaryTiles({ range }: { range: LogRange }) {
   const next = !s.schedule.enabled ? "Auto-scrape off" : s.next_run_at ? phDateTime(s.next_run_at) : "After the current job";
   return (
     <section aria-label="Summary" className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-      <Tile icon={CheckCircle2} label="Last complete scrape" value={s.last_complete_scrape_at ? stamp(s.last_complete_scrape_at) : "None yet"}
-        sub={s.last_full_scrape_at ? `Last full rescan ${stamp(s.last_full_scrape_at)}` : "No full rescan yet"} />
+      <Tile icon={CheckCircle2} label="Last complete scrape" value={s.last_complete_scrape_at ? phDateTime12(s.last_complete_scrape_at) : "None yet"}
+        sub={s.last_full_scrape_at ? `Last full rescan ${phDateTime12(s.last_full_scrape_at)}` : "No full rescan yet"} />
       <Tile icon={CalendarClock} label="Next automatic run" value={next}
         sub={s.schedule.enabled && s.schedule.interval_minutes ? `Every ${s.schedule.interval_minutes} min` : undefined} />
       <Tile icon={Inbox} label="Emails scraped" value={n(s.fetched.gmail)}
@@ -215,9 +215,9 @@ function JobsTable({ range }: { range: LogRange }) {
       <Table className="min-w-[960px]" containerClassName="overflow-auto">
         <TableHeader className={HEAD}>
           <TableRow className="hover:bg-transparent">
-            <TableHead className="pl-4">Started (PHT)</TableHead><TableHead>Run</TableHead><TableHead>Status</TableHead>
+            <TableHead className="pl-4">Date (PHT)</TableHead><TableHead>Time (PHT)</TableHead><TableHead>Run</TableHead><TableHead>Status</TableHead>
             <TableHead>Duration</TableHead><TableHead className="text-right">Mailboxes</TableHead>
-            <TableHead className="text-right">Emails fetched</TableHead><TableHead className="pr-4">Notes</TableHead>
+            <TableHead className="pr-4 text-right">Emails fetched</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody className="[&_td]:px-3 [&_td]:py-2.5">
@@ -234,7 +234,8 @@ function JobRow({ j }: { j: LogJob }) {
   const status = STATUS[j.status] ?? { label: j.status, tone: "neutral" as const };
   return (
     <TableRow className="align-top">
-      <TableCell className="pl-4 text-sm tabular-nums">{stamp(j.started_at)}</TableCell>
+      <TableCell className="pl-4 text-sm tabular-nums">{day(j.started_at)}</TableCell>
+      <TableCell className="whitespace-nowrap text-sm tabular-nums">{phTime12(j.started_at)}</TableCell>
       <TableCell>
         <span className="flex flex-wrap items-center gap-1">
           <span className="text-sm font-medium capitalize">{j.name}</span>
@@ -249,14 +250,15 @@ function JobRow({ j }: { j: LogJob }) {
           {/* "Done" already means complete; flag it only when a run finished with errors yet still counts as complete. */}
           {j.completed && j.status !== "done" && <Pill tone="success">Counts as complete</Pill>}
         </span>
+        {(j.failures > 0 || j.error) && (
+          <p className="mt-1 max-w-72 break-words text-xs text-muted-foreground">
+            {j.failures ? `${n(j.failures)} failure${j.failures === 1 ? "" : "s"}. ` : ""}{j.error ?? ""}
+          </p>
+        )}
       </TableCell>
       <TableCell className="text-sm tabular-nums">{duration(j.seconds) || DASH}</TableCell>
       <TableCell className="text-right text-sm tabular-nums">{j.mailboxes ? `${n(j.mailboxes_done)}/${n(j.mailboxes)}` : DASH}</TableCell>
-      <TableCell className="text-right text-sm tabular-nums">{n(j.emails_fetched)}</TableCell>
-      <TableCell className="max-w-72 pr-4 text-xs text-muted-foreground">
-        {j.failures ? `${n(j.failures)} failure${j.failures === 1 ? "" : "s"}. ` : ""}
-        <span className="break-words">{j.error ?? ""}</span>
-      </TableCell>
+      <TableCell className="pr-4 text-right text-sm tabular-nums">{n(j.emails_fetched)}</TableCell>
     </TableRow>
   );
 }
@@ -301,18 +303,19 @@ function PublishedTable({ range }: { range: LogRange }) {
       <Table containerClassName="overflow-auto">
         <TableHeader className={HEAD}>
           <TableRow className="hover:bg-transparent">
-            <TableHead className="pl-4">Client</TableHead><TableHead>First added (PHT)</TableHead><TableHead className="pr-4">Approved by</TableHead>
+            <TableHead className="pl-4">Client</TableHead><TableHead>Date added (PHT)</TableHead><TableHead>Time (PHT)</TableHead><TableHead className="pr-4">Approved by</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody className="[&_td]:px-3 [&_td]:py-2.5">
-          <Rows cols={3} loading={isPending} error={error} empty={!!data && !data.rows.length}>
+          <Rows cols={4} loading={isPending} error={error} empty={!!data && !data.rows.length}>
             {data?.rows.map((p) => (
               <TableRow key={p.id} className="align-top">
                 <TableCell className="max-w-64 pl-4">
                   <span className="block truncate text-sm font-medium">{p.name || "Unnamed"}</span>
                   <span className="block truncate text-xs text-muted-foreground">{p.email}{p.company ? ` · ${p.company}` : ""}</span>
                 </TableCell>
-                <TableCell className="text-sm tabular-nums">{stamp(p.first_published_at)}</TableCell>
+                <TableCell className="text-sm tabular-nums">{day(p.first_published_at)}</TableCell>
+                <TableCell className="whitespace-nowrap text-sm tabular-nums">{phTime12(p.first_published_at)}</TableCell>
                 <TableCell className="pr-4 text-sm">{p.reviewed_by || DASH}</TableCell>
               </TableRow>
             ))}
